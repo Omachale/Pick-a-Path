@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en-NZ">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#1e3a63" />
+    <title>Sky Path — diorama test</title>
+    <style>
+      :root {
+        --ink: #12212f;
+        --paper: #f4f7fa;
+        --edge: rgba(18, 33, 47, 0.28);
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1e3a63;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        overscroll-behavior: none;
+      }
+      canvas { display: block; touch-action: none; }
+
+      #hud {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 8px);
+        left: 8px;
+        z-index: 10;
+        font: 500 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: var(--paper);
+        background: rgba(10, 20, 30, 0.45);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        padding: 7px 10px;
+        border-radius: 8px;
+        pointer-events: none;
+        letter-spacing: 0.02em;
+      }
+      #hud b { font-weight: 700; }
+
+      #role {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 8px);
+        right: 8px;
+        z-index: 10;
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 999px;
+        font: 700 13px/1 system-ui, sans-serif;
+        color: #12212f;
+        background: #ffe9b8;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+      }
+      #role[data-role="player"] { background: #cddbe8; }
+
+      #controls {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+        z-index: 10;
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        padding: 0 12px;
+      }
+      #controls button {
+        flex: 1 1 0;
+        max-width: 200px;
+        min-height: 58px;
+        border: 0;
+        border-radius: 14px;
+        font: 700 16px/1.2 system-ui, sans-serif;
+        color: #12212f;
+        background: var(--paper);
+        box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+      }
+      #controls button:active { transform: translateY(2px); }
+      #controls button:disabled { opacity: 0.35; }
+      #controls button.hidden { display: none; }
+
+      #hint {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 82px);
+        z-index: 10;
+        text-align: center;
+        font: 500 12px/1.4 system-ui, sans-serif;
+        color: rgba(244, 247, 250, 0.82);
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+        pointer-events: none;
+        padding: 0 20px;
+      }
+
+      #loader {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-content: center;
+        gap: 14px;
+        justify-items: center;
+        background: #1e3a63;
+        color: var(--paper);
+        font: 500 13px/1.4 system-ui, sans-serif;
+        transition: opacity 0.45s ease;
+      }
+      #loader.done { opacity: 0; pointer-events: none; }
+      #bar {
+        width: 190px;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.2);
+        overflow: hidden;
+      }
+      #bar > i {
+        display: block;
+        height: 100%;
+        width: 0%;
+        background: #ffe9b8;
+        transition: width 0.2s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loader">
+      <div>Loading sky path…</div>
+      <div id="bar"><i></i></div>
+    </div>
+
+    <div id="hud">—</div>
+    <button id="role" data-role="guide">Guide view</button>
+
+    <p id="hint">Drag to look around</p>
+    <div id="controls">
+      <button id="left" class="hidden">◀ Left</button>
+      <button id="right" class="hidden">Right ▶</button>
+      <button id="reset" class="hidden">Again</button>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

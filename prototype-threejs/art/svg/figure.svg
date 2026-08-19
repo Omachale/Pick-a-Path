@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="560" viewBox="0 0 320 560">
+    <g stroke="#22303c" stroke-width="10" stroke-linejoin="round">
+      <!-- robe -->
+      <path d="M160 190 C 214 190 236 250 246 420 L 258 494 L 62 494 L 74 420 C 84 250 106 190 160 190 Z" fill="#3f8f8a"/>
+      <!-- shaded left side, painted-on form -->
+      <path d="M160 190 C 106 190 84 250 74 420 L 62 494 L 138 494 L 132 420 C 128 280 138 214 160 190 Z" fill="#2a615e" stroke="none"/>
+      <!-- arms -->
+      <path d="M96 250 C 68 292 62 344 70 386" fill="none" stroke-linecap="round"/>
+      <path d="M224 250 C 252 292 258 344 250 386" fill="none" stroke-linecap="round"/>
+      <!-- head -->
+      <circle cx="160" cy="132" r="62" fill="#e8b98d"/>
+      <!-- hood brim -->
+      <path d="M92 118 C 104 62 216 62 228 118 C 200 92 120 92 92 118 Z" fill="#2a615e"/>
+    </g>
+    <g fill="#22303c">
+      <circle cx="139" cy="140" r="8"/>
+      <circle cx="184" cy="140" r="8"/>
+    </g>
+  </svg>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="1024" viewBox="0 0 2048 1024"><rect width="2048" height="1024" fill="#5b93c4"/>
+    <defs>
+      <!--
+        Top half is sky above the horizon. Below the pale horizon band the
+        gradient darkens again — that is the view *downwards* into depth, and
+        it is what makes the path feel high up rather than laid on a white floor.
+      -->
+      <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"   stop-color="#1e3a63"/>
+        <stop offset="30%"  stop-color="#5b93c4"/>
+        <stop offset="52%"  stop-color="#a8cfe0"/>
+        <stop offset="58%"  stop-color="#f2cf9a"/>
+        <stop offset="66%"  stop-color="#a8cfe0"/>
+        <stop offset="82%"  stop-color="#3f74a8"/>
+        <stop offset="100%" stop-color="#1d3f66"/>
+      </linearGradient>
+      <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+        <stop offset="0%"   stop-color="#ffe9b8" stop-opacity="0.95"/>
+        <stop offset="45%"  stop-color="#ffe9b8" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="#ffe9b8" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect width="2048" height="1024" fill="url(#sky)"/>
+    <circle cx="1351.68" cy="573.44" r="307.2" fill="url(#glow)"/>
+    <circle cx="1351.68" cy="573.44" r="32.768" fill="#ffe9b8"/>
+  </svg>
