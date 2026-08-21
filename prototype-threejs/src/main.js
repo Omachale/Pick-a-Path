@@ -8,62 +8,84 @@
  *
  * Everything visible is a flat panel with a painted-on dark edge. The only
  * things that are lit or cast shadows are the ground, the figure and the
- * pillar — that inter-layer shadow is what sells the diorama.
+ * pillars — that inter-layer shadow is what sells the diorama.
  */
 
 import * as THREE from 'three';
 
 const T_START = performance.now();
 
-// ---------------------------------------------------------------- geometry of the path
+// ---------------------------------------------------------------- journey shape
 //
-// The path artwork is a 1024px square laid flat on the ground. These two
-// helpers convert a pixel position in that artwork to a world position, so
-// waypoints stay in sync with the texture if the art is redrawn.
+// The path is generated as a chain of straight legs (a "trunk" leading to a
+// fork, then a "branch" out of it) advancing from a running cursor of
+// {x, z, heading}. heading 0 means "walking toward -Z", which is also the
+// direction the temple sits in. Because the actual choice made at each fork
+// determines the heading of everything downstream. Because the correct side
+// at every fork is fixed in advance, the whole route can nonetheless be built
+// before the player moves — see buildJourney() below.
 
-const GROUND = 14; // world units per side of the ground plane
-const px2x = (X) => (X / 1024 - 0.5) * GROUND;
-const px2z = (Y) => -GROUND / 2 + (Y / 1024) * GROUND;
+const N_FORKS = 6; // fixed for a given round; would come from teacher setup in a real build
+const FORK_HALF_ANGLE = THREE.MathUtils.degToRad(12); // each branch's turn off centre — kept tight so a run of same-direction picks can't build up a big drift
+const HEADING_CORRECTION = 0.7; // fraction of heading drift straightened out during the trunk that follows a branch
+const TRUNK_SEGMENTS = 4;
+const BRANCH_SEGMENTS = 3;
 
-const FORK = { x: px2x(512), z: px2z(560) };
+// The temple's distance is the one dial that matters for pacing — everything
+// below derives from it, so changing it doesn't require re-tuning trunk and
+// branch lengths by hand. CRUISE_FRACTION is how much of that distance the
+// N_FORKS ordinary forks cover; the gap between CRUISE_FRACTION and
+// STOP_FRACTION is the dramatic final close-in walked only on a correct last
+// pick (see choose()); the last (1 - STOP_FRACTION) is just clearance so the
+// camera never ends up clipped into the temple's plane.
+const TEMPLE_DISTANCE = 70; // straight-line world distance from spawn to the temple
+const CRUISE_FRACTION = 0.75;
+const STOP_FRACTION = 0.9;
+const CRUISE_DISTANCE = TEMPLE_DISTANCE * CRUISE_FRACTION;
+const APPROACH_DISTANCE = TEMPLE_DISTANCE * (STOP_FRACTION - CRUISE_FRACTION);
 
-const TRUNK = [
-  { x: px2x(512), z: px2z(1000) },
-  { x: px2x(512), z: px2z(880) },
-  { x: px2x(512), z: px2z(760) },
-  { x: px2x(512), z: px2z(640) },
-  FORK,
-];
+// Trunk:branch pacing shape (branch slightly longer than trunk) — only the
+// ratio matters here, the absolute scale is fixed below by CRUISE_DISTANCE.
+const ROUND_SHAPE_TRUNK = 6.0;
+const ROUND_SHAPE_BRANCH = 6.5;
+const ROUND_UNIT = ROUND_SHAPE_TRUNK + ROUND_SHAPE_BRANCH * Math.cos(FORK_HALF_ANGLE);
+const ROUND_SCALE = CRUISE_DISTANCE / (N_FORKS * ROUND_UNIT);
+const TRUNK_LEN = ROUND_SHAPE_TRUNK * ROUND_SCALE;
+const BRANCH_LEN = ROUND_SHAPE_BRANCH * ROUND_SCALE;
 
-const branch = (tipX) => {
-  const tip = { x: px2x(tipX), z: px2z(96) };
-  return [0.34, 0.67, 1].map((t) => ({
-    x: FORK.x + (tip.x - FORK.x) * t,
-    z: FORK.z + (tip.z - FORK.z) * t,
-  }));
-};
+// Correct side is randomised per fork — including runs of the same side
+// (left,left,left,... etc). The heading-correction step above pulls the
+// world-absolute heading back toward 0 after every fork regardless of which
+// side was taken, so a same-direction streak damps out rather than
+// compounding; nothing here assumes an alternating pattern.
+//
+// For testing a specific pattern (e.g. an all-left run to check how the path
+// visuals handle a strong sideways veer), append ?forks=LLLRRR to the URL —
+// one L/R per fork, case-insensitive, missing/extra forks fall back to
+// random. Example: index.html?forks=LLLLLL
+function genCorrectSequence() {
+  const override = new URLSearchParams(location.search).get('forks');
+  return Array.from({ length: N_FORKS }, (_, i) => {
+    const forced = override?.[i]?.toUpperCase();
+    if (forced === 'L') return 'left';
+    if (forced === 'R') return 'right';
+    return Math.random() < 0.5 ? 'left' : 'right';
+  });
+}
+const CORRECT_BY_FORK = genCorrectSequence();
 
-const BRANCH = { left: branch(172), right: branch(852) };
-
-// Five forks make up the journey. The correct side varies per fork so the
-// guide/player mechanic actually gets exercised five times, not once.
-const ROUNDS = 5;
-const CORRECT_BY_FORK = ['left', 'right', 'left', 'right', 'left'];
-
-// The ground is one hand-painted tile (GROUND units tall) that isn't drawn to
-// tile seamlessly — round 2 onward is the same art translated one full tile
-// further away (-z). The seam where tiles meet will be visible; that's an
-// accepted placeholder trade-off for now, not a bug. TRUNK/FORK/BRANCH above
-// are round 0's pattern; every other round is that same pattern shifted.
-const shiftPt = (p, k) => ({ x: p.x, z: p.z - k * GROUND });
-const trunkFor = (k) => TRUNK.map((p) => shiftPt(p, k));
-const branchFor = (k, side) => BRANCH[side].map((p) => shiftPt(p, k));
-const forkFor = (k) => shiftPt(FORK, k);
-
-// Fork 1 = dawn, fork 3 = midday, fork 5 = dusk; 2 and 4 sit in between.
-// This is also the sun's position parameter: 0 = dawn horizon, 1 = dusk horizon.
-const TIME_OF_DAY = [0, 0.25, 0.5, 0.75, 1];
-const TIME_LABEL = ['Dawn', 'Morning', 'Midday', 'Afternoon', 'Dusk'];
+// Fork 1 = dawn, last fork = dusk, evenly spread between. Also doubles as the
+// sun's position parameter: 0 = dawn horizon, 1 = dusk horizon.
+function timeOfDay(forkIdx1) {
+  return N_FORKS <= 1 ? 0.5 : (forkIdx1 - 1) / (N_FORKS - 1);
+}
+function timeLabel(p) {
+  if (p < 0.15) return 'Dawn';
+  if (p < 0.4) return 'Morning';
+  if (p < 0.6) return 'Midday';
+  if (p < 0.85) return 'Afternoon';
+  return 'Dusk';
+}
 
 function dist(a, b) {
   return Math.hypot(a.x - b.x, a.z - b.z);
@@ -72,6 +94,27 @@ function pathLength(pts) {
   let s = 0;
   for (let i = 1; i < pts.length; i++) s += dist(pts[i - 1], pts[i]);
   return s;
+}
+
+/** Unit-ish forward vector for a heading, scaled by d. heading 0 = -Z. */
+function forward(heading, d) {
+  return { x: Math.sin(heading) * d, z: -Math.cos(heading) * d };
+}
+function advance(pos, heading, d) {
+  const f = forward(heading, d);
+  return { x: pos.x + f.x, z: pos.z + f.z };
+}
+/** A straight run of `segments` waypoints from `from`, `len` total, along `heading`. */
+function genStraight(from, heading, len, segments) {
+  const pts = [];
+  for (let i = 1; i <= segments; i++) pts.push(advance(from, heading, (len * i) / segments));
+  return pts;
+}
+/** World position offset from a cursor by a lateral (right) and forward amount in its local frame. */
+function localToWorld(cursor, right, fwd) {
+  const f = forward(cursor.heading, fwd);
+  const r = forward(cursor.heading + Math.PI / 2, right);
+  return { x: cursor.x + f.x + r.x, z: cursor.z + f.z + r.z };
 }
 
 // ---------------------------------------------------------------- renderer / scene
@@ -86,7 +129,12 @@ renderer.setClearColor(0x1d3f66, 1);
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xbcd8ea, 24, 115);
+
+// One mild atmospheric fog for both roles — purely for depth. Hiding the
+// path ahead is no longer this fog's job: that's the curtain props standing
+// at each junction (see makeCurtain), which is why there is no longer a
+// per-role near/far swap here.
+scene.fog = new THREE.Fog(0xbcd8ea, 24, 260);
 
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 400);
 
@@ -184,11 +232,15 @@ manager.onProgress = (_url, loaded, total) => {
   bar.style.width = `${Math.round((loaded / total) * 100)}%`;
 };
 
-const tex = (name, { repeatWrap = false, ext = 'png' } = {}) => {
+const tex = (name, { repeatWrap = false, ext = 'png', linear = false, tile = false } = {}) => {
   const t = loader.load(`textures/${name}.${ext}`);
-  t.colorSpace = THREE.SRGBColorSpace;
+  // `linear` is for data textures (noise fields the shader does maths on)
+  // rather than pictures — sRGB decoding would bend the value distribution
+  // the shader is calibrated against.
+  t.colorSpace = linear ? THREE.NoColorSpace : THREE.SRGBColorSpace;
   t.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
   if (repeatWrap) t.wrapS = THREE.RepeatWrapping;
+  if (tile) t.wrapS = t.wrapT = THREE.RepeatWrapping;
   return t;
 };
 
@@ -203,12 +255,66 @@ const TEX = {
   cloudDeck: tex('cloud-deck', { repeatWrap: true }),
   cloudsFar: tex('clouds-far', { repeatWrap: true }),
   cloudsMid: tex('clouds-mid', { repeatWrap: true }),
-  path: tex('path'),
-  figure: tex('figure'),
+  stoneA: tex('stone-a'),
+  stoneB: tex('stone-b'),
+  stoneC: tex('stone-c'),
+  stoneD: tex('stone-d'),
   pillar: tex('pillar'),
   safe: tex('marker-safe'),
   hazard: tex('marker-hazard'),
+  fogNoise: tex('fog-noise', { linear: true, tile: true }),
+  fogPuff: tex('fog-puff'),
+  temple: tex('temple', { ext: 'webp' }),
+  gull1: tex('gull-1', { ext: 'webp' }),
+  gull2: tex('gull-2', { ext: 'webp' }),
 };
+
+// ---------------------------------------------------------------- character roster
+//
+// Each character ships as two textures (see art/split-character.mjs): the
+// character art itself, and its cardboard backing board split out separately
+// as a grayscale shape carrying the original fold/shadow lightness. Tinting
+// the backing's material colour recolours the board while keeping that
+// shading — see makeCharacterRig below. New characters just need an entry
+// here (run the split script once to produce the two textures) — the
+// selection screen and rig are both built from this list, not hardcoded to
+// any one character.
+//
+// TODO: once the user's other character images arrive (Assets/, same
+// die-cut-standee style as Player Indy.png, each on its own strong solid
+// backing colour), for each one:
+//   1. Resize to a working width (sharp, e.g. `.resize({ width: 400 })`) —
+//      match whatever the source's native aspect works out to; there's no
+//      fixed target height, see figure-indy at 400x563.
+//   2. Run `node art/split-character.mjs <resized.png> <output-name>` from
+//      prototype-threejs/ — it auto-detects that character's own backing hue,
+//      no per-image tuning needed unless the console output or the two
+//      resulting PNGs (public/textures/<output-name>.png and
+//      <output-name>-backing.png) look wrong on inspection.
+//   3. Add one entry to ROSTER below: { key, label, tex: '<output-name>' }.
+//   4. Sanity check both output images (Read tool renders PNGs) before
+//      wiring in — confirm the character cutout has no leftover background
+//      fringe and the backing silhouette has a clean character-shaped hole.
+const ROSTER = [{ key: 'indy', label: 'Explorer', tex: 'figure-indy' }];
+const CHAR_TEX = {};
+for (const c of ROSTER) {
+  CHAR_TEX[c.key] = { front: tex(c.tex), backing: tex(`${c.tex}-backing`) };
+}
+
+// A small fixed palette rather than a free colour picker — every option here
+// has been checked against the backing art, which a free picker couldn't
+// guarantee (very low saturation, for instance, would wash out the fold
+// shading the split preserves).
+const PALETTE = [
+  { key: 'blue', label: 'Blue', hex: 0x5a9fe0 },
+  { key: 'red', label: 'Red', hex: 0xd9564a },
+  { key: 'green', label: 'Green', hex: 0x5cb86c },
+  { key: 'yellow', label: 'Yellow', hex: 0xe0b93c },
+  { key: 'purple', label: 'Purple', hex: 0x9a6fd6 },
+  { key: 'orange', label: 'Orange', hex: 0xe08a3c },
+  { key: 'teal', label: 'Teal', hex: 0x3fb8b0 },
+  { key: 'pink', label: 'Pink', hex: 0xe07fb0 },
+];
 
 // ---------------------------------------------------------------- panel helpers
 
@@ -244,7 +350,7 @@ function backdrop(map, { w, h, x = 0, y = 0, z, order, fog = true, opacity = 1, 
  * pass and does not care that the material is unlit — and that shadow is what
  * ties the cut-out to the ground.
  */
-function cutout(map, { w, h, x = 0, y = 0, z, castShadow = true }) {
+function cutout(map, { w, h, x = 0, y = 0, z, castShadow = true, fog = true }) {
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(w, h),
     new THREE.MeshBasicMaterial({
@@ -252,6 +358,7 @@ function cutout(map, { w, h, x = 0, y = 0, z, castShadow = true }) {
       transparent: true,
       alphaTest: 0.45,
       side: THREE.DoubleSide,
+      fog,
     })
   );
   mesh.position.set(x, y + h / 2, z);
@@ -319,6 +426,43 @@ const horizonBank = backdrop(TEX.cloudsFar, { w: 200, h: 11, y: -2.5, z: -100, o
 const deckDeep = deck(TEX.cloudDeck, { w: 1800, d: 1200, y: -95, z: -800, repeat: [18, 12], order: 3, opacity: 0.55 });
 const deckHigh = deck(TEX.cloudDeck, { w: 900, d: 620, y: -40, z: -390, repeat: [11, 8], order: 4, opacity: 0.75 });
 
+// The temple: a single flat billboard-style cut-out, planted at a fixed world
+// position straight ahead. No manual scaling logic needed — a real
+// perspective camera makes it grow on its own as the player gets closer.
+// fog:false so it stays visible through the heavy player-side fog too; it's
+// meant to be the one landmark you can always see.
+// TODO: once the approach has more than one fork of buildup, add 2–3 layers
+// of props in front of it (pillars, trees) for depth — flat single billboard
+// is a deliberate placeholder for now.
+// TODO: a ground-plane "approach" image — cobblestones/steps laid flat,
+// perpendicular to the temple's own billboard, its near edge meeting the
+// temple's base — for the player to walk onto for the last stretch.
+// Source art was widened (2048x1112 -> 3686x1668: +80% width, +50% height —
+// not a uniform scale). TEMPLE_H below is scaled by that same +50% height
+// growth; TEMPLE_ASPECT is read straight from the new art, so width follows
+// along at its own correct +80% automatically rather than needing a second
+// constant to track.
+const TEMPLE_ASPECT = 1024 / 463;
+// Sized/placed so it starts noticeably large (~4x the frame-height fraction
+// a "realistic" small building at this distance would read as) and fills
+// nearly the whole frame by the final approach — measured directly in the
+// browser and tuned by eye, not derived from the sizing-note formula above.
+const TEMPLE_H = 13 * 1.5;
+const temple = cutout(TEX.temple, {
+  w: TEMPLE_H * TEMPLE_ASPECT,
+  h: TEMPLE_H,
+  x: 0,
+  z: -TEMPLE_DISTANCE,
+  castShadow: false,
+  fog: false,
+});
+// The temple sits farther out (z=-200) than the sky panel (z=-170), so
+// three.js's automatic back-to-front transparent sort draws it *before* the
+// sky — and the sky, despite depthWrite:false, still depth-tests, so it then
+// paints straight over it. Explicit renderOrder (higher than every backdrop
+// layer above, 0-4) forces it to always draw after them regardless of distance.
+temple.renderOrder = 4.5;
+
 // Four rows of clouds below the path, receding into the distance — replacing
 // the two single "wisp" panels that used to sit here.
 //
@@ -384,81 +528,836 @@ for (let i = 0; i < CLOUD_ROWS; i++) {
   cloudRows.push(row);
 }
 
-// The ground: the path artwork laid flat, alpha-cut so there is nothing but
-// sky either side of it, repeated once per round (see shiftPt above) so the
-// avatar can walk the whole 5-fork journey without ever resetting position.
-const groundMat = new THREE.MeshLambertMaterial({ map: TEX.path, transparent: true, alphaTest: 0.4 });
-for (let k = 0; k < ROUNDS; k++) {
-  const seg = new THREE.Mesh(new THREE.PlaneGeometry(GROUND, GROUND), groundMat);
-  seg.rotation.x = -Math.PI / 2;
-  seg.position.z = -k * GROUND;
-  seg.receiveShadow = true;
-  seg.renderOrder = 6;
-  scene.add(seg);
+// The ground is built from small paving-stone instances dropped along the
+// *actual* waypoints of the route — trunk, both branches of every fork, and
+// the final approach (see scatterAlong, driven by buildJourney below) —
+// rather than one rigid pre-shaped art tile. That's what makes it track the
+// player's real turns exactly, at any heading, instead of approximating them.
+//
+// Four stone-cluster textures round-robin so it doesn't read as an obvious
+// repeat. Each variant is one THREE.InstancedMesh — capped at a fixed
+// capacity generous enough for a full playthrough — so however many hundred
+// stones end up on screen, it's still only 4 draw calls, which matters for
+// holding frame rate on the target phone.
+const STONE_SIZE = 1.0; // world units, square
+const STONE_COLS = 3; // stones across the path width
+const PATH_WIDTH = 2.6;
+const ROW_SPACING = STONE_SIZE * 0.83; // rows overlap along the direction of travel too, so no gaps
+const STONE_CAPACITY = 200; // per variant — one playthrough's worth plus headroom
+
+const FLATTEN_Q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+const UP = new THREE.Vector3(0, 1, 0);
+const stoneDummy = new THREE.Object3D();
+const stoneYawQ = new THREE.Quaternion();
+
+function makeStoneMesh(map) {
+  const mesh = new THREE.InstancedMesh(
+    new THREE.PlaneGeometry(STONE_SIZE, STONE_SIZE),
+    new THREE.MeshLambertMaterial({ map }),
+    STONE_CAPACITY
+  );
+  mesh.count = 0;
+  mesh.receiveShadow = true;
+  mesh.renderOrder = 6;
+  // Instances move via per-instance matrices, not this mesh's own transform,
+  // which stays at the world origin forever — so THREE's default frustum
+  // culling (built from the base geometry's tiny bounding sphere sitting at
+  // that origin) culls the *entire* mesh the moment the origin itself drifts
+  // out of view, even while individual instances near the camera are still
+  // plainly on screen. Disabling culling is the fix; total instance count
+  // here is modest enough that this costs nothing measurable.
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return mesh;
+}
+const stoneMeshes = [TEX.stoneA, TEX.stoneB, TEX.stoneC, TEX.stoneD].map(makeStoneMesh);
+let stoneVariant = 0; // round-robins which mesh gets the next stone
+
+function placeStone(x, z) {
+  const mesh = stoneMeshes[stoneVariant % stoneMeshes.length];
+  stoneVariant++;
+  if (mesh.count >= STONE_CAPACITY) return; // headroom exhausted — drop silently rather than throw
+  stoneYawQ.setFromAxisAngle(UP, Math.random() * Math.PI * 2); // pavers don't need to face any particular way
+  stoneDummy.quaternion.copy(stoneYawQ).multiply(FLATTEN_Q);
+  stoneDummy.position.set(x, 0.01 + Math.random() * 0.01, z); // tiny y jitter avoids z-fighting between overlapping stones
+  stoneDummy.updateMatrix();
+  mesh.setMatrixAt(mesh.count, stoneDummy.matrix);
+  mesh.count++;
+  mesh.instanceMatrix.needsUpdate = true;
 }
 
-// Props beside the path, purely to throw shadows across the stones — one pair
-// per fork, offset the same way as the fork itself.
-for (let k = 0; k < ROUNDS; k++) {
-  const fz = forkFor(k).z;
-  cutout(TEX.pillar, { w: 1.0, h: 2.6, x: 1.55, z: fz + (3.6 - FORK.z) });
-  cutout(TEX.pillar, { w: 0.85, h: 2.2, x: -1.5, z: fz + (1.2 - FORK.z) });
-}
-
-// The avatar.
-const figure = cutout(TEX.figure, { w: 1.26, h: 2.2, x: TRUNK[0].x, z: TRUNK[0].z });
-
-// Guide-only overlay: which branch is safe, which is not. One pair per fork
-// (they sit at different world positions now that the path is continuous),
-// but only the pair at the fork currently being decided is ever visible —
-// updateMarkers() below enforces that, called from refreshUI().
-const markerSets = [];
-for (let k = 0; k < ROUNDS; k++) {
-  const set = {};
-  for (const side of ['left', 'right']) {
-    const at = branchFor(k, side)[0];
-    const m = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.15, 1.15),
-      new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, fog: false })
-    );
-    m.position.set(at.x, 1.5, at.z);
-    m.renderOrder = 9;
-    m.visible = false;
-    scene.add(m);
-    set[side] = m;
+/**
+ * Lays rows of stones along a chain of waypoints.
+ *
+ * `phase` is the distance walked since the last row was laid; it is passed in
+ * and returned rather than kept in module scope because the path is no longer
+ * one single chain. At a fork, *both* branches must start from the same phase
+ * (so the two sides look symmetrical leaving the fork), while the correct
+ * branch's end phase is what carries on into the trunk beyond it.
+ */
+function scatterAlong(fromPos, points, phase) {
+  let prev = fromPos;
+  let dSinceRow = phase;
+  for (const pt of points) {
+    const segLen = dist(prev, pt);
+    if (segLen < 1e-6) { prev = pt; continue; }
+    const ux = (pt.x - prev.x) / segLen;
+    const uz = (pt.z - prev.z) / segLen;
+    const nx = -uz;
+    const nz = ux;
+    let travelled = 0;
+    while (dSinceRow + (segLen - travelled) >= ROW_SPACING) {
+      travelled += ROW_SPACING - dSinceRow;
+      const bx = prev.x + ux * travelled;
+      const bz = prev.z + uz * travelled;
+      for (let c = 0; c < STONE_COLS; c++) {
+        const off = (c - (STONE_COLS - 1) / 2) * (PATH_WIDTH / STONE_COLS);
+        const jitter = (Math.random() - 0.5) * 0.25;
+        placeStone(bx + nx * (off + jitter), bz + nz * (off + jitter));
+      }
+      dSinceRow = 0;
+    }
+    dSinceRow += segLen - travelled;
+    prev = pt;
   }
-  markerSets.push(set);
+  return dSinceRow;
 }
+
+function resetGround() {
+  for (const mesh of stoneMeshes) mesh.count = 0;
+  stoneVariant = 0;
+}
+
+const pillars = [];
+
+function spawnPillars(forkCursor) {
+  const pR = localToWorld(forkCursor, 1.55, 2.4);
+  const pL = localToWorld(forkCursor, -1.5, 1.0);
+  pillars.push(cutout(TEX.pillar, { w: 1.0, h: 2.6, x: pR.x, z: pR.z }));
+  pillars.push(cutout(TEX.pillar, { w: 0.85, h: 2.2, x: pL.x, z: pL.z }));
+}
+
+// ---------------------------------------------------------------- fog curtains
+//
+// A curtain is the prop standing just past each fork that hides everything
+// beyond it. Because a closed curtain blocks the view, the path beyond can
+// already be standing there fully built without the player ever seeing it
+// get built — which is the whole point.
+//
+// It's built as a hybrid of two parts, because the two jobs pull against
+// each other: hiding the path *reliably*, and looking like mist.
+//
+//   1. One dense sheet does the hiding. Its alpha is computed in a shader
+//      from scrolling tileable noise, and is saturated to a solid 1 across
+//      the core while closed — so occlusion is guaranteed by construction,
+//      not by hoping enough sprites overlap.
+//   2. A ring of soft puff sprites in front of it does the looking. These
+//      are free to be loose and gappy precisely because the sheet behind
+//      them is already doing the occluding.
+//
+// Opening is a dissolve, not a curtain-parting: a threshold rises through
+// the noise field so holes open and widen and tendrils thin out, while the
+// puffs drift outward, shrink and fade. Nothing slides aside as a rigid
+// rectangle.
+//
+// Cost note: on a mid-range phone the budget here is overdraw, not CPU. The
+// sheet is ~1x fullscreen at its closest (the old three-layer stack was 3x),
+// which leaves room for the puffs — ~28 sprites at roughly 9% of frame each.
+// Only the nearest un-dissolved curtain is ever visible, since a closed one
+// hides every curtain behind it, so this cost is paid once at a time.
+// The sheet's *physical* quad is much bigger than the fog anyone will ever
+// see. Visibility is governed entirely by CORE_R*/FADE_R* below — the quad
+// just needs to be large enough that its edge sits well past FADE_R (plus
+// the domain warp's own reach), so that edge is provably always at alpha 0,
+// never something the geometry itself has to draw a line at.
+const FOG_W = 16;
+const FOG_H = 7;
+const FOG_Y = 1.6; // centre height — unrelated to FOG_H now; see CORE_RY/FADE_RY for what's actually visible
+const FOG_RISE = 0.9; // the bank lifts a little as it burns off
+const FOG_EXPAND = 0.14; // ...and swells slightly, as thinning fog does
+
+// The guaranteed-solid zone, in world units from the sheet's centre — must
+// cover the path corridor (±1.3) with a little margin. Nothing here ever
+// gets warped or faded; see the warp gate in FOG_FRAG for why that's exact,
+// not approximate.
+const FOG_CORE_RX = 1.35;
+const FOG_CORE_RY = 0.95;
+// Where alpha reaches 0. The gap between CORE and FADE is deliberately much
+// wider in X than Y — "wider is fine" for how gradually it dissipates
+// sideways, but a matching vertical expansion would undo the earlier fix
+// for the fog sitting too high.
+const FOG_FADE_RX = 5.5;
+const FOG_FADE_RY = 2.3;
+// Domain warp: bends the whole silhouette in flowing curves instead of a
+// smooth-but-still-rectangular product of two 1D falloffs, which is what
+// still read as a soft-edged box even after the noisy-border pass. Sized
+// well under (FADE - CORE) on each axis so the quad-size margin above still
+// holds even at the warp's full reach.
+const FOG_WARP_X = 1.0;
+const FOG_WARP_Y = 0.4;
+
+const PUFF_COUNT = 28;
+const PUFF_ALPHA = 0.5;
+const PUFF_SIZE = [1.1, 2.5];
+const PUFF_SPREAD_X = 4.5; // wider, to match the sheet's wider dissipation
+const PUFF_SPREAD_Y = 4.4 * 0.6; // matches the shorter sheet
+const PUFF_DEPTH = [0.05, 1.6]; // all in front of the sheet — see renderOrder note below
+const PUFF_PUSH = 2.6; // outward drift once dissolving
+const PUFF_LIFT = 1.5;
+
+const CURTAIN_DIST = BRANCH_LEN * 0.4; // how far past the fork the curtain stands
+const CURTAIN_OPEN_LEAD = 1.6; // starts dissolving this far before the avatar reaches it
+const CURTAIN_OPEN_TIME = 1.0; // seconds to fully dissolve
+const CURTAIN_GUIDE_OPACITY = 0.28; // guide sees through it — the cheap version of "the guide can see ahead"
+
+const curtains = [];
+
+const FOG_VERT = /* glsl */ `
+  varying vec2 vUv;
+  varying vec2 vPos; // local xy in world units — see FOG_FRAG for why this replaced vUv there
+  void main() {
+    vUv = uv;
+    vPos = position.xy;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+// Three samples of one tiling noise texture at different scales, drifting in
+// different directions, stand in for fbm — enough churn to read as moving
+// fog. Extra texture samples cost ALU/bandwidth but no extra *blended*
+// pixels, which is the cheap direction to spend on mobile.
+//
+// Sampled from vPos (world units) rather than vUv: the quad is much bigger
+// than the visible fog (see FOG_W/H above), so UV-based frequencies would
+// have stretched — and blurred — the noise pattern across that extra empty
+// margin. World-space frequencies stay a fixed apparent size regardless of
+// how big the quad's own dead space is.
+//
+// uOpen drives a threshold sweeping through that noise field: at 0 the
+// smoothstep saturates to 1 everywhere in the core (guaranteed occlusion),
+// and by 1 it has passed above the field's maximum so nothing is left.
+const FOG_FRAG = /* glsl */ `
+  uniform sampler2D uNoise;
+  uniform float uTime;
+  uniform float uOpen;
+  uniform float uAlpha;
+  uniform vec3 uColor;
+  varying vec2 vUv;
+  varying vec2 vPos;
+
+  void main() {
+    float n =
+      0.50 * texture2D(uNoise, vPos * 0.14 + vec2( 0.013,  0.007) * uTime).r +
+      0.30 * texture2D(uNoise, vPos * 0.29 + vec2(-0.021,  0.011) * uTime).r +
+      0.20 * texture2D(uNoise, vPos * 0.60 + vec2( 0.008, -0.017) * uTime).r;
+
+    // Denser low, wispier up top: reads as fog sitting on the path, and
+    // means it burns off from above first as it dissolves.
+    float vert = mix(1.0, 0.72, smoothstep(-2.0, 2.5, vPos.y));
+    float base = (0.58 + 0.42 * n) * vert;
+
+    float thr = mix(-0.30, 1.10, uOpen);
+    float a = smoothstep(thr, thr + 0.38, base);
+
+    // The silhouette: two independent per-axis falloffs (CORE_R* stays
+    // solid, fades out to 0 by FADE_R*), rather than one shared distance —
+    // that's deliberate, not a simplification, because it's what lets the
+    // fade reach much further sideways (FOG_CORE_RX..FOG_FADE_RX is a wide
+    // gap) without also pulling the vertical extent back up to where the
+    // fog used to sit too high (FOG_CORE_RY..FOG_FADE_RY stays tight).
+    //
+    // A plain product of two such falloffs is still, structurally, a
+    // rounded rectangle — soft-edged, but a rectangle. What breaks that up
+    // is domain-warping the position before measuring it: bending the
+    // sampled point along flowing noise, rather than jittering the boundary
+    // in place, turns the contour into an organic blob instead of a box.
+    // The warp is gated to exactly zero inside the guaranteed core (see
+    // warpGate below), so it can never be the thing that lets something
+    // through that was supposed to stay hidden.
+    vec2 warpUv = vPos * 0.10 + vec2(0.037, 0.021) * uTime;
+    vec2 warpN = vec2(
+      texture2D(uNoise, warpUv).r - 0.5,
+      texture2D(uNoise, warpUv * 1.3 + 3.7).r - 0.5
+    );
+    float gx = smoothstep(${FOG_CORE_RX}, ${FOG_CORE_RX + 0.8}, abs(vPos.x));
+    float gy = smoothstep(${FOG_CORE_RY}, ${FOG_CORE_RY + 0.8}, abs(vPos.y));
+    float warpGate = max(gx, gy);
+    vec2 wp = vPos + warpN * vec2(${FOG_WARP_X}, ${FOG_WARP_Y}) * warpGate;
+
+    float ex = 1.0 - smoothstep(${FOG_CORE_RX}, ${FOG_FADE_RX}, abs(wp.x));
+    float ey = 1.0 - smoothstep(${FOG_CORE_RY}, ${FOG_FADE_RY}, abs(wp.y));
+    a *= ex * ey;
+
+    gl_FragColor = vec4(uColor, a * uAlpha);
+
+    // THREE.Color holds values in the linear working space, and a raw
+    // ShaderMaterial gets none of the output conversion the built-in
+    // materials do for free — without this the fog draws markedly darker
+    // than its own tint colour.
+    #include <colorspace_fragment>
+  }
+`;
+
+function makeCurtain(pos, heading) {
+  const group = new THREE.Group();
+  group.position.set(pos.x, FOG_Y, pos.z);
+  group.rotation.y = heading; // plane's own normal is +Z, i.e. back toward the approaching avatar
+
+  const sheet = new THREE.Mesh(
+    new THREE.PlaneGeometry(FOG_W, FOG_H),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uNoise: { value: TEX.fogNoise },
+        uTime: { value: 0 },
+        uOpen: { value: 0 },
+        uAlpha: { value: 1 },
+        uColor: { value: new THREE.Color(0xffffff) },
+      },
+      vertexShader: FOG_VERT,
+      fragmentShader: FOG_FRAG,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+  );
+  sheet.renderOrder = 8; // after the stones and the temple
+  group.add(sheet);
+
+  // Puffs are one InstancedMesh — a single draw call however many there are.
+  // They all sit *in front* of the sheet (PUFF_DEPTH is positive, and +Z
+  // local faces the approaching avatar) because an InstancedMesh sorts as one
+  // object: instances can't individually sort against the sheet, so keeping
+  // them all on the near side makes "draw after the sheet" always correct.
+  const puffs = new THREE.InstancedMesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({
+      map: TEX.fogPuff,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      fog: false,
+      opacity: PUFF_ALPHA,
+    }),
+    PUFF_COUNT
+  );
+  puffs.renderOrder = 9;
+  puffs.frustumCulled = false; // instances move via per-instance matrices; see the stone meshes for the same reasoning
+  group.add(puffs);
+
+  const seeds = [];
+  for (let i = 0; i < PUFF_COUNT; i++) {
+    seeds.push({
+      bx: (Math.random() * 2 - 1) * PUFF_SPREAD_X,
+      // biased low so the bank is thickest around path level
+      by: -FOG_H / 2 + Math.pow(Math.random(), 0.7) * PUFF_SPREAD_Y,
+      bz: PUFF_DEPTH[0] + Math.random() * (PUFF_DEPTH[1] - PUFF_DEPTH[0]),
+      size: PUFF_SIZE[0] + Math.random() * (PUFF_SIZE[1] - PUFF_SIZE[0]),
+      rot: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 0.25,
+      p1: Math.random() * Math.PI * 2,
+      p2: Math.random() * Math.PI * 2,
+      p3: Math.random() * Math.PI * 2,
+      delay: Math.random() * 0.4, // staggers which puffs wink out first
+    });
+  }
+
+  scene.add(group);
+  const curtain = { group, sheet, puffs, seeds, pos, heading, open: 0, opening: false, done: false };
+  curtains.push(curtain);
+  return curtain;
+}
+
+/** Smoothstep, matching the GLSL one so JS and shader easing agree. */
+const smoothstep = (edge0, edge1, x) => {
+  const t = THREE.MathUtils.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+const puffDummy = new THREE.Object3D();
+
+/**
+ * Dissolves any curtain the avatar has walked up to, and keeps every
+ * curtain's colour/opacity current. Colour comes from tintScratch, which
+ * applyAtmosphere has already set for this frame — that way a curtain takes
+ * the dawn/dusk grading like the rest of the sky without having to live in
+ * atmosphereMaterials (whose entries are never removed, so putting
+ * per-journey props in it would leak across resets).
+ */
+function updateCurtains(dt, t) {
+  const roleScale = role === 'guide' ? CURTAIN_GUIDE_OPACITY : 1;
+  for (const c of curtains) {
+    if (c.done) continue;
+    if (!c.opening) {
+      const f = forward(c.heading, 1);
+      const ahead = (walker.x - c.pos.x) * f.x + (walker.z - c.pos.z) * f.z;
+      if (ahead > -CURTAIN_OPEN_LEAD) c.opening = true;
+    }
+    if (c.opening) c.open = Math.min(1, c.open + dt / CURTAIN_OPEN_TIME);
+
+    const u = c.sheet.material.uniforms;
+    u.uTime.value = t;
+    u.uOpen.value = c.open;
+    u.uAlpha.value = roleScale;
+    u.uColor.value.copy(tintScratch);
+    c.sheet.position.y = FOG_RISE * c.open;
+    c.sheet.scale.set(1 + FOG_EXPAND * c.open, 1 + FOG_EXPAND * 0.6 * c.open, 1);
+
+    c.puffs.material.color.copy(tintScratch);
+    c.puffs.material.opacity = PUFF_ALPHA * roleScale * (1 - smoothstep(0.55, 1.0, c.open));
+
+    for (let i = 0; i < c.seeds.length; i++) {
+      const s = c.seeds[i];
+      // Sine fields rather than a real simulation: cheaper, and easier to
+      // keep looking like a slow churn rather than drifting particles.
+      const churnX = Math.sin(t * 0.32 + s.p1) * 0.28;
+      const churnY = Math.sin(t * 0.24 + s.p2) * 0.2;
+      const churnZ = Math.sin(t * 0.29 + s.p3) * 0.16;
+      const spent = THREE.MathUtils.clamp((c.open - s.delay) / (1 - s.delay), 0, 1);
+      const shrink = 1 - smoothstep(0, 1, spent);
+      const push = Math.sign(s.bx || 1) * PUFF_PUSH * c.open;
+
+      puffDummy.position.set(s.bx + churnX + push, s.by + churnY + PUFF_LIFT * c.open, s.bz + churnZ);
+      puffDummy.rotation.set(0, 0, s.rot + t * s.rotSpeed);
+      const sc = s.size * shrink;
+      puffDummy.scale.set(sc, sc, 1);
+      puffDummy.updateMatrix();
+      c.puffs.setMatrixAt(i, puffDummy.matrix);
+    }
+    c.puffs.instanceMatrix.needsUpdate = true;
+
+    if (c.open >= 1) {
+      c.group.visible = false;
+      c.done = true;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- birds
+//
+// Two flying-gull cut-outs (a puppeteer's hand holding a bird-on-a-stick up
+// from off-screen — the same diorama "puppet theatre" idea as everything
+// else here) that appear at random real-time intervals, unrelated to the
+// player's progress. Each appearance spawns at a *fixed* world position, a
+// constant distance ahead of wherever the player currently is (not, as
+// before, halfway to the temple — that shrank as the player advanced,
+// which is why birds used to visibly grow across a playthrough). A fixed
+// distance from a moving reference point still isn't a fixed world
+// position, so a spawned bird still doesn't literally follow the player —
+// it just always *starts out* at the same apparent size, the same
+// real-perspective trick as the temple and clouds otherwise use. It flies
+// in along a random angled line (never through the top of the screen or
+// the path), hovers, then exits straight out from screen centre through
+// the hover point, flattened so it never angles back up through the top.
+// Depth-testing is off and render order is above everything else in the
+// scene (path, pillars, player) — birds are a screen-space overlay, not
+// scene geometry, so they must never be occluded by it; on a narrow/portrait
+// screen the reduced horizontal FOV can otherwise push a bird's world
+// position close enough to the path centreline for real 3-D pillars/ground
+// to legitimately z-test in front of it.
+const BIRD_KINDS = [
+  { map: TEX.gull1, aspect: 347 / 1024 },
+  { map: TEX.gull2, aspect: 351 / 529 },
+];
+const BIRD_H = 26; // world-unit height of the whole cut-out (bird + stick + hand)
+const BIRD_DEPTH_OFFSET = 35; // world units ahead of the player a bird spawns — fixed, so apparent size never drifts
+const BIRD_NDC_X = 0.5; // how far toward a screen edge (in NDC, 0=centre, 1=edge) a bird hovers — clear of the path
+const BIRD_NDC_RADIUS = 1.6; // how far off-screen (in NDC units, from the hover point) a bird starts and ends up
+// The bottom of the image — the puppeteer's hand and the base of the stick — must
+// never be visible, at any point in the animation, on any screen shape: the whole
+// puppet-theatre illusion depends on it always reading as "held up from below
+// frame," never as the full cut-out floating free. Rise/hover/exit each aim for
+// their own on-screen target and don't individually guarantee that, so instead
+// it's enforced as a hard clamp every frame afterward (see updateBirds): whatever
+// the animation wants, the image is pushed down further if needed so its bottom
+// edge never rises above this NDC line, comfortably below the visible frame.
+const BIRD_BOTTOM_MAX_NDC_Y = -1.08;
+// Entry tilt, degrees, measured from "straight outward" on the bird's own side (0=horizontal outward, positive=upward,
+// negative=downward) — never an angle in absolute terms, so it's mechanically impossible for a bird whose hover point
+// is on the right to approach from anywhere left of it, or vice versa: the path/centre can't be crossed.
+// The positive end is capped well short of 90 so entry never approaches through the top of the screen either.
+const BIRD_ENTRY_TILT = [-80, 55];
+const BIRD_RISE_TIME = 1.6;
+const BIRD_HOVER_TIME = 3.5;
+const BIRD_EXIT_DURATION = 2; // seconds to cross from hover to off-screen — always exactly this long
+const BIRD_EXIT_MARGIN = 0.5; // extra seconds a bird stays after nominally reaching the edge, as slack for the estimate
+const BIRD_BOB_RATE = 4.2;
+const BIRD_BOB_HEIGHT = 0.36;
+const BIRD_BOB_LATERAL = 0.48;
+const BIRD_GAP = [1, 3]; // DEV: tightened for testing — restore to something like [16, 34] for real play
+
+/** Direction from the hover point outward on `side`, tilted by a random angle within BIRD_ENTRY_TILT. Always points away from centre. */
+function randomBirdDir(side) {
+  const tiltDeg = THREE.MathUtils.lerp(BIRD_ENTRY_TILT[0], BIRD_ENTRY_TILT[1], Math.random());
+  const tilt = tiltDeg * Math.PI / 180;
+  return { x: side * Math.cos(tilt), y: Math.sin(tilt) };
+}
+
+function makeBirdMesh(kind) {
+  const w = BIRD_H * kind.aspect;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, BIRD_H),
+    new THREE.MeshBasicMaterial({
+      map: kind.map,
+      transparent: true,
+      alphaTest: 0.35,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: false, // always drawn on top of scene geometry — see the header note above
+    })
+  );
+  mesh.visible = false;
+  mesh.renderOrder = 11; // above every other layer (guide markers are the previous highest, at 10) — only future decision UI sits above this
+  scene.add(mesh);
+  return mesh;
+}
+const birdMeshes = BIRD_KINDS.map(makeBirdMesh);
+
+// Where a screen-space (NDC) point actually sits in world space depends on
+// the camera's current position/pitch and how far away the target depth is —
+// there's no fixed world-Y that reads as "bottom of screen" or "the player's
+// eye line" across every point in the journey. So each anchor is solved for
+// with a real ray cast through the camera at spawn time, intersected with
+// the bird's fixed world-Z plane, rather than guessed as a constant.
+const birdRaycaster = new THREE.Raycaster();
+function ndcToWorldAtZ(ndcX, ndcY, z) {
+  birdRaycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+  const o = birdRaycaster.ray.origin;
+  const d = birdRaycaster.ray.direction;
+  const t = (z - o.z) / d.z;
+  return { x: o.x + d.x * t, y: o.y + d.y * t };
+}
+
+let bird = null; // { mesh, z, side, entryX, entryY, hoverX, hoverY, hoverNdcX, hoverNdcY, exitDirX, exitDirY, t }
+let birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
+
+function maybeSpawnBird(dt) {
+  if (bird || finished) return;
+  birdTimer -= dt;
+  if (birdTimer > 0) return;
+  birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
+
+  camera.updateMatrixWorld();
+  // A fixed distance ahead of the player, clamped so a bird spawned very late in
+  // the walk still lands short of the temple rather than at/behind its facade.
+  const z = Math.max(walker.z - BIRD_DEPTH_OFFSET, -TEMPLE_DISTANCE + 10);
+  const side = Math.random() < 0.5 ? -1 : 1;
+  const hoverNdcX = side * BIRD_NDC_X;
+
+  // "Roughly level with the player": found by asking where the avatar's own
+  // head height projects to on screen right now, then reusing that same
+  // screen fraction — not the avatar's world Y — for the bird's hover point,
+  // since the bird sits at a very different depth.
+  const eyeNdc = new THREE.Vector3(walker.x, FIGURE_H, walker.z).project(camera);
+
+  // Entry point: a random tilt away from the hover point, always outward on
+  // `side` (see randomBirdDir) so the bird approaches from off-screen without
+  // ever crossing the centre/path.
+  const entryDir = randomBirdDir(side);
+  const entryNdcX = hoverNdcX + entryDir.x * BIRD_NDC_RADIUS;
+  const entryNdcY = eyeNdc.y + entryDir.y * BIRD_NDC_RADIUS;
+
+  const hoverWorld = ndcToWorldAtZ(hoverNdcX, eyeNdc.y, z);
+  const entryWorld = ndcToWorldAtZ(entryNdcX, entryNdcY, z);
+
+  // Exit direction: straight out from screen *centre* through the hover point — the
+  // simplest way to guarantee it can never angle back across the centre/path — with
+  // any upward component clamped flat, so it still never exits back through the top.
+  const radialLen = Math.hypot(hoverNdcX, eyeNdc.y) || 1;
+  let exitDirX = hoverNdcX / radialLen;
+  let exitDirY = Math.min(eyeNdc.y / radialLen, 0);
+  const exitLen = Math.hypot(exitDirX, exitDirY) || 1;
+  exitDirX /= exitLen;
+  exitDirY /= exitLen;
+
+  const mesh = birdMeshes[Math.floor(Math.random() * birdMeshes.length)];
+  mesh.position.set(entryWorld.x, entryWorld.y - BIRD_H / 2, z);
+  mesh.visible = true;
+  bird = {
+    mesh, z, side, t: 0,
+    entryX: entryWorld.x, entryY: entryWorld.y,
+    hoverX: hoverWorld.x, hoverY: hoverWorld.y,
+    hoverNdcX, hoverNdcY: eyeNdc.y,
+    exitDirX, exitDirY,
+  };
+}
+
+let birdDebugFreeze = false; // dev-only: pauses updateBirds' own repositioning so a debug override sticks on screen
+/** Fly in along a random angled line, hover with a bob, then fly straight out past the screen edge. */
+function updateBirds(dt) {
+  if (birdDebugFreeze) return;
+  maybeSpawnBird(dt);
+  if (!bird) return;
+  bird.t += dt;
+  const { mesh, z, t, entryX, entryY, hoverX, hoverY, hoverNdcX, hoverNdcY, exitDirX, exitDirY } = bird;
+  const riseEnd = BIRD_RISE_TIME;
+  const hoverEnd = riseEnd + BIRD_HOVER_TIME;
+  camera.updateMatrixWorld();
+
+  let topX, topY;
+  if (t < riseEnd) {
+    const p = smoothstep(0, riseEnd, t);
+    topX = THREE.MathUtils.lerp(entryX, hoverX, p);
+    topY = THREE.MathUtils.lerp(entryY, hoverY, p);
+  } else if (t < hoverEnd) {
+    const hp = t - riseEnd;
+    topX = hoverX + Math.sin(hp * BIRD_BOB_RATE * 0.7 + 1.1) * BIRD_BOB_LATERAL;
+    topY = hoverY + Math.sin(hp * BIRD_BOB_RATE) * BIRD_BOB_HEIGHT;
+  } else {
+    // Exit always takes exactly BIRD_EXIT_DURATION seconds. The interpolation has to
+    // happen in *screen space*, not world space: near/past the screen edge, world
+    // distance and screen distance stop corresponding to each other in any simple
+    // way (that's what perspective foreshortening is), so a world-space lerp toward
+    // an off-screen target moves at wildly different, direction-dependent rates on
+    // screen — barely creeping for some directions, jumping most of the way almost
+    // immediately for others. Lerping the NDC coordinates directly is linear by
+    // construction, so screen-space progress is the same for every direction. Only
+    // the *final* step — turning that NDC point into a world position for this
+    // frame's render — needs the camera, so it's still redone fresh every frame,
+    // which is what keeps this correct as the camera tracks the walking player.
+    const p = smoothstep(0, BIRD_EXIT_DURATION, t - hoverEnd);
+    const ndcX = hoverNdcX + exitDirX * BIRD_NDC_RADIUS * p;
+    const ndcY = hoverNdcY + exitDirY * BIRD_NDC_RADIUS * p;
+    const w = ndcToWorldAtZ(ndcX, ndcY, z);
+    topX = w.x;
+    topY = w.y;
+  }
+
+  // Hard floor: whatever the phase above wanted, never let the image's bottom
+  // edge (BIRD_H below topY) rise above the safe off-screen line. Re-derived
+  // every frame from the current camera, so it holds through camera motion and
+  // on any aspect ratio, not just the one it happened to be tuned against.
+  const ndcOfTop = new THREE.Vector3(topX, topY, z).project(camera);
+  const safeBottom = ndcToWorldAtZ(ndcOfTop.x, BIRD_BOTTOM_MAX_NDC_Y, z);
+  topY = Math.min(topY, safeBottom.y + BIRD_H);
+
+  mesh.position.set(topX, topY - BIRD_H / 2, z);
+  mesh.quaternion.copy(camera.quaternion); // billboard — always faces the camera
+
+  if (t >= hoverEnd + BIRD_EXIT_DURATION + BIRD_EXIT_MARGIN) {
+    mesh.visible = false;
+    bird = null;
+  }
+}
+
+// ---------------------------------------------------------------- the journey
+//
+// The whole route is built once, up front, before the player moves — every
+// trunk, both branches of every fork, and every curtain. That is possible
+// because the correct side at each fork is fixed in advance, so the route a
+// successful player walks is fully determined; and it is what guarantees the
+// player never watches the path assemble itself.
+//
+// Both branches of a fork look identical up to the curtain. Past it, the
+// correct one carries on to the next fork while the wrong one simply stops
+// in mid-air a short way further — invisible until you are already inside
+// the fog, which is what makes taking it a fall rather than a dead end you
+// could have seen coming.
+const WRONG_STUB_LEN = BRANCH_LEN * 0.8; // wrong branch stops here — past the curtain, short of anywhere
+
+const sections = []; // one per fork: { fork, correct, branch:{left,right}, trunkAfter, approach, curtain }
+let introTrunkPts = [];
+
+function clearJourney() {
+  resetGround();
+  for (const p of pillars) {
+    scene.remove(p);
+    p.geometry.dispose();
+    p.material.dispose();
+  }
+  pillars.length = 0;
+  for (const c of curtains) {
+    scene.remove(c.group);
+    for (const part of [c.sheet, c.puffs]) {
+      part.geometry.dispose();
+      part.material.dispose();
+    }
+    c.puffs.dispose(); // InstancedMesh also owns its instance buffers
+  }
+  curtains.length = 0;
+  sections.length = 0;
+}
+
+function buildJourney() {
+  clearJourney();
+  const origin = { x: 0, z: 0, heading: 0 };
+  let phase = ROW_SPACING;
+
+  introTrunkPts = genStraight(origin, origin.heading, TRUNK_LEN, TRUNK_SEGMENTS);
+  phase = scatterAlong(origin, introTrunkPts, phase);
+
+  const introEnd = introTrunkPts[introTrunkPts.length - 1];
+  let cursor = { x: introEnd.x, z: introEnd.z, heading: origin.heading };
+
+  for (let k = 1; k <= N_FORKS; k++) {
+    const correct = CORRECT_BY_FORK[k - 1];
+    spawnPillars(cursor);
+
+    const branch = {};
+    const forkPhase = phase; // both branches leave the fork on the same row phase
+    let nextCursor = null;
+
+    for (const side of ['left', 'right']) {
+      const isCorrect = side === correct;
+      const heading = cursor.heading + (side === 'right' ? FORK_HALF_ANGLE : -FORK_HALF_ANGLE);
+      const len = isCorrect ? BRANCH_LEN : WRONG_STUB_LEN;
+      const segs = isCorrect ? BRANCH_SEGMENTS : 2;
+      const pts = genStraight(cursor, heading, len, segs);
+      const endPhase = scatterAlong(cursor, pts, forkPhase);
+      branch[side] = pts;
+      if (isCorrect) {
+        phase = endPhase;
+        const end = pts[pts.length - 1];
+        nextCursor = { x: end.x, z: end.z, heading: heading * (1 - HEADING_CORRECTION) };
+      }
+    }
+
+    const sec = { fork: { ...cursor }, correct, branch, trunkAfter: null, approach: null };
+
+    if (k < N_FORKS) {
+      const trunkPts = genStraight(nextCursor, nextCursor.heading, TRUNK_LEN, TRUNK_SEGMENTS);
+      phase = scatterAlong(nextCursor, trunkPts, phase);
+      sec.trunkAfter = trunkPts;
+      const end = trunkPts[trunkPts.length - 1];
+      cursor = { x: end.x, z: end.z, heading: nextCursor.heading };
+    } else {
+      const approachPts = genStraight(nextCursor, nextCursor.heading, APPROACH_DISTANCE, 3);
+      phase = scatterAlong(nextCursor, approachPts, phase);
+      sec.approach = approachPts;
+    }
+
+    sec.curtain = makeCurtain(advance(sec.fork, sec.fork.heading, CURTAIN_DIST), sec.fork.heading);
+    sections.push(sec);
+  }
+}
+
+// The avatar is a rig of two stacked planes — the character art in front,
+// its recolourable cardboard backing just behind — rather than a single
+// cutout(), so the backing's tint can change per the player's selection
+// screen choice. Figure art is 400x563 (728x1024 source, resized) — wider
+// relative to its height than the old placeholder, so width is derived from
+// that aspect ratio rather than reused, to avoid a stretched look. Height is
+// 80% of the original placeholder's 2.2.
+const FIGURE_H = 2.2 * 0.8;
+const FIGURE_ASPECT = 400 / 563;
+
+/**
+ * Builds one character rig: a backing plane (tintable, sits just behind) and
+ * the character art in front, as children of a Group. The group is what the
+ * rest of the game treats as "the figure" — its .position/.rotation are set
+ * exactly like a single Mesh's would be (Group shares that API via
+ * Object3D), so nothing downstream needs to know it's actually two panels.
+ */
+function makeCharacterRig(key) {
+  const { front, backing } = CHAR_TEX[key];
+  const w = FIGURE_H * FIGURE_ASPECT;
+  const group = new THREE.Group();
+
+  const backingMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, FIGURE_H),
+    new THREE.MeshBasicMaterial({ map: backing, transparent: true, alphaTest: 0.2, side: THREE.DoubleSide })
+  );
+  backingMesh.position.z = -0.01;
+  backingMesh.castShadow = true;
+
+  const frontMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, FIGURE_H),
+    new THREE.MeshBasicMaterial({ map: front, transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
+  );
+  frontMesh.position.z = 0.01;
+  frontMesh.castShadow = true;
+
+  group.add(backingMesh, frontMesh);
+  group.position.y = FIGURE_H / 2;
+  scene.add(group);
+  return { group, backingMesh, frontMesh };
+}
+
+function disposeRig(r) {
+  scene.remove(r.group);
+  for (const mesh of [r.backingMesh, r.frontMesh]) {
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+  }
+}
+
+let characterKey = ROSTER[0].key;
+let rig = makeCharacterRig(characterKey);
+let figure = rig.group;
+
+function setCharacter(key, colorHex) {
+  if (key !== characterKey) {
+    const old = rig;
+    characterKey = key;
+    rig = makeCharacterRig(key);
+    figure = rig.group;
+    disposeRig(old);
+  }
+  rig.backingMesh.material.color.setHex(colorHex);
+}
+setCharacter(ROSTER[0].key, PALETTE[0].hex);
+
+// figure.position/rotation are the *visual* transform, redrawn from these
+// every frame (see the step-bob block in tick()) — walker is the actual
+// logical path position everything else (movement, camera, fork/curtain
+// checks, key light) reads and writes. Splitting them is what lets the walk
+// bob nudge the mesh sideways and tilt it without that offset silently
+// feeding back into "how far has the avatar actually walked".
+const walker = new THREE.Vector3(0, 0, 0);
+
+// Guide-only overlay: which branch is safe, which is not, for the fork
+// currently being decided. Just one pair, repositioned onto whichever fork
+// that is, so old forks don't stay flagged behind the player.
+function makeMarker() {
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.15, 1.15),
+    new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, fog: false })
+  );
+  m.renderOrder = 10; // above the fog puffs (9), so a guide's markers are never veiled
+  m.visible = false;
+  scene.add(m);
+  return m;
+}
+const markerPair = { left: makeMarker(), right: makeMarker() };
+
 function updateMarkers() {
-  const showCurrent = !leg && !finished && role === 'guide';
-  markerSets.forEach((set, idx) => {
-    const correct = CORRECT_BY_FORK[idx];
-    set.left.material.map = correct === 'left' ? TEX.safe : TEX.hazard;
-    set.right.material.map = correct === 'right' ? TEX.safe : TEX.hazard;
-    set.left.material.needsUpdate = true;
-    set.right.material.needsUpdate = true;
-    const visible = showCurrent && idx === forkIndex - 1;
-    set.left.visible = visible;
-    set.right.visible = visible;
-  });
+  const sec = sections[forkIndex - 1];
+  const showCurrent = !leg && !finished && role === 'guide' && sec;
+  if (!showCurrent) {
+    markerPair.left.visible = false;
+    markerPair.right.visible = false;
+    return;
+  }
+  const correct = sec.correct;
+  const step = BRANCH_LEN / BRANCH_SEGMENTS;
+  const leftAt = advance(sec.fork, sec.fork.heading - FORK_HALF_ANGLE, step);
+  const rightAt = advance(sec.fork, sec.fork.heading + FORK_HALF_ANGLE, step);
+  markerPair.left.position.set(leftAt.x, 1.5, leftAt.z);
+  markerPair.right.position.set(rightAt.x, 1.5, rightAt.z);
+  markerPair.left.material.map = correct === 'left' ? TEX.safe : TEX.hazard;
+  markerPair.right.material.map = correct === 'right' ? TEX.safe : TEX.hazard;
+  markerPair.left.material.needsUpdate = true;
+  markerPair.right.material.needsUpdate = true;
+  markerPair.left.visible = true;
+  markerPair.right.visible = true;
 }
 
 // ---------------------------------------------------------------- state
 //
 // There is no manual "step" anymore. Choosing left/right triggers one
 // automatic walk that covers the branch and continues straight into the next
-// round's trunk (trunkFor/branchFor above), landing at the next fork. The
-// figure's position never jumps — it just keeps walking further down the
-// (repeated) ground. sunP is driven by how far along that walk the figure has
-// travelled, so the sky changes continuously rather than snapping at each fork.
+// round's trunk, landing at the next fork. The figure's position never jumps
+// — it just keeps walking. sunP is driven by how far along that walk the
+// figure has travelled, so the sky changes continuously rather than snapping
+// at each fork. facing (below) drives the camera's heading the same way.
 
 const WALK_SPEED = 3.2; // world units / second
 
-let forkIndex = 1; // 1..ROUNDS — the fork currently awaiting a decision
+let forkIndex = 1; // 1..N_FORKS — the fork currently awaiting a decision
 let finished = false;
+let finishedSuccess = false;
 let correctCount = 0;
 let role = 'guide';
-let sunP = TIME_OF_DAY[0];
+let sunP = timeOfDay(1);
 
 // leg: the walk currently in progress, or null while awaiting a decision.
 let leg = null;
@@ -467,12 +1366,18 @@ function makeLeg(queue, realPoints, fromP, toP, arriveFork) {
   return { queue, total: pathLength(realPoints), traveled: 0, fromP, toP, arriveFork };
 }
 
-function introLeg() {
-  const pts = trunkFor(0).slice(1);
-  return makeLeg(pts.slice(), [figure.position, ...pts], TIME_OF_DAY[0], TIME_OF_DAY[0], 1);
+function startJourney() {
+  buildJourney();
+  leg = makeLeg(
+    introTrunkPts.slice(),
+    [walker, ...introTrunkPts],
+    timeOfDay(1),
+    timeOfDay(1),
+    1
+  );
 }
 
-leg = introLeg();
+startJourney();
 
 // ---------------------------------------------------------------- controls
 
@@ -483,7 +1388,66 @@ const els = {
   role: document.getElementById('role'),
   hint: document.getElementById('hint'),
   hud: document.getElementById('hud'),
+  wrongFlash: document.getElementById('wrongFlash'),
+  charSelect: document.getElementById('charSelect'),
+  charList: document.getElementById('charList'),
+  paletteList: document.getElementById('paletteList'),
+  charStart: document.getElementById('charStart'),
 };
+
+// ---------------------------------------------------------------- character selection screen
+//
+// Shown once, after assets finish loading (see manager.onLoad below). The
+// game underneath is already ticking — the screen is a full-screen blocking
+// overlay rather than something that delays the walk itself, which is
+// simpler than gating startJourney() and looks identical to the player
+// either way, since they can't see or reach anything behind it.
+let pickedCharacter = ROSTER[0].key;
+let pickedColorHex = PALETTE[0].hex;
+
+function renderCharSelect() {
+  els.charList.innerHTML = '';
+  for (const c of ROSTER) {
+    const btn = document.createElement('button');
+    btn.className = 'charOption' + (c.key === pickedCharacter ? ' selected' : '');
+    btn.innerHTML = `<img src="textures/${c.tex}.png" alt="${c.label}" />`;
+    btn.addEventListener('click', () => {
+      pickedCharacter = c.key;
+      renderCharSelect();
+    });
+    els.charList.appendChild(btn);
+  }
+
+  els.paletteList.innerHTML = '';
+  for (const p of PALETTE) {
+    const btn = document.createElement('button');
+    btn.className = 'swatch' + (p.hex === pickedColorHex ? ' selected' : '');
+    btn.style.background = `#${p.hex.toString(16).padStart(6, '0')}`;
+    btn.setAttribute('aria-label', p.label);
+    btn.addEventListener('click', () => {
+      pickedColorHex = p.hex;
+      renderCharSelect();
+    });
+    els.paletteList.appendChild(btn);
+  }
+}
+renderCharSelect();
+
+els.charStart.addEventListener('click', () => {
+  setCharacter(pickedCharacter, pickedColorHex);
+  els.charSelect.classList.remove('visible');
+  setTimeout(() => els.charSelect.classList.remove('show'), 350);
+});
+
+// TODO: placeholder wrong-turn/fall feedback — a quick red flash. Swap for a
+// real animation (stumble, actual fall) later. Used for every wrong pick, not
+// just the final one.
+let wrongFlashTimer = null;
+function onWrongTurn() {
+  els.wrongFlash.classList.add('show');
+  clearTimeout(wrongFlashTimer);
+  wrongFlashTimer = setTimeout(() => els.wrongFlash.classList.remove('show'), 220);
+}
 
 function refreshUI() {
   updateMarkers();
@@ -493,34 +1457,46 @@ function refreshUI() {
   els.reset.classList.toggle('hidden', !finished);
 
   if (finished) {
-    els.hint.textContent = `Journey complete — ${correctCount} of ${ROUNDS} crossings were safe.`;
+    els.hint.textContent = finishedSuccess
+      ? `You reached the temple — all ${N_FORKS} crossings were safe.`
+      : `The path ran out — you fell at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`;
   } else if (walking) {
     els.hint.textContent = 'Walking to the next fork…';
   } else {
-    const label = TIME_LABEL[forkIndex - 1];
+    const label = timeLabel(timeOfDay(forkIndex));
     els.hint.textContent =
       role === 'guide'
-        ? `Fork ${forkIndex} of ${ROUNDS} (${label}) — you can see which way is safe.`
-        : `Fork ${forkIndex} of ${ROUNDS} (${label}) — a junction. You cannot see which way is safe.`;
+        ? `Fork ${forkIndex} of ${N_FORKS} (${label}) — you can see which way is safe.`
+        : `Fork ${forkIndex} of ${N_FORKS} (${label}) — a junction. You cannot see which way is safe.`;
   }
 }
 
+// Every piece of path already exists (see buildJourney) — choosing only picks
+// which set of waypoints to walk. A correct pick continues through the fork's
+// branch into whatever follows it; a wrong pick walks the short stub and runs
+// out of stones in mid-air, which ends the journey.
 const choose = (side) => () => {
   if (leg || finished) return;
-  if (side === CORRECT_BY_FORK[forkIndex - 1]) correctCount++;
+  const sec = sections[forkIndex - 1];
+  if (!sec) return;
 
-  const roundIdx = forkIndex - 1;
-  const branchPts = branchFor(roundIdx, side);
+  const wasCorrect = side === sec.correct;
+  const branchPts = sec.branch[side];
   const queue = branchPts.slice();
-  const realPoints = [figure.position.clone(), ...branchPts];
+  const realPoints = [walker.clone(), ...branchPts];
 
-  if (forkIndex < ROUNDS) {
-    const nextTrunk = trunkFor(roundIdx + 1);
-    queue.push(...nextTrunk);
-    realPoints.push(...nextTrunk);
-    leg = makeLeg(queue, realPoints, TIME_OF_DAY[forkIndex - 1], TIME_OF_DAY[forkIndex], forkIndex + 1);
+  if (wasCorrect) {
+    correctCount++;
+    const continuation = sec.trunkAfter || sec.approach || [];
+    queue.push(...continuation);
+    realPoints.push(...continuation);
+    const arriveFork = sec.trunkAfter ? forkIndex + 1 : null;
+    const toP = sec.trunkAfter ? timeOfDay(forkIndex + 1) : timeOfDay(N_FORKS);
+    leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), toP, arriveFork);
+    leg.success = true;
   } else {
-    leg = makeLeg(queue, realPoints, TIME_OF_DAY[forkIndex - 1], TIME_OF_DAY[forkIndex - 1], null);
+    leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), timeOfDay(forkIndex), null);
+    leg.success = false;
   }
   refreshUI();
 };
@@ -530,9 +1506,12 @@ els.right.addEventListener('click', choose('right'));
 els.reset.addEventListener('click', () => {
   forkIndex = 1;
   finished = false;
+  finishedSuccess = false;
   correctCount = 0;
-  figure.position.set(TRUNK[0].x, figure.position.y, TRUNK[0].z);
-  leg = introLeg();
+  walker.set(0, 0, 0);
+  facing = 0;
+  walkPhase = 0;
+  startJourney();
   refreshUI();
 });
 
@@ -540,7 +1519,7 @@ els.role.addEventListener('click', () => {
   role = role === 'guide' ? 'player' : 'guide';
   els.role.dataset.role = role;
   els.role.textContent = role === 'guide' ? 'Guide view' : 'Player view';
-  refreshUI();
+  refreshUI(); // curtain opacity follows `role` in updateCurtains each frame
 });
 
 // Drag to look. This is the clearest demonstration of the multiplane effect on
@@ -572,10 +1551,28 @@ let loadMs = null;
 manager.onLoad = () => {
   loadMs = Math.round(performance.now() - T_START);
   document.getElementById('loader').classList.add('done');
+  els.charSelect.classList.add('show');
+  requestAnimationFrame(() => els.charSelect.classList.add('visible')); // let 'show' (display) apply before the opacity transition starts
   refreshUI();
 };
 
 const timer = new THREE.Timer();
+
+// facing: the camera's smoothed heading. It eases toward whatever direction
+// the avatar is currently walking, so a turn at a fork reads as the camera
+// gently swinging round rather than snapping — this is the whole
+// "camera turns slightly with you" effect, and it falls out of one lerp.
+let facing = 0;
+
+// Step bob: up-and-right-and-tilt, back down, then up-and-left-and-tilt, back
+// down — one lobe of walkPhase (0..PI) per half-step. Only advances while
+// walking; see the clamp-to-next-boundary logic in tick() for why a stop
+// never lands mid-lobe.
+const WALK_BOB_RATE = Math.PI / 0.35; // radians/sec — 0.35s per lobe
+const WALK_BOB_HEIGHT = 0.09;
+const WALK_BOB_LATERAL = 0.07;
+const WALK_BOB_TILT = THREE.MathUtils.degToRad(9);
+let walkPhase = 0;
 
 function tick() {
   timer.update();
@@ -584,23 +1581,27 @@ function tick() {
 
   // avatar: walk the current leg's waypoint queue at a constant speed, never
   // jumping — each leg's waypoints continue straight into the next round's
-  // trunk (see choose() below). sunP tracks how far through the leg we are,
+  // trunk (see choose() above). sunP tracks how far through the leg we are,
   // so the sky changes smoothly as the figure walks rather than snapping.
+  // `walking` is captured before this block can null out `leg`, so the frame
+  // a leg completes on still counts as walking for the step-bob below — it
+  // shouldn't cut off just because arrival and the last step land together.
+  const walking = !!leg;
   if (leg) {
     const head = leg.queue[0];
     if (head) {
-      const dx = head.x - figure.position.x;
-      const dz = head.z - figure.position.z;
+      const dx = head.x - walker.x;
+      const dz = head.z - walker.z;
       const distToHead = Math.hypot(dx, dz);
       const moveAmount = Math.min(distToHead, WALK_SPEED * dt);
       if (distToHead > 1e-4) {
-        figure.position.x += (dx / distToHead) * moveAmount;
-        figure.position.z += (dz / distToHead) * moveAmount;
+        walker.x += (dx / distToHead) * moveAmount;
+        walker.z += (dz / distToHead) * moveAmount;
       }
       leg.traveled += moveAmount;
       if (distToHead <= moveAmount + 1e-4) {
-        figure.position.x = head.x;
-        figure.position.z = head.z;
+        walker.x = head.x;
+        walker.z = head.z;
         leg.queue.shift();
       }
     }
@@ -610,15 +1611,43 @@ function tick() {
 
     if (leg.queue.length === 0) {
       sunP = leg.toP;
-      if (leg.arriveFork) forkIndex = leg.arriveFork;
-      else finished = true;
+      if (leg.arriveFork) {
+        forkIndex = leg.arriveFork;
+      } else {
+        finished = true;
+        finishedSuccess = !!leg.success;
+        // The fall fires here, at the moment the stones run out, rather than
+        // back when the button was pressed — the consequence should land when
+        // the player walks off the edge.
+        if (!leg.success) onWrongTurn();
+      }
       leg = null;
       refreshUI();
     }
   }
-  figure.position.y = 1.1 + Math.sin(t * 2.1) * 0.035;
+
+  // Step bob: only while walking, and it always finishes the lobe (one
+  // up-then-down) it's in the middle of before settling flat — walkPhase is
+  // clamped to the next multiple of PI rather than just stopped, so motion
+  // never cuts off mid-rise or mid-fall. Each PI-wide lobe lifts and tilts
+  // the figure one way; consecutive lobes alternate right/left via `side`.
+  if (walking) {
+    walkPhase += dt * WALK_BOB_RATE;
+  } else if (walkPhase > 0) {
+    const nextBoundary = Math.ceil(walkPhase / Math.PI - 1e-6) * Math.PI;
+    walkPhase = Math.min(walkPhase + dt * WALK_BOB_RATE, nextBoundary);
+    if (walkPhase >= nextBoundary - 1e-6) walkPhase = 0;
+  }
+  const lobe = Math.floor(walkPhase / Math.PI);
+  const within = walkPhase - lobe * Math.PI;
+  const lift = Math.sin(within); // 0 -> 1 -> 0 across each lobe
+  const side = lobe % 2 === 0 ? 1 : -1; // right lobe first, then left, alternating
+  figure.position.set(walker.x + side * lift * WALK_BOB_LATERAL, FIGURE_H / 2 + lift * WALK_BOB_HEIGHT, walker.z);
+  figure.rotation.z = -side * lift * WALK_BOB_TILT;
+
   applySun(sunP);
-  applyAtmosphere(sunP);
+  applyAtmosphere(sunP); // leaves the current tint in tintScratch for updateCurtains
+  updateCurtains(dt, t);
   sky.material.map.offset.x = THREE.MathUtils.lerp(0, 2 / 3, sunP);
 
   // clouds drift, at speeds scaled by distance
@@ -631,25 +1660,42 @@ function tick() {
   // a row from being moved while it is still just in shot. Derived from the
   // figure rather than camera.position because the camera is not moved until
   // later in this same tick.
-  const recycleBehind = figure.position.z + CAM_BACK + 12;
+  const recycleBehind = walker.z + CAM_BACK + 12;
   for (let i = 0; i < cloudRows.length; i++) {
     const row = cloudRows[i];
     row.position.x = Math.sin(t * 0.05 + i * 1.7) * 2.5;
     while (row.position.z > recycleBehind) row.position.z -= CLOUD_SPAN;
   }
 
-  // camera: trails the avatar, plus the drag offset, eased
+  // camera facing: ease toward the direction of travel (see comment above).
+  if (leg && leg.queue[0]) {
+    const head = leg.queue[0];
+    const dx = head.x - walker.x;
+    const dz = head.z - walker.z;
+    if (Math.hypot(dx, dz) > 1e-3) {
+      const targetHeading = Math.atan2(dx, -dz);
+      let delta = targetHeading - facing;
+      delta = ((delta + Math.PI) % (Math.PI * 2)) - Math.PI; // shortest angular distance
+      facing += delta * Math.min(1, dt * 2.5);
+    }
+  }
+
+  // camera: trails the avatar along its facing direction, plus the drag offset, eased
   look.x += (look.tx - look.x) * Math.min(1, dt * 4);
   look.y += (look.ty - look.y) * Math.min(1, dt * 4);
 
+  const behind = forward(facing, CAM_BACK);
+  const ahead = forward(facing, 4.6);
   camera.position.set(
-    figure.position.x * 0.4 + look.x,
+    walker.x - behind.x + look.x,
     3.9 + look.y + Math.sin(t * 0.6) * 0.05,
-    figure.position.z + CAM_BACK
+    walker.z - behind.z
   );
-  camera.lookAt(figure.position.x * 0.45, 1.25, figure.position.z - 4.6);
+  camera.lookAt(walker.x + ahead.x, 1.25, walker.z + ahead.z);
 
-  key.target.position.set(figure.position.x, 0, figure.position.z);
+  key.target.position.set(walker.x, 0, walker.z);
+
+  updateBirds(dt);
 
   renderer.render(scene, camera);
 
@@ -671,19 +1717,92 @@ tick();
 // Debug hook: render and hand back a PNG, used to inspect the scene headlessly.
 // Dev only — stripped from the production bundle.
 if (import.meta.env.DEV) {
+  window.__camera = camera;
+  window.__temple = temple;
+  window.__THREE = THREE;
   window.__capture = () => {
     renderer.render(scene, camera);
     return renderer.domElement.toDataURL('image/png');
   };
   window.__tick = tick;
-  window.__state = () => ({ forkIndex, finished, walking: !!leg, sunP, correctCount });
-  window.__figureZ = () => figure.position.z;
+  window.__state = () => ({
+    forkIndex,
+    finished,
+    finishedSuccess,
+    walking: !!leg,
+    sunP,
+    correctCount,
+    facing,
+    fork: sections[forkIndex - 1] ? sections[forkIndex - 1].fork : null,
+  });
+  window.__curtains = () =>
+    curtains.map((c) => ({
+      z: +c.pos.z.toFixed(2),
+      open: +c.open.toFixed(2),
+      done: c.done,
+      visible: c.group.visible,
+      sheet: {
+        uOpen: +c.sheet.material.uniforms.uOpen.value.toFixed(3),
+        uAlpha: +c.sheet.material.uniforms.uAlpha.value.toFixed(3),
+        y: +c.sheet.position.y.toFixed(3),
+      },
+      puffOpacity: +c.puffs.material.opacity.toFixed(3),
+    }));
+  window.__curtainObjs = () => curtains;
+  window.__spawnBird = () => {
+    birdTimer = 0;
+    bird = null;
+    maybeSpawnBird(0);
+    return window.__bird();
+  };
+  window.__bird = () =>
+    bird && {
+      t: +bird.t.toFixed(2),
+      side: bird.side,
+      pos: bird.mesh.position.toArray().map((v) => +v.toFixed(2)),
+      visible: bird.mesh.visible,
+    };
+  window.__birdMesh = () => bird && bird.mesh;
+  window.__birdFreeze = (v) => {
+    birdDebugFreeze = v;
+  };
+  window.__freezeBird = (t) => {
+    if (!bird) return false;
+    bird.t = t - 1e-4; // updateBirds adds dt below, land exactly on t
+    updateBirds(1e-4);
+    return window.__bird();
+  };
+  window.__sections = () =>
+    sections.map((s) => ({
+      correct: s.correct,
+      forkZ: +s.fork.z.toFixed(2),
+      leftPts: s.branch.left.length,
+      rightPts: s.branch.right.length,
+      hasTrunkAfter: !!s.trunkAfter,
+      hasApproach: !!s.approach,
+    }));
+  window.__figureZ = () => walker.z;
+  window.__figurePose = () => ({
+    walkPhase: +walkPhase.toFixed(3),
+    pos: figure.position.toArray().map((v) => +v.toFixed(4)),
+    rotZ: +figure.rotation.z.toFixed(4),
+    walker: walker.toArray().map((v) => +v.toFixed(4)),
+  });
+  window.__rig = () => ({
+    characterKey,
+    backingColor: rig.backingMesh.material.color.getHexString(),
+    backingMap: rig.backingMesh.material.map.source.data?.currentSrc || rig.backingMesh.material.map.name,
+    frontMap: rig.frontMesh.material.map.source.data?.currentSrc || rig.frontMesh.material.map.name,
+  });
   window.__cloudRows = () => cloudRows.map((r) => +r.position.z.toFixed(2));
-  window.__markers = () => markerSets.map((s) => ({ leftVisible: s.left.visible, rightVisible: s.right.visible }));
+  window.__markers = () => ({ leftVisible: markerPair.left.visible, rightVisible: markerPair.right.visible });
+  window.__stoneCounts = () => stoneMeshes.map((m) => m.count);
+  window.__stoneMeshes = stoneMeshes;
   window.__atmos = () => ({
     skyTint: atmosphereMaterials[0].color.getHexString(),
     clear: renderer.getClearColor(new THREE.Color()).getHexString(),
     fog: scene.fog.color.getHexString(),
+    fogNearFar: [scene.fog.near, scene.fog.far],
     keyColor: key.color.getHexString(),
     keyIntensity: key.intensity,
     keyPos: key.position.toArray(),

@@ -200,93 +200,38 @@ function makePeaks() {
   return svgDoc(w, h, parts.join(''));
 }
 
-// ---------------------------------------------------------------- path
+// ---------------------------------------------------------------- stone tiles
 
 /**
- * Top-down cobbled path with a fork, drawn into a square texture that gets
- * laid flat on the ground plane. v=1 (bottom) is nearest the camera.
+ * One paving-stone tile: a full-bleed grout background (so tiles butt
+ * together edge-to-edge with no gaps) with 2-3 irregular cobbles painted on
+ * top, each with a dark offset "edge" copy underneath for the same
+ * implied-thickness trick used everywhere else. Several of these get placed
+ * end to end along the actual walked path at runtime (see main.js) instead
+ * of one bespoke fork-shaped art tile — so the ground always matches
+ * wherever the path actually turns.
  */
-function makePath() {
-  const S = 1024;
-  const r = rng(4471);
-  const stones = [];
-  const edges = [];
+function makeStoneTile(seed) {
+  const S = 160;
+  const r = rng(seed);
+  const parts = [`<rect width="${S}" height="${S}" fill="${C.stoneGrout}"/>`];
 
-  const trunkTop = 560;
-  const fork = { x: 512, y: trunkTop };
+  const count = Math.round(rand(r, 2, 3));
+  for (let i = 0; i < count; i++) {
+    const cx = rand(r, S * 0.28, S * 0.72);
+    const cy = rand(r, S * 0.28, S * 0.72);
+    const w = rand(r, S * 0.5, S * 0.72);
+    const h = rand(r, S * 0.42, S * 0.62);
+    const rot = rand(r, -18, 18);
+    const rx = Math.min(w, h) * 0.22;
+    const fill = r() > 0.5 ? C.stone : C.stoneAlt;
 
-  const segments = [
-    { from: { x: 512, y: 1040 }, to: fork, width: 196 },
-    { from: fork, to: { x: 172, y: 96 }, width: 168 },
-    { from: fork, to: { x: 852, y: 96 }, width: 168 },
-  ];
-
-  for (const seg of segments) {
-    const dx = seg.to.x - seg.from.x;
-    const dy = seg.to.y - seg.from.y;
-    const len = Math.hypot(dx, dy);
-    const ux = dx / len;
-    const uy = dy / len;
-    const nx = -uy;
-    const ny = ux;
-
-    const rows = Math.max(3, Math.round(len / 48));
-    for (let i = 0; i < rows; i++) {
-      const t = (i + 0.5) / rows;
-      const bx = seg.from.x + dx * t;
-      const by = seg.from.y + dy * t;
-      const cols = 4;
-      for (let c = 0; c < cols; c++) {
-        const off = (c - (cols - 1) / 2) * (seg.width / cols);
-        const jitterN = rand(r, -6, 6);
-        const jitterU = rand(r, -8, 8);
-        const px = bx + nx * (off + jitterN) + ux * jitterU;
-        const py = by + ny * (off + jitterN) + uy * jitterU;
-        const sw = (seg.width / cols) * rand(r, 0.82, 0.98);
-        const sh = 48 * rand(r, 0.66, 0.88);
-        const rot = (Math.atan2(uy, ux) * 180) / Math.PI + 90 + rand(r, -7, 7);
-        const fill = r() > 0.5 ? C.stone : C.stoneAlt;
-
-        edges.push(
-          `<rect x="${n(-sw / 2)}" y="${n(-sh / 2)}" width="${n(sw)}" height="${n(sh)}" rx="${n(sh * 0.22)}" fill="${C.stoneEdge}" transform="translate(${n(px)} ${n(py + 9)}) rotate(${n(rot)})"/>`
-        );
-        stones.push(
-          `<rect x="${n(-sw / 2)}" y="${n(-sh / 2)}" width="${n(sw)}" height="${n(sh)}" rx="${n(sh * 0.22)}" fill="${fill}" transform="translate(${n(px)} ${n(py)}) rotate(${n(rot)})"/>`
-        );
-      }
-    }
+    parts.push(
+      `<rect x="${n(-w / 2)}" y="${n(-h / 2)}" width="${n(w)}" height="${n(h)}" rx="${n(rx)}" fill="${C.stoneEdge}" transform="translate(${n(cx)} ${n(cy + 6)}) rotate(${n(rot)})"/>`,
+      `<rect x="${n(-w / 2)}" y="${n(-h / 2)}" width="${n(w)}" height="${n(h)}" rx="${n(rx)}" fill="${fill}" transform="translate(${n(cx)} ${n(cy)}) rotate(${n(rot)})"/>`
+    );
   }
-
-  const body = `<g>${edges.join('')}</g><g>${stones.join('')}</g>`;
-  return svgDoc(S, S, body);
-}
-
-// ---------------------------------------------------------------- figure
-
-/** Simple robed cut-out figure, flat colours, heavy outline. */
-function makeFigure() {
-  const w = 320;
-  const h = 560;
-  const body = `
-    <g stroke="${C.outline}" stroke-width="10" stroke-linejoin="round">
-      <!-- robe -->
-      <path d="M160 190 C 214 190 236 250 246 420 L 258 494 L 62 494 L 74 420 C 84 250 106 190 160 190 Z" fill="${C.figure}"/>
-      <!-- shaded left side, painted-on form -->
-      <path d="M160 190 C 106 190 84 250 74 420 L 62 494 L 138 494 L 132 420 C 128 280 138 214 160 190 Z" fill="${C.figureDark}" stroke="none"/>
-      <!-- arms -->
-      <path d="M96 250 C 68 292 62 344 70 386" fill="none" stroke-linecap="round"/>
-      <path d="M224 250 C 252 292 258 344 250 386" fill="none" stroke-linecap="round"/>
-      <!-- head -->
-      <circle cx="160" cy="132" r="62" fill="${C.figureSkin}"/>
-      <!-- hood brim -->
-      <path d="M92 118 C 104 62 216 62 228 118 C 200 92 120 92 92 118 Z" fill="${C.figureDark}"/>
-    </g>
-    <g fill="${C.outline}">
-      <circle cx="139" cy="140" r="8"/>
-      <circle cx="184" cy="140" r="8"/>
-    </g>
-  `;
-  return svgDoc(w, h, body);
+  return svgDoc(S, S, parts.join(''));
 }
 
 // ---------------------------------------------------------------- markers
@@ -336,6 +281,106 @@ function makeHazardMarker() {
   return svgDoc(w, h, body);
 }
 
+// ---------------------------------------------------------------- fog
+
+const smoothCurve = (t) => t * t * (3 - 2 * t);
+
+/**
+ * Seamlessly tiling value noise, sampled with wrap-around grid indices so
+ * the result repeats without a visible seam in either axis. That tiling is
+ * the whole point: the fog shader scrolls this texture at several scales and
+ * speeds at once, which only works if it can repeat forever.
+ *
+ * Returns a function (u, v) -> 0..1.
+ */
+function tileableNoise(seed, octaves) {
+  const r = rng(seed);
+  const layers = octaves.map((o) => {
+    const g = new Float32Array(o.cells * o.cells);
+    for (let i = 0; i < g.length; i++) g[i] = r();
+    return { ...o, g };
+  });
+
+  return (u, v) => {
+    let sum = 0;
+    let total = 0;
+    for (const o of layers) {
+      const x = u * o.cells;
+      const y = v * o.cells;
+      const x0 = Math.floor(x);
+      const y0 = Math.floor(y);
+      const fx = smoothCurve(x - x0);
+      const fy = smoothCurve(y - y0);
+      const wrap = (i) => ((i % o.cells) + o.cells) % o.cells;
+      const at = (xx, yy) => o.g[wrap(yy) * o.cells + wrap(xx)];
+      const top = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * fx;
+      const bot = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * fx;
+      sum += (top + (bot - top) * fy) * o.amp;
+      total += o.amp;
+    }
+    return sum / total;
+  };
+}
+
+/**
+ * The fog shader's noise source: a single greyscale tile, no alpha and no
+ * baked-in edges. Everything that shapes the fog — the soft border, the
+ * vertical density falloff, the dissolve — is computed live in the shader
+ * (see the curtain material in main.js), so this texture only has to supply
+ * raw churn that tiles cleanly.
+ */
+function makeFogNoise(seed = 4242, S = 256) {
+  const noise = tileableNoise(seed, [
+    { cells: 4, amp: 0.5 },
+    { cells: 8, amp: 0.3 },
+    { cells: 16, amp: 0.2 },
+  ]);
+  const buf = Buffer.alloc(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      buf[y * S + x] = Math.round(255 * noise(x / S, y / S));
+    }
+  }
+  // Greyscale (1 channel) — the shader only ever reads .r.
+  return sharp(buf, { raw: { width: S, height: S, channels: 1 } })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
+/**
+ * A single fog puff sprite: soft radial falloff, its edge broken up by noise
+ * so the blobs don't read as a field of identical circles. White, with the
+ * shape carried entirely in alpha.
+ */
+function makeFogPuff(seed = 7373, S = 128) {
+  const noise = tileableNoise(seed, [
+    { cells: 3, amp: 0.6 },
+    { cells: 6, amp: 0.4 },
+  ]);
+  const buf = Buffer.alloc(S * S * 4);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const u = x / (S - 1);
+      const v = y / (S - 1);
+      const dx = u - 0.5;
+      const dy = v - 0.5;
+      const d = Math.min(1, Math.hypot(dx, dy) * 2);
+      // Noise both erodes the rim and ripples the interior a little.
+      const n = noise(u, v);
+      const radial = 1 - smoothCurve(Math.max(0, Math.min(1, (d - 0.15) / 0.85)));
+      const a = radial * (0.55 + 0.45 * n);
+      const o = (y * S + x) * 4;
+      buf[o] = 252;
+      buf[o + 1] = 253;
+      buf[o + 2] = 255;
+      buf[o + 3] = Math.round(255 * Math.max(0, Math.min(1, a)));
+    }
+  }
+  return sharp(buf, { raw: { width: S, height: S, channels: 4 } })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
 // ---------------------------------------------------------------- build
 
 const assets = [
@@ -365,20 +410,28 @@ const assets = [
       minScale: 1.05, maxScale: 1.5, yJitter: 52, lift: 22,
     }),
   },
-  { name: 'path', svg: makePath() },
-  { name: 'figure', svg: makeFigure() },
+  { name: 'stone-a', svg: makeStoneTile(5511) },
+  { name: 'stone-b', svg: makeStoneTile(5522) },
+  { name: 'stone-c', svg: makeStoneTile(5533) },
+  { name: 'stone-d', svg: makeStoneTile(5544) },
   { name: 'pillar', svg: makePillar() },
   { name: 'marker-safe', svg: makeSafeMarker() },
   { name: 'marker-hazard', svg: makeHazardMarker() },
+  // Fog textures are raw pixel buffers, not SVG.
+  { name: 'fog-noise', png: makeFogNoise() },
+  { name: 'fog-puff', png: makeFogPuff() },
 ];
 
 let total = 0;
 for (const a of assets) {
-  const svgPath = join(svgDir, `${a.name}.svg`);
-  writeFileSync(svgPath, a.svg, 'utf8');
+  if (a.svg) {
+    writeFileSync(join(svgDir, `${a.name}.svg`), a.svg, 'utf8');
+  }
 
   const pngPath = join(outDir, `${a.name}.png`);
-  const buf = await sharp(Buffer.from(a.svg)).png({ compressionLevel: 9 }).toBuffer();
+  const buf = a.svg
+    ? await sharp(Buffer.from(a.svg)).png({ compressionLevel: 9 }).toBuffer()
+    : await a.png;
   writeFileSync(pngPath, buf);
   total += buf.length;
   const meta = await sharp(buf).metadata();
