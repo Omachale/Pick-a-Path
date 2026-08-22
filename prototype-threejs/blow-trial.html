@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en-NZ">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>Blow-off trial</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; overflow: hidden;
+        /* The "void" is this gradient, not scene geometry — costs nothing to render,
+           and gives the falling card a sense of depth/distance as it passes through
+           visually distinct bands on the way down. */
+        background: linear-gradient(to bottom, #060916 0%, #150f2e 22%, #341a3f 42%, #5c2540 60%, #7a2f3a 75%, #3a1420 100%);
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-user-select: none; user-select: none;
+      }
+      canvas { display: block; touch-action: none; }
+
+      #panel {
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 10;
+        padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 14px);
+        background: rgba(8, 12, 20, 0.72);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        color: #f4f7fa;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .row { display: flex; align-items: center; gap: 10px; }
+      .row label { font: 600 12px/1.2 system-ui, sans-serif; width: 92px; flex-shrink: 0; }
+      .row input[type="range"] { flex: 1; }
+      .row .val { width: 44px; text-align: right; font: 500 11px/1 ui-monospace, monospace; opacity: 0.8; }
+
+      #blowBtn {
+        min-height: 54px;
+        border: 0;
+        border-radius: 14px;
+        font: 700 16px/1.2 system-ui, sans-serif;
+        color: #12212f;
+        background: #ffe9b8;
+        box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+      }
+      #blowBtn:active { transform: translateY(2px); }
+
+      #resetBtn {
+        min-height: 40px;
+        border: 0;
+        border-radius: 10px;
+        font: 600 13px/1.2 system-ui, sans-serif;
+        color: #f4f7fa;
+        background: rgba(244, 247, 250, 0.14);
+      }
+
+      #hud {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 8px);
+        left: 8px;
+        z-index: 10;
+        font: 500 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #f4f7fa;
+        background: rgba(10, 20, 30, 0.45);
+        backdrop-filter: blur(6px);
+        padding: 7px 10px;
+        border-radius: 8px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">blow trial</div>
+
+    <div id="panel">
+      <div class="row">
+        <label for="distance">Blow point</label>
+        <input id="distance" type="range" min="0" max="1" step="0.01" value="0.4" />
+        <span class="val" id="distanceVal">near</span>
+      </div>
+      <div class="row">
+        <label for="strength">Strength</label>
+        <input id="strength" type="range" min="0" max="1" step="0.01" value="0.6" />
+        <span class="val" id="strengthVal">0.60</span>
+      </div>
+      <div class="row" style="gap: 10px;">
+        <button id="blowBtn" style="flex: 1;">Blow</button>
+        <button id="resetBtn" style="flex: 0 0 auto; padding: 0 18px;">Reset card</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/blow-trial.js"></script>
+  </body>
+</html>

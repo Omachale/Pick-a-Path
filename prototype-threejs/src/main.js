@@ -12,6 +12,12 @@
  */
 
 import * as THREE from 'three';
+import RAPIER from '@dimforge/rapier3d-compat';
+
+// Rapier ships as WASM and needs an async init before any RAPIER.* class can
+// be used — everything below (including the wrong-turn fall physics) waits
+// on this, same pattern as blow-trial.js.
+await RAPIER.init();
 
 const T_START = performance.now();
 
@@ -118,8 +124,49 @@ function localToWorld(cursor, right, fwd) {
 }
 
 // ---------------------------------------------------------------- renderer / scene
+//
+// `powerPreference: 'high-performance'` forces the discrete GPU on hybrid-
+// graphics laptops, which is the faster choice when it works but is also
+// the option most likely to hit a blocklisted/misbehaving driver (seen in
+// practice as Firefox's "Exhausted GL driver options" — it tried every
+// ANGLE/EGL backend it knows and none of them would create a context for
+// that GPU). Retry with progressively safer options rather than failing
+// outright the first time a context can't be created, and if every attempt
+// fails, replace the loading spinner with an actual message — silently
+// hanging on "Loading sky path…" forever is a worse failure mode than a
+// blunt error.
+function createRenderer() {
+  const attempts = [
+    { antialias: true, powerPreference: 'high-performance' },
+    { antialias: true }, // let the browser pick the GPU
+    { antialias: false }, // antialiasing itself can be part of what's failing
+    { antialias: false, failIfMajorPerformanceCaveat: false }, // accept a software/slow fallback rather than none
+  ];
+  let lastErr;
+  for (const opts of attempts) {
+    try {
+      return new THREE.WebGLRenderer(opts);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+let renderer;
+try {
+  renderer = createRenderer();
+} catch (err) {
+  const loaderEl = document.getElementById('loader');
+  if (loaderEl) {
+    loaderEl.innerHTML =
+      '<div style="max-width: 320px; text-align: center; line-height: 1.5;">' +
+      "Your browser couldn't create a 3D graphics context, so this can't run here.<br><br>" +
+      'Try: enabling hardware acceleration in your browser settings, updating your graphics drivers, or a different browser (Chrome/Edge tend to recover from this better than Firefox).' +
+      '</div>';
+  }
+  throw err;
+}
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
@@ -271,34 +318,16 @@ const TEX = {
 
 // ---------------------------------------------------------------- character roster
 //
-// Each character ships as two textures (see art/split-character.mjs): the
-// character art itself, and its cardboard backing board split out separately
-// as a grayscale shape carrying the original fold/shadow lightness. Tinting
-// the backing's material colour recolours the board while keeping that
-// shading — see makeCharacterRig below. New characters just need an entry
-// here (run the split script once to produce the two textures) — the
-// selection screen and rig are both built from this list, not hardcoded to
-// any one character.
-//
-// TODO: once the user's other character images arrive (Assets/, same
-// die-cut-standee style as Player Indy.png, each on its own strong solid
-// backing colour), for each one:
-//   1. Resize to a working width (sharp, e.g. `.resize({ width: 400 })`) —
-//      match whatever the source's native aspect works out to; there's no
-//      fixed target height, see figure-indy at 400x563.
-//   2. Run `node art/split-character.mjs <resized.png> <output-name>` from
-//      prototype-threejs/ — it auto-detects that character's own backing hue,
-//      no per-image tuning needed unless the console output or the two
-//      resulting PNGs (public/textures/<output-name>.png and
-//      <output-name>-backing.png) look wrong on inspection.
-//   3. Add one entry to ROSTER below: { key, label, tex: '<output-name>' }.
-//   4. Sanity check both output images (Read tool renders PNGs) before
-//      wiring in — confirm the character cutout has no leftover background
-//      fringe and the backing silhouette has a clean character-shaped hole.
-const ROSTER = [{ key: 'indy', label: 'Explorer', tex: 'figure-indy' }];
+// Each character loads a single texture (the front-facing art).
+// New characters just need an entry here — the selection screen and rig are
+// both built from this list, not hardcoded to any one character.
+const ROSTER = [
+  { key: 'woman2', tex: 'figure-woman2', ext: 'webp' },
+  { key: 'indy', tex: 'figure-indy', ext: 'png' },
+];
 const CHAR_TEX = {};
 for (const c of ROSTER) {
-  CHAR_TEX[c.key] = { front: tex(c.tex), backing: tex(`${c.tex}-backing`) };
+  CHAR_TEX[c.key] = { front: tex(c.tex, { ext: c.ext }) };
 }
 
 // A small fixed palette rather than a free colour picker — every option here
@@ -1031,7 +1060,7 @@ let bird = null; // { mesh, z, side, entryX, entryY, hoverX, hoverY, hoverNdcX, 
 let birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
 
 function maybeSpawnBird(dt) {
-  if (bird || finished) return;
+  if (bird || finished || falling) return;
   birdTimer -= dt;
   if (birdTimer > 0) return;
   birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
@@ -1071,6 +1100,7 @@ function maybeSpawnBird(dt) {
 
   const mesh = birdMeshes[Math.floor(Math.random() * birdMeshes.length)];
   mesh.position.set(entryWorld.x, entryWorld.y - BIRD_H / 2, z);
+  mesh.material.opacity = 1; // undo any fade-out left over from a bird cut short by a fall (see cancelBirdsForFall)
   mesh.visible = true;
   bird = {
     mesh, z, side, t: 0,
@@ -1078,7 +1108,20 @@ function maybeSpawnBird(dt) {
     hoverX: hoverWorld.x, hoverY: hoverWorld.y,
     hoverNdcX, hoverNdcY: eyeNdc.y,
     exitDirX, exitDirY,
+    fading: false, fadeT: 0,
   };
+}
+
+const BIRD_FALL_FADE = 0.3; // seconds — how fast any on-screen bird fades out once a fall starts
+/** Called once from startFall(): whatever bird is currently on screen fades
+ * out over BIRD_FALL_FADE instead of finishing its own flight, and no new
+ * bird spawns until the fall is over (see the `falling` check in
+ * maybeSpawnBird) — a mid-air gust isn't the moment for wildlife spotting. */
+function cancelBirdsForFall() {
+  if (bird && !bird.fading) {
+    bird.fading = true;
+    bird.fadeT = 0;
+  }
 }
 
 let birdDebugFreeze = false; // dev-only: pauses updateBirds' own repositioning so a debug override sticks on screen
@@ -1087,6 +1130,17 @@ function updateBirds(dt) {
   if (birdDebugFreeze) return;
   maybeSpawnBird(dt);
   if (!bird) return;
+
+  if (bird.fading) {
+    bird.fadeT += dt;
+    bird.mesh.material.opacity = Math.max(0, 1 - bird.fadeT / BIRD_FALL_FADE);
+    if (bird.fadeT >= BIRD_FALL_FADE) {
+      bird.mesh.visible = false;
+      bird = null;
+    }
+    return; // held in place while fading — no flight-path repositioning
+  }
+
   bird.t += dt;
   const { mesh, z, t, entryX, entryY, hoverX, hoverY, hoverNdcX, hoverNdcY, exitDirX, exitDirY } = bird;
   const riseEnd = BIRD_RISE_TIME;
@@ -1241,50 +1295,38 @@ const FIGURE_H = 2.2 * 0.8;
 const FIGURE_ASPECT = 400 / 563;
 
 /**
- * Builds one character rig: a backing plane (tintable, sits just behind) and
- * the character art in front, as children of a Group. The group is what the
- * rest of the game treats as "the figure" — its .position/.rotation are set
- * exactly like a single Mesh's would be (Group shares that API via
- * Object3D), so nothing downstream needs to know it's actually two panels.
+ * Builds one character rig: the character art as a single plane.
+ * The group shares Object3D API so position/rotation work identically
+ * to a Mesh, even though it contains one.
  */
 function makeCharacterRig(key) {
-  const { front, backing } = CHAR_TEX[key];
+  const { front } = CHAR_TEX[key];
   const w = FIGURE_H * FIGURE_ASPECT;
   const group = new THREE.Group();
-
-  const backingMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, FIGURE_H),
-    new THREE.MeshBasicMaterial({ map: backing, transparent: true, alphaTest: 0.2, side: THREE.DoubleSide })
-  );
-  backingMesh.position.z = -0.01;
-  backingMesh.castShadow = true;
 
   const frontMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(w, FIGURE_H),
     new THREE.MeshBasicMaterial({ map: front, transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
   );
-  frontMesh.position.z = 0.01;
   frontMesh.castShadow = true;
 
-  group.add(backingMesh, frontMesh);
+  group.add(frontMesh);
   group.position.y = FIGURE_H / 2;
   scene.add(group);
-  return { group, backingMesh, frontMesh };
+  return { group, frontMesh };
 }
 
 function disposeRig(r) {
   scene.remove(r.group);
-  for (const mesh of [r.backingMesh, r.frontMesh]) {
-    mesh.geometry.dispose();
-    mesh.material.dispose();
-  }
+  r.frontMesh.geometry.dispose();
+  r.frontMesh.material.dispose();
 }
 
 let characterKey = ROSTER[0].key;
 let rig = makeCharacterRig(characterKey);
 let figure = rig.group;
 
-function setCharacter(key, colorHex) {
+function setCharacter(key) {
   if (key !== characterKey) {
     const old = rig;
     characterKey = key;
@@ -1292,9 +1334,126 @@ function setCharacter(key, colorHex) {
     figure = rig.group;
     disposeRig(old);
   }
-  rig.backingMesh.material.color.setHex(colorHex);
 }
-setCharacter(ROSTER[0].key, PALETTE[0].hex);
+setCharacter(ROSTER[0].key);
+
+// ---------------------------------------------------------------- fall physics (Rapier)
+//
+// Used only for the wrong-turn consequence — the avatar drops off the path
+// under real gravity instead of just vanishing. No colliders exist for it to
+// land on; it free-falls until FALL_UI_DELAY shows the result, then keeps
+// falling for FALL_EXTRA_DURATION longer before actually freezing.
+//
+// "Wind" is faked rather than simulated: a true helical field would need a
+// force that keeps rotating around the fall for as long as it blows, which
+// is a lot of machinery for something on screen a couple of seconds. Instead
+// a single off-centre force is applied each physics step for a short window,
+// its magnitude decaying to zero and its horizontal direction slowly
+// rotating — a decaying, turning push reads as "caught by a gust and spun
+// around" close enough to a helix at this timescale, for a few lines of code
+// instead of a field simulation. See blow-trial.js for the fuller multi-puff
+// version of this idea if a later pass wants more chaos than one rotating
+// force gives.
+const fallWorld = new RAPIER.World({ x: 0, y: -9.82, z: 0 });
+const FALL_FIXED_DT = 1 / 60;
+fallWorld.timestep = FALL_FIXED_DT;
+
+const CARD_THICK = 0.05;
+// The "you fell" message/Again button and the card actually stopping are two
+// different clocks: the UI shows up at FALL_UI_DELAY, but the card keeps
+// tumbling in the background for FALL_EXTRA_DURATION more seconds after
+// that — the player reads the result while the fall is still visibly
+// happening, rather than staring at a frozen card the instant the message
+// appears.
+const FALL_UI_DELAY = 2.2; // seconds — when "you fell…" + Again appear
+const FALL_EXTRA_DURATION = 5; // seconds the card keeps falling after that, before it actually freezes
+const FALL_DISAPPEAR = 5; // seconds — the card itself vanishes (too far/small to read as falling any more), well before the freeze at FALL_UI_DELAY + FALL_EXTRA_DURATION
+
+const WIND_DURATION = 0.9; // seconds — how long the gust lasts before the card just free-falls
+const WIND_STRENGTH = 2.4; // peak sideways force (N-ish, tuned by eye against CARD mass below)
+const WIND_ANGULAR_SPEED = (280 * Math.PI) / 180; // rad/s the push direction sweeps around — the "helical" part
+const WIND_SPREAD_Y = FIGURE_H * 0.45; // how far off-centre (local, vertical) the push lands — generates tumble via r x F
+const CARD_MASS = 0.4;
+
+let fallBody = null;
+let falling = false;
+let fallAccumulator = 0;
+let fallElapsed = 0;
+let windAngle = 0; // current heading of the sweeping wind push, radians
+
+// The fall camera doesn't lean out from wherever it happened to be trailing
+// the walker — that's still CAM_BACK behind the edge, so tilting down from
+// there looks *through* the walkway itself rather than past it. Instead it
+// eases to a fixed point beside the edge (walker's position when the stub
+// ran out — see startFall), offset sideways so the walkway's own stones
+// aren't between the camera and the open air the figure is falling through.
+const fallCamAnchor = new THREE.Vector3(); // computed once in startFall(), held fixed for the whole fall
+const FALL_CAM_HEIGHT = 2.6; // above the edge — enough to look down and clear of the stones
+const FALL_CAM_SIDE = 2.8; // sideways offset from the walkway's centreline
+const FALL_CAM_FORWARD = 0.8; // small nudge out past the last stone
+const FALL_CAM_EASE = 3.2; // per-second ease rate toward the anchor
+
+function startFall() {
+  figure.visible = true; // in case a previous fall hid it and something skipped the reset handler's restore
+  if (fallBody) fallWorld.removeRigidBody(fallBody);
+
+  fallBody = fallWorld.createRigidBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(figure.position.x, figure.position.y, figure.position.z)
+      .setRotation({ x: figure.quaternion.x, y: figure.quaternion.y, z: figure.quaternion.z, w: figure.quaternion.w })
+      .setLinearDamping(0.05)
+      .setAngularDamping(0.15)
+      .setAdditionalMass(CARD_MASS)
+  );
+  fallWorld.createCollider(
+    RAPIER.ColliderDesc.cuboid((FIGURE_H * FIGURE_ASPECT) / 2, FIGURE_H / 2, CARD_THICK / 2),
+    fallBody
+  );
+
+  // One-off random stumble so every fall spins differently from the start —
+  // the sweeping wind force (applied per-step below) takes over the ongoing
+  // chaos a moment later.
+  fallBody.setAngvel(
+    { x: (Math.random() * 2 - 1) * 2.4, y: (Math.random() * 2 - 1) * 2.4, z: (Math.random() * 2 - 1) * 2.4 },
+    true
+  );
+  fallBody.setLinvel(
+    { x: (Math.random() * 2 - 1) * 0.6, y: 0.4, z: (Math.random() * 2 - 1) * 0.6 },
+    true
+  );
+
+  windAngle = Math.random() * Math.PI * 2; // random starting heading so falls don't all spiral the same way
+
+  falling = true;
+  fallAccumulator = 0;
+  fallElapsed = 0;
+
+  // Anchor beside the edge (walker's position when the stub ran out), not
+  // wherever the trailing camera happened to be — see comment above.
+  // Lean in the direction of the falling path: left if they chose left, right if they chose right.
+  const angleOffset = choiceSide === 'left' ? Math.PI / 2 : -Math.PI / 2;
+  const side = forward(facing + angleOffset, FALL_CAM_SIDE);
+  const ahead = forward(facing, FALL_CAM_FORWARD);
+  fallCamAnchor.set(walker.x + side.x + ahead.x, FALL_CAM_HEIGHT, walker.z + side.z + ahead.z);
+
+  cancelBirdsForFall();
+}
+
+/** Applies the decaying, rotating wind push for one physics step — call once
+ * per fallWorld.step() while within WIND_DURATION of the fall starting. */
+function applyFallWind() {
+  if (fallElapsed >= WIND_DURATION) return;
+  const decay = 1 - fallElapsed / WIND_DURATION; // linear fade to zero
+  windAngle += WIND_ANGULAR_SPEED * FALL_FIXED_DT;
+
+  const mag = WIND_STRENGTH * decay * CARD_MASS * FALL_FIXED_DT; // force -> impulse over one step
+  const dir = { x: Math.cos(windAngle), z: Math.sin(windAngle) };
+  const impulse = { x: dir.x * mag, y: 0, z: dir.z * mag };
+
+  const t = fallBody.translation();
+  const worldPoint = { x: t.x, y: t.y + WIND_SPREAD_Y, z: t.z }; // off-centre vertically -> torque for free
+  fallBody.applyImpulseAtPoint(impulse, worldPoint, true);
+}
 
 // figure.position/rotation are the *visual* transform, redrawn from these
 // every frame (see the step-bob block in tick()) — walker is the actual
@@ -1321,7 +1480,7 @@ const markerPair = { left: makeMarker(), right: makeMarker() };
 
 function updateMarkers() {
   const sec = sections[forkIndex - 1];
-  const showCurrent = !leg && !finished && role === 'guide' && sec;
+  const showCurrent = !leg && !finished && !falling && role === 'guide' && sec;
   if (!showCurrent) {
     markerPair.left.visible = false;
     markerPair.right.visible = false;
@@ -1361,6 +1520,7 @@ let sunP = timeOfDay(1);
 
 // leg: the walk currently in progress, or null while awaiting a decision.
 let leg = null;
+let choiceSide = null; // 'left' or 'right' — tracks which path was chosen, used for camera angle during fall
 
 function makeLeg(queue, realPoints, fromP, toP, arriveFork) {
   return { queue, total: pathLength(realPoints), traveled: 0, fromP, toP, arriveFork };
@@ -1388,7 +1548,6 @@ const els = {
   role: document.getElementById('role'),
   hint: document.getElementById('hint'),
   hud: document.getElementById('hud'),
-  wrongFlash: document.getElementById('wrongFlash'),
   charSelect: document.getElementById('charSelect'),
   charList: document.getElementById('charList'),
   paletteList: document.getElementById('paletteList'),
@@ -1404,19 +1563,18 @@ const els = {
 // either way, since they can't see or reach anything behind it.
 let pickedCharacter = ROSTER[0].key;
 let pickedColorHex = PALETTE[0].hex;
+let charSelectIndex = 0; // carousel index
 
 function renderCharSelect() {
+  // Carousel: show one character at a time with left/right navigation
   els.charList.innerHTML = '';
-  for (const c of ROSTER) {
-    const btn = document.createElement('button');
-    btn.className = 'charOption' + (c.key === pickedCharacter ? ' selected' : '');
-    btn.innerHTML = `<img src="textures/${c.tex}.png" alt="${c.label}" />`;
-    btn.addEventListener('click', () => {
-      pickedCharacter = c.key;
-      renderCharSelect();
-    });
-    els.charList.appendChild(btn);
-  }
+  const c = ROSTER[charSelectIndex];
+  const btn = document.createElement('button');
+  btn.className = 'charOption selected';
+  btn.innerHTML = `<img src="textures/${c.tex}.${c.ext}" alt="" />`;
+  btn.style.cursor = 'default';
+  btn.style.pointerEvents = 'none';
+  els.charList.appendChild(btn);
 
   els.paletteList.innerHTML = '';
   for (const p of PALETTE) {
@@ -1424,42 +1582,79 @@ function renderCharSelect() {
     btn.className = 'swatch' + (p.hex === pickedColorHex ? ' selected' : '');
     btn.style.background = `#${p.hex.toString(16).padStart(6, '0')}`;
     btn.setAttribute('aria-label', p.label);
-    btn.addEventListener('click', () => {
-      pickedColorHex = p.hex;
-      renderCharSelect();
-    });
+    btn.disabled = true;
     els.paletteList.appendChild(btn);
   }
+
+  pickedCharacter = c.key;
 }
 renderCharSelect();
 
+// Carousel navigation buttons
+function updateCarouselNav() {
+  const charListParent = els.charList.parentElement;
+
+  let navRow = document.getElementById('charNavRow');
+  if (!navRow) {
+    navRow = document.createElement('div');
+    navRow.id = 'charNavRow';
+    navRow.style.cssText = 'display: flex; gap: 12px; justify-content: center; margin-top: 12px; align-items: center;';
+    charListParent.insertBefore(navRow, els.charList.nextSibling);
+  }
+
+  // Update counter
+  let counter = navRow.querySelector('span');
+  if (!counter) {
+    const leftBtn = document.createElement('button');
+    leftBtn.id = 'charNavLeft';
+    leftBtn.textContent = '‹';
+    leftBtn.style.cssText = 'width: 40px; height: 40px; border: 0; border-radius: 8px; background: rgba(244, 247, 250, 0.14); color: #f4f7fa; font-size: 24px; cursor: pointer; display: flex; align-items: center; justify-content: center;';
+    leftBtn.addEventListener('click', () => {
+      charSelectIndex = (charSelectIndex - 1 + ROSTER.length) % ROSTER.length;
+      renderCharSelect();
+      updateCarouselNav();
+    });
+
+    counter = document.createElement('span');
+    counter.style.cssText = 'color: #f4f7fa; font-size: 12px; opacity: 0.6; width: 30px; text-align: center;';
+
+    const rightBtn = document.createElement('button');
+    rightBtn.id = 'charNavRight';
+    rightBtn.textContent = '›';
+    rightBtn.style.cssText = 'width: 40px; height: 40px; border: 0; border-radius: 8px; background: rgba(244, 247, 250, 0.14); color: #f4f7fa; font-size: 24px; cursor: pointer; display: flex; align-items: center; justify-content: center;';
+    rightBtn.addEventListener('click', () => {
+      charSelectIndex = (charSelectIndex + 1) % ROSTER.length;
+      renderCharSelect();
+      updateCarouselNav();
+    });
+
+    navRow.appendChild(leftBtn);
+    navRow.appendChild(counter);
+    navRow.appendChild(rightBtn);
+  }
+  counter.textContent = `${charSelectIndex + 1}/${ROSTER.length}`;
+}
+updateCarouselNav();
+
 els.charStart.addEventListener('click', () => {
-  setCharacter(pickedCharacter, pickedColorHex);
+  setCharacter(pickedCharacter);
   els.charSelect.classList.remove('visible');
   setTimeout(() => els.charSelect.classList.remove('show'), 350);
 });
 
-// TODO: placeholder wrong-turn/fall feedback — a quick red flash. Swap for a
-// real animation (stumble, actual fall) later. Used for every wrong pick, not
-// just the final one.
-let wrongFlashTimer = null;
-function onWrongTurn() {
-  els.wrongFlash.classList.add('show');
-  clearTimeout(wrongFlashTimer);
-  wrongFlashTimer = setTimeout(() => els.wrongFlash.classList.remove('show'), 220);
-}
-
 function refreshUI() {
   updateMarkers();
   const walking = !!leg;
-  els.left.classList.toggle('hidden', walking || finished);
-  els.right.classList.toggle('hidden', walking || finished);
+  els.left.classList.toggle('hidden', walking || finished || falling);
+  els.right.classList.toggle('hidden', walking || finished || falling);
   els.reset.classList.toggle('hidden', !finished);
 
   if (finished) {
     els.hint.textContent = finishedSuccess
       ? `You reached the temple — all ${N_FORKS} crossings were safe.`
       : `The path ran out — you fell at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`;
+  } else if (falling) {
+    els.hint.textContent = 'Falling…';
   } else if (walking) {
     els.hint.textContent = 'Walking to the next fork…';
   } else {
@@ -1480,6 +1675,7 @@ const choose = (side) => () => {
   const sec = sections[forkIndex - 1];
   if (!sec) return;
 
+  choiceSide = side; // track which path was chosen for camera angle during fall
   const wasCorrect = side === sec.correct;
   const branchPts = sec.branch[side];
   const queue = branchPts.slice();
@@ -1507,10 +1703,17 @@ els.reset.addEventListener('click', () => {
   forkIndex = 1;
   finished = false;
   finishedSuccess = false;
+  falling = false;
   correctCount = 0;
+  choiceSide = null;
   walker.set(0, 0, 0);
   facing = 0;
   walkPhase = 0;
+  // The fall leaves figure.quaternion tumbled on all three axes; the walk-bob
+  // code only ever writes rotation.z back, so x/y would otherwise carry the
+  // fall's tilt into the new walk. Clear the whole rotation explicitly.
+  figure.rotation.set(0, 0, 0);
+  figure.visible = true; // undo the FALL_DISAPPEAR hide, if the card vanished before this click
   startJourney();
   refreshUI();
 });
@@ -1613,13 +1816,16 @@ function tick() {
       sunP = leg.toP;
       if (leg.arriveFork) {
         forkIndex = leg.arriveFork;
-      } else {
+      } else if (leg.success) {
         finished = true;
-        finishedSuccess = !!leg.success;
+        finishedSuccess = true;
+      } else {
         // The fall fires here, at the moment the stones run out, rather than
         // back when the button was pressed — the consequence should land when
-        // the player walks off the edge.
-        if (!leg.success) onWrongTurn();
+        // the player walks off the edge. startFall() hands the figure off to
+        // physics for the drop itself — `finished` doesn't flip true until
+        // the fall resolves, below.
+        startFall();
       }
       leg = null;
       refreshUI();
@@ -1631,19 +1837,53 @@ function tick() {
   // clamped to the next multiple of PI rather than just stopped, so motion
   // never cuts off mid-rise or mid-fall. Each PI-wide lobe lifts and tilts
   // the figure one way; consecutive lobes alternate right/left via `side`.
-  if (walking) {
-    walkPhase += dt * WALK_BOB_RATE;
-  } else if (walkPhase > 0) {
-    const nextBoundary = Math.ceil(walkPhase / Math.PI - 1e-6) * Math.PI;
-    walkPhase = Math.min(walkPhase + dt * WALK_BOB_RATE, nextBoundary);
-    if (walkPhase >= nextBoundary - 1e-6) walkPhase = 0;
+  // Three states: falling (physics owns figure.position); just fell and
+  // waiting on "Again" (frozen exactly where the fall left it — the bob code
+  // would otherwise snap it back to standing the very next frame); or the
+  // normal walking/idle/reached-the-temple case (bob code, as before).
+  if (falling) {
+    fallAccumulator += dt;
+    let steps = 0;
+    while (fallAccumulator >= FALL_FIXED_DT && steps < 5) {
+      applyFallWind();
+      fallWorld.step();
+      fallAccumulator -= FALL_FIXED_DT;
+      steps++;
+    }
+    fallElapsed += dt;
+    const ft = fallBody.translation();
+    const fr = fallBody.rotation();
+    figure.position.set(ft.x, ft.y, ft.z);
+    figure.quaternion.set(fr.x, fr.y, fr.z, fr.w);
+    if (fallElapsed >= FALL_DISAPPEAR) figure.visible = false;
+
+    // The message/Again button show up at FALL_UI_DELAY, but `falling` stays
+    // true — and the physics keeps running, above — for FALL_EXTRA_DURATION
+    // longer, so the card is still visibly tumbling behind the UI rather
+    // than freezing the instant the result appears.
+    if (!finished && fallElapsed >= FALL_UI_DELAY) {
+      finished = true;
+      finishedSuccess = false;
+      refreshUI();
+    }
+    if (fallElapsed >= FALL_UI_DELAY + FALL_EXTRA_DURATION) {
+      falling = false;
+    }
+  } else if (!(finished && !finishedSuccess)) {
+    if (walking) {
+      walkPhase += dt * WALK_BOB_RATE;
+    } else if (walkPhase > 0) {
+      const nextBoundary = Math.ceil(walkPhase / Math.PI - 1e-6) * Math.PI;
+      walkPhase = Math.min(walkPhase + dt * WALK_BOB_RATE, nextBoundary);
+      if (walkPhase >= nextBoundary - 1e-6) walkPhase = 0;
+    }
+    const lobe = Math.floor(walkPhase / Math.PI);
+    const within = walkPhase - lobe * Math.PI;
+    const lift = Math.sin(within); // 0 -> 1 -> 0 across each lobe
+    const side = lobe % 2 === 0 ? 1 : -1; // right lobe first, then left, alternating
+    figure.position.set(walker.x + side * lift * WALK_BOB_LATERAL, FIGURE_H / 2 + lift * WALK_BOB_HEIGHT, walker.z);
+    figure.rotation.z = -side * lift * WALK_BOB_TILT;
   }
-  const lobe = Math.floor(walkPhase / Math.PI);
-  const within = walkPhase - lobe * Math.PI;
-  const lift = Math.sin(within); // 0 -> 1 -> 0 across each lobe
-  const side = lobe % 2 === 0 ? 1 : -1; // right lobe first, then left, alternating
-  figure.position.set(walker.x + side * lift * WALK_BOB_LATERAL, FIGURE_H / 2 + lift * WALK_BOB_HEIGHT, walker.z);
-  figure.rotation.z = -side * lift * WALK_BOB_TILT;
 
   applySun(sunP);
   applyAtmosphere(sunP); // leaves the current tint in tintScratch for updateCurtains
@@ -1680,18 +1920,33 @@ function tick() {
     }
   }
 
-  // camera: trails the avatar along its facing direction, plus the drag offset, eased
-  look.x += (look.tx - look.x) * Math.min(1, dt * 4);
-  look.y += (look.ty - look.y) * Math.min(1, dt * 4);
+  // Recomputed fresh here rather than reusing a value from the block above —
+  // that block can flip `falling`/`finished` mid-tick (the fall resolving
+  // this exact frame), and the camera needs to see the up-to-date state,
+  // not whatever was true at the top of tick().
+  const justFell = finished && !finishedSuccess;
+  if (falling) {
+    // Eases to the fixed anchor beside the edge (see startFall) and pans
+    // the look-at down to track the figure as it drops — a held position
+    // with a moving gaze, not a scripted camera path.
+    camera.position.lerp(fallCamAnchor, Math.min(1, dt * FALL_CAM_EASE));
+    camera.lookAt(figure.position.x, figure.position.y, figure.position.z);
+  } else if (!justFell) {
+    // camera: trails the avatar along its facing direction, plus the drag offset, eased
+    look.x += (look.tx - look.x) * Math.min(1, dt * 4);
+    look.y += (look.ty - look.y) * Math.min(1, dt * 4);
 
-  const behind = forward(facing, CAM_BACK);
-  const ahead = forward(facing, 4.6);
-  camera.position.set(
-    walker.x - behind.x + look.x,
-    3.9 + look.y + Math.sin(t * 0.6) * 0.05,
-    walker.z - behind.z
-  );
-  camera.lookAt(walker.x + ahead.x, 1.25, walker.z + ahead.z);
+    const behind = forward(facing, CAM_BACK);
+    const ahead = forward(facing, 4.6);
+    camera.position.set(
+      walker.x - behind.x + look.x,
+      3.9 + look.y + Math.sin(t * 0.6) * 0.05,
+      walker.z - behind.z
+    );
+    camera.lookAt(walker.x + ahead.x, 1.25, walker.z + ahead.z);
+  }
+  // else: just fell — camera stays exactly where the fall left it, frozen
+  // alongside the figure, until "Again" resets everything at once.
 
   key.target.position.set(walker.x, 0, walker.z);
 
@@ -1785,13 +2040,18 @@ if (import.meta.env.DEV) {
   window.__figurePose = () => ({
     walkPhase: +walkPhase.toFixed(3),
     pos: figure.position.toArray().map((v) => +v.toFixed(4)),
-    rotZ: +figure.rotation.z.toFixed(4),
+    rot: figure.rotation.toArray().slice(0, 3).map((v) => +v.toFixed(4)),
     walker: walker.toArray().map((v) => +v.toFixed(4)),
+  });
+  window.__fallDebug = () => ({
+    falling,
+    fallElapsed: +fallElapsed.toFixed(3),
+    camPos: camera.position.toArray().map((v) => +v.toFixed(3)),
+    figurePos: figure.position.toArray().map((v) => +v.toFixed(3)),
+    figureVisible: figure.visible,
   });
   window.__rig = () => ({
     characterKey,
-    backingColor: rig.backingMesh.material.color.getHexString(),
-    backingMap: rig.backingMesh.material.map.source.data?.currentSrc || rig.backingMesh.material.map.name,
     frontMap: rig.frontMesh.material.map.source.data?.currentSrc || rig.frontMesh.material.map.name,
   });
   window.__cloudRows = () => cloudRows.map((r) => +r.position.z.toFixed(2));
