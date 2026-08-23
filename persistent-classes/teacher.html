@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Sky Path — teacher: classes &amp; rosters</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  input, button { font-size: 1rem; padding: 0.4rem 0.6rem; }
+  button { margin-left: 0.5rem; }
+  .hint { color: #666; font-size: 0.9rem; }
+  section { border-top: 1px solid #ddd; padding-top: 1rem; margin-top: 1.5rem; }
+  table { border-collapse: collapse; margin-top: 0.5rem; width: 100%; }
+  td, th { padding: 0.3rem 0.6rem; text-align: left; border-bottom: 1px solid #eee; }
+  #authStatus { font-weight: bold; }
+  #classList button { margin: 0.2rem 0.3rem 0.2rem 0; }
+  .error { color: crimson; }
+</style>
+</head>
+<body>
+  <h1>Sky Path — teacher</h1>
+  <p class="hint">
+    Step 5 prototype: real Supabase Auth account, real classes and rosters
+    in Postgres (see persistent-classes/schema.sql). UI is intentionally
+    plain — this proves the data model works, not the final teacher UX.
+  </p>
+
+  <section id="authSection">
+    <h2>Sign in</h2>
+    <p>
+      <input id="emailInput" type="email" placeholder="you@school.example" />
+      <input id="passwordInput" type="password" placeholder="password" />
+    </p>
+    <p>
+      <button id="signUpBtn">Sign up</button>
+      <button id="signInBtn">Sign in</button>
+      <button id="signOutBtn" style="display:none;">Sign out</button>
+    </p>
+    <p id="authStatus">not signed in</p>
+  </section>
+
+  <section id="classesSection" style="display:none;">
+    <h2>Your classes</h2>
+    <ul id="classList"></ul>
+    <p>
+      <input id="newClassName" type="text" placeholder="New class name" />
+      <button id="createClassBtn">Create class</button>
+    </p>
+  </section>
+
+  <section id="rosterSection" style="display:none;">
+    <h2>Roster: <span id="currentClassName"></span></h2>
+    <p class="hint">Join link for students: <code id="joinLink"></code></p>
+    <table id="rosterTable">
+      <thead><tr><th>Name</th><th>Score</th><th>Equipment</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p>
+      <input id="newStudentName" type="text" placeholder="Student name" />
+      <button id="addStudentBtn">Add to roster</button>
+    </p>
+  </section>
+
+  <script type="module" src="./teacher.js"></script>
+</body>
+</html>

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Lobby prototype — participant sync &amp; grouping</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  #status { font-weight: bold; }
+  input, button { font-size: 1rem; padding: 0.4rem 0.6rem; }
+  button { margin-left: 0.5rem; }
+  #participantList { border: 1px solid #ccc; padding: 0.5rem 1rem; min-height: 3rem; }
+  #participantList > li { margin: 0.6rem 0; font-weight: bold; }
+  #participantList ul { font-weight: normal; margin: 0.2rem 0; }
+  .hint { color: #666; font-size: 0.9rem; }
+  section { border-top: 1px solid #ddd; padding-top: 1rem; margin-top: 1.5rem; }
+  table { border-collapse: collapse; margin-top: 0.5rem; }
+  td, th { padding: 0.2rem 0.6rem; text-align: left; }
+  #yourGroup { font-weight: bold; }
+</style>
+</head>
+<body>
+  <h1>Lobby prototype</h1>
+  <p>
+    Proves participant records sync live across devices through Supabase,
+    and that grouping can be layered on top without changing that model.
+    Open this page in two or three tabs to simulate devices — click "New
+    device" in each extra tab first, so it gets its own identity token
+    instead of sharing this browser's stored one.
+  </p>
+
+  <p class="hint">My identity token: <code id="token"></code>
+    <button id="resetBtn">New device (reset identity)</button>
+  </p>
+
+  <p>
+    <input id="nameInput" type="text" placeholder="Your name" />
+    <button id="joinBtn">Join lobby</button>
+  </p>
+
+  <p id="status">not connected</p>
+
+  <p>
+    <button id="addPointBtn" disabled>+1 point (test score sync)</button>
+  </p>
+
+  <p>Your group: <span id="yourGroup">—</span></p>
+
+  <h2>Participants</h2>
+  <ul id="participantList"></ul>
+
+  <section>
+    <h2>Group management</h2>
+    <p class="hint">
+      No teacher role or auth yet — this panel is open on every device just
+      to prove the mechanism. "Randomise" only fills in the table below;
+      "Apply groups" is what actually broadcasts it to everyone.
+    </p>
+    <p>
+      Students per group: <input id="groupSizeInput" type="number" min="1" value="4" style="width: 4rem;" />
+      <button id="randomiseBtn" disabled>Randomise</button>
+    </p>
+    <table id="groupTable">
+      <thead><tr><th>Name</th><th>Group #</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p><button id="applyGroupsBtn" disabled>Apply groups</button></p>
+  </section>
+
+  <section>
+    <h2>Game mode (trivial pipe test)</h2>
+    <p class="hint">
+      Proves session → group → room → game-mode end to end: each device
+      auto-joins its own group's room channel once grouped. A message sent
+      here only reaches devices in the <em>same</em> group — a different
+      group's room is a separate channel entirely, so two groups can run
+      this at once without seeing each other's messages.
+    </p>
+    <p>Room status: <span id="roomStatus">not in a room (unassigned)</span></p>
+    <p>
+      <input id="roomMessageInput" type="text" placeholder="Message to your group" />
+      <button id="sendRoomMessageBtn" disabled>Send to my group</button>
+    </p>
+    <ul id="roomLog"></ul>
+  </section>
+
+  <section>
+    <h2>Start Sky Path (step 4 — real game-mode wiring)</h2>
+    <p class="hint">
+      Generates the shared fork sequence and picks a guide from your room's
+      own members, then broadcasts both on the same room channel above.
+      Every device (including this one) gets a link into the actual Sky Path
+      game, already carrying the right role and maze for this room.
+    </p>
+    <p><button id="startSkyPathBtn" disabled>Start Sky Path for my group</button></p>
+    <p id="gameLink"></p>
+  </section>
+
+  <script type="module" src="./lobby.js"></script>
+</body>
+</html>

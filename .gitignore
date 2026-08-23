@@ -1,9 +1,14 @@
 node_modules/
 dist/
+shots/
 .DS_Store
 *.log
 .env
 .env.local
+relay-smoke-test/config.js
+lobby-prototype/config.js
+prototype-threejs/src/multiplayer-config.js
+persistent-classes/config.js
 .idea/
 .vscode/
 *.swp

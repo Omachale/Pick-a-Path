@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "sky-path-prototype",
+      "name": "app",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "prototype-threejs", "run", "dev"],
-      "port": 5180
+      "runtimeArgs": ["run", "dev", "--prefix", "app"],
+      "port": 5181
     }
   ]
 }

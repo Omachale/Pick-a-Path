@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Sky Path — join with a persistent roster</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  input, select, button { font-size: 1rem; padding: 0.4rem 0.6rem; }
+  button { margin-left: 0.5rem; }
+  .hint { color: #666; font-size: 0.9rem; }
+  section { border-top: 1px solid #ddd; padding-top: 1rem; margin-top: 1.5rem; }
+  .error { color: crimson; }
+  #participant { font-weight: bold; }
+</style>
+</head>
+<body>
+  <h1>Join Sky Path (persistent roster)</h1>
+  <p class="hint">
+    Step 5 prototype: proves picking a name from the teacher's roster resumes
+    the same score across a "new day" — no networked game here, just the
+    identity/persistence mechanism from
+    <code>identity/supabaseIdentityStore.js</code>.
+  </p>
+  <p class="hint">Class id: <code id="classIdDisplay"></code></p>
+  <p class="hint">My device token: <code id="token"></code></p>
+
+  <p>
+    <select id="nameSelect"><option value="">Loading roster…</option></select>
+    <button id="joinBtn">Join as this student</button>
+  </p>
+  <p id="status"></p>
+
+  <section id="participantSection" style="display:none;">
+    <p id="participant"></p>
+    <p><button id="addPointBtn">+1 point</button></p>
+    <p>
+      <button id="simulateNewDayBtn">Simulate new day (forget this device's claim)</button>
+    </p>
+  </section>
+
+  <script type="module" src="./student.js"></script>
+</body>
+</html>

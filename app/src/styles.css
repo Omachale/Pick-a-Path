@@ -1,0 +1,22 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+/* The game mounts into a full-bleed surface; lobby screens sit in a column. */
+.screen {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem;
+}

@@ -13,6 +13,7 @@
 
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
+import { initMultiplayer } from './multiplayer.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
 // be used — everything below (including the wrong-turn fall physics) waits
@@ -26,14 +27,14 @@ const T_START = performance.now();
 // The path is generated as a chain of straight legs (a "trunk" leading to a
 // fork, then a "branch" out of it) advancing from a running cursor of
 // {x, z, heading}. heading 0 means "walking toward -Z", which is also the
-// direction the temple sits in. Because the actual choice made at each fork
-// determines the heading of everything downstream. Because the correct side
-// at every fork is fixed in advance, the whole route can nonetheless be built
-// before the player moves — see buildJourney() below.
+// direction the temple sits in. The choice made at each fork determines the
+// heading of everything downstream, and the route is built **one fork at a
+// time** as those choices are made rather than all up front — see the journey
+// section further down for why that matters for fairness, not just memory.
 
 const N_FORKS = 6; // fixed for a given round; would come from teacher setup in a real build
 const FORK_HALF_ANGLE = THREE.MathUtils.degToRad(12); // each branch's turn off centre — kept tight so a run of same-direction picks can't build up a big drift
-const HEADING_CORRECTION = 0.7; // fraction of heading drift straightened out during the trunk that follows a branch
+const HEADING_CORRECTION = 0.7; // how strongly the trunk after a branch re-aims at the temple (0 = keep the branch's heading, 1 = point straight at it) — see templeHeading()
 const TRUNK_SEGMENTS = 4;
 const BRANCH_SEGMENTS = 3;
 
@@ -700,7 +701,7 @@ function spawnPillars(forkCursor) {
 // the domain warp's own reach), so that edge is provably always at alpha 0,
 // never something the geometry itself has to draw a line at.
 const FOG_W = 16;
-const FOG_H = 7;
+const FOG_H = 11.04; // scaled up with the visible radii to maintain margin past FADE_RY
 const FOG_Y = 1.6; // centre height — unrelated to FOG_H now; see CORE_RY/FADE_RY for what's actually visible
 const FOG_RISE = 0.9; // the bank lifts a little as it burns off
 const FOG_EXPAND = 0.14; // ...and swells slightly, as thinning fog does
@@ -708,15 +709,15 @@ const FOG_EXPAND = 0.14; // ...and swells slightly, as thinning fog does
 // The guaranteed-solid zone, in world units from the sheet's centre — must
 // cover the path corridor (±1.3) with a little margin. Nothing here ever
 // gets warped or faded; see the warp gate in FOG_FRAG for why that's exact,
-// not approximate.
-const FOG_CORE_RX = 1.35;
-const FOG_CORE_RY = 0.95;
+// not approximate. Scaled 30% larger to block more of downstream geometry.
+const FOG_CORE_RX = 2.106;
+const FOG_CORE_RY = 1.482;
 // Where alpha reaches 0. The gap between CORE and FADE is deliberately much
 // wider in X than Y — "wider is fine" for how gradually it dissipates
 // sideways, but a matching vertical expansion would undo the earlier fix
-// for the fog sitting too high.
-const FOG_FADE_RX = 5.5;
-const FOG_FADE_RY = 2.3;
+// for the fog sitting too high. Scaled 30% to match the core.
+const FOG_FADE_RX = 8.58;
+const FOG_FADE_RY = 3.588;
 // Domain warp: bends the whole silhouette in flowing curves instead of a
 // smooth-but-still-rectangular product of two 1D falloffs, which is what
 // still read as a soft-edged box even after the noisy-border pass. Sized
@@ -727,9 +728,9 @@ const FOG_WARP_Y = 0.4;
 
 const PUFF_COUNT = 28;
 const PUFF_ALPHA = 0.5;
+const PUFF_SPREAD_X = 7.02; // scaled 20% more with the fog radii
+const PUFF_SPREAD_Y = 4.1184; // scaled 20% more with the fog radii
 const PUFF_SIZE = [1.1, 2.5];
-const PUFF_SPREAD_X = 4.5; // wider, to match the sheet's wider dissipation
-const PUFF_SPREAD_Y = 4.4 * 0.6; // matches the shorter sheet
 const PUFF_DEPTH = [0.05, 1.6]; // all in front of the sheet — see renderOrder note below
 const PUFF_PUSH = 2.6; // outward drift once dissolving
 const PUFF_LIFT = 1.5;
@@ -1195,11 +1196,27 @@ function updateBirds(dt) {
 
 // ---------------------------------------------------------------- the journey
 //
-// The whole route is built once, up front, before the player moves — every
-// trunk, both branches of every fork, and every curtain. That is possible
-// because the correct side at each fork is fixed in advance, so the route a
-// successful player walks is fully determined; and it is what guarantees the
-// player never watches the path assemble itself.
+// The route is built **one fork at a time**, not all at once up front. That is
+// a deliberate anti-cheat measure, not just a memory saving: because only the
+// *correct* branch of a fork feeds the cursor that the next fork is planted
+// from (see buildFork below), the mere world-position of a downstream fork's
+// pillars encodes which side was correct upstream of it. With the whole route
+// present from the start, a player could read the shape of the path, the
+// angle it takes toward the temple, and where the distant pillars sit, and
+// back-solve the current fork without ever needing the guide's clue. Building
+// on demand means that information does not exist yet to be read.
+//
+// The invariant this maintains: **at the moment any fork is being decided, no
+// geometry beyond that fork's own two branches exists.** The next fork is
+// built at the instant a correct choice is committed (see extendPastFork),
+// by which point the decision it would have leaked is already made.
+//
+// It is safe to build it right then, rather than partway through the walk,
+// because the new geometry lands well beyond the current fork's curtain — and
+// that curtain has not begun dissolving yet (updateCurtains only trips
+// `opening` once the walker is within CURTAIN_OPEN_LEAD of it, and the walker
+// is still standing at the fork). So it is hidden from the moment it exists,
+// with none of the mid-walk state machine that deferring it would need.
 //
 // Both branches of a fork look identical up to the curtain. Past it, the
 // correct one carries on to the next fork while the wrong one simply stops
@@ -1208,8 +1225,14 @@ function updateBirds(dt) {
 // could have seen coming.
 const WRONG_STUB_LEN = BRANCH_LEN * 0.8; // wrong branch stops here — past the curtain, short of anywhere
 
-const sections = []; // one per fork: { fork, correct, branch:{left,right}, trunkAfter, approach, curtain }
+const sections = []; // one per fork, built on demand: { fork, correct, branch:{left,right}, trunkAfter, approach, curtain, nextCursor, endPhase }
 let introTrunkPts = [];
+
+// Where the *next* fork will be planted, and the stone-row phase carried along
+// the route to it. These were locals of the old single-pass build loop; they
+// have to persist between calls now that the loop is spread across choices.
+let journeyCursor = null; // {x, z, heading}
+let journeyPhase = 0;
 
 function clearJourney() {
   resetGround();
@@ -1231,57 +1254,116 @@ function clearJourney() {
   sections.length = 0;
 }
 
+/**
+ * The heading that points from `pos` straight at the temple, which sits at
+ * (0, -TEMPLE_DISTANCE). Headings are measured with 0 = -Z, matching
+ * forward(): a direction (dx, dz) is atan2(dx, -dz).
+ */
+function templeHeading(pos) {
+  return Math.atan2(-pos.x, TEMPLE_DISTANCE + pos.z);
+}
+
+/**
+ * Plants fork `k` at the current journeyCursor: its pillars, both branches,
+ * and its curtain. Records where the correct branch ends (nextCursor) so
+ * extendPastFork can carry on from there later, without rebuilding anything.
+ */
+function buildFork(k) {
+  const cursor = journeyCursor;
+  const correct = CORRECT_BY_FORK[k - 1];
+  spawnPillars(cursor);
+
+  const branch = {};
+  const forkPhase = journeyPhase; // both branches leave the fork on the same row phase
+  let nextCursor = null;
+  let endPhase = forkPhase;
+
+  for (const side of ['left', 'right']) {
+    const isCorrect = side === correct;
+    const heading = cursor.heading + (side === 'right' ? FORK_HALF_ANGLE : -FORK_HALF_ANGLE);
+    const len = isCorrect ? BRANCH_LEN : WRONG_STUB_LEN;
+    const segs = isCorrect ? BRANCH_SEGMENTS : 2;
+    const pts = genStraight(cursor, heading, len, segs);
+    const p = scatterAlong(cursor, pts, forkPhase);
+    branch[side] = pts;
+    if (isCorrect) {
+      endPhase = p;
+      const end = pts[pts.length - 1];
+      // Straighten *toward the temple*, not merely toward world heading 0.
+      // Correcting to 0 fixes the direction of travel but is blind to lateral
+      // drift already accumulated, so a run of same-side correct picks used to
+      // leave the walker tracking parallel to the temple's centreline rather
+      // than converging on it — arriving off to one side. Aiming at the temple
+      // itself straightens and re-centres in the same step, and needs no
+      // separate drift term: the further off-centre the cursor is, the more
+      // this heading differs from straight-ahead, so the pull scales itself.
+      nextCursor = {
+        x: end.x,
+        z: end.z,
+        heading: THREE.MathUtils.lerp(heading, templeHeading(end), HEADING_CORRECTION),
+      };
+    }
+  }
+
+  const sec = {
+    fork: { ...cursor },
+    correct,
+    branch,
+    trunkAfter: null,
+    approach: null,
+    nextCursor,
+    endPhase,
+  };
+  sec.curtain = makeCurtain(advance(sec.fork, sec.fork.heading, CURTAIN_DIST), sec.fork.heading);
+  sections.push(sec);
+  return sec;
+}
+
+/**
+ * Commits the correct branch of fork `k`: lays the trunk beyond it (or, at the
+ * last fork, the final approach to the temple) and plants the *next* fork.
+ * Called from choose() the moment a correct pick is made — see the section
+ * header for why building this far ahead doesn't show the player anything.
+ *
+ * Must run before choose() reads sec.trunkAfter / sec.approach, since this is
+ * what fills them in.
+ */
+function extendPastFork(k) {
+  const sec = sections[k - 1];
+  if (!sec || sec.trunkAfter || sec.approach) return; // already extended — don't double-build
+  const nextCursor = sec.nextCursor;
+  journeyPhase = sec.endPhase;
+
+  if (k < N_FORKS) {
+    const trunkPts = genStraight(nextCursor, nextCursor.heading, TRUNK_LEN, TRUNK_SEGMENTS);
+    journeyPhase = scatterAlong(nextCursor, trunkPts, journeyPhase);
+    sec.trunkAfter = trunkPts;
+    const end = trunkPts[trunkPts.length - 1];
+    journeyCursor = { x: end.x, z: end.z, heading: nextCursor.heading };
+    buildFork(k + 1);
+  } else {
+    const approachPts = genStraight(nextCursor, nextCursor.heading, APPROACH_DISTANCE, 3);
+    journeyPhase = scatterAlong(nextCursor, approachPts, journeyPhase);
+    sec.approach = approachPts;
+  }
+}
+
+/**
+ * Starts a fresh route: clears whatever the last run built, lays the intro
+ * trunk, and plants fork 1. Nothing past fork 1 exists until it is chosen.
+ */
 function buildJourney() {
   clearJourney();
   const origin = { x: 0, z: 0, heading: 0 };
-  let phase = ROW_SPACING;
+  journeyPhase = ROW_SPACING;
 
   introTrunkPts = genStraight(origin, origin.heading, TRUNK_LEN, TRUNK_SEGMENTS);
-  phase = scatterAlong(origin, introTrunkPts, phase);
+  journeyPhase = scatterAlong(origin, introTrunkPts, journeyPhase);
 
   const introEnd = introTrunkPts[introTrunkPts.length - 1];
-  let cursor = { x: introEnd.x, z: introEnd.z, heading: origin.heading };
+  journeyCursor = { x: introEnd.x, z: introEnd.z, heading: origin.heading };
 
-  for (let k = 1; k <= N_FORKS; k++) {
-    const correct = CORRECT_BY_FORK[k - 1];
-    spawnPillars(cursor);
-
-    const branch = {};
-    const forkPhase = phase; // both branches leave the fork on the same row phase
-    let nextCursor = null;
-
-    for (const side of ['left', 'right']) {
-      const isCorrect = side === correct;
-      const heading = cursor.heading + (side === 'right' ? FORK_HALF_ANGLE : -FORK_HALF_ANGLE);
-      const len = isCorrect ? BRANCH_LEN : WRONG_STUB_LEN;
-      const segs = isCorrect ? BRANCH_SEGMENTS : 2;
-      const pts = genStraight(cursor, heading, len, segs);
-      const endPhase = scatterAlong(cursor, pts, forkPhase);
-      branch[side] = pts;
-      if (isCorrect) {
-        phase = endPhase;
-        const end = pts[pts.length - 1];
-        nextCursor = { x: end.x, z: end.z, heading: heading * (1 - HEADING_CORRECTION) };
-      }
-    }
-
-    const sec = { fork: { ...cursor }, correct, branch, trunkAfter: null, approach: null };
-
-    if (k < N_FORKS) {
-      const trunkPts = genStraight(nextCursor, nextCursor.heading, TRUNK_LEN, TRUNK_SEGMENTS);
-      phase = scatterAlong(nextCursor, trunkPts, phase);
-      sec.trunkAfter = trunkPts;
-      const end = trunkPts[trunkPts.length - 1];
-      cursor = { x: end.x, z: end.z, heading: nextCursor.heading };
-    } else {
-      const approachPts = genStraight(nextCursor, nextCursor.heading, APPROACH_DISTANCE, 3);
-      phase = scatterAlong(nextCursor, approachPts, phase);
-      sec.approach = approachPts;
-    }
-
-    sec.curtain = makeCurtain(advance(sec.fork, sec.fork.heading, CURTAIN_DIST), sec.fork.heading);
-    sections.push(sec);
-  }
+  buildFork(1);
 }
 
 // The avatar is a rig of two stacked planes — the character art in front,
@@ -1431,7 +1513,7 @@ function startFall() {
   // Anchor beside the edge (walker's position when the stub ran out), not
   // wherever the trailing camera happened to be — see comment above.
   // Lean in the direction of the falling path: left if they chose left, right if they chose right.
-  const angleOffset = choiceSide === 'left' ? Math.PI / 2 : -Math.PI / 2;
+  const angleOffset = choiceSide === 'left' ? -Math.PI / 2 : Math.PI / 2;
   const side = forward(facing + angleOffset, FALL_CAM_SIDE);
   const ahead = forward(facing, FALL_CAM_FORWARD);
   fallCamAnchor.set(walker.x + side.x + ahead.x, FALL_CAM_HEIGHT, walker.z + side.z + ahead.z);
@@ -1515,7 +1597,8 @@ let forkIndex = 1; // 1..N_FORKS — the fork currently awaiting a decision
 let finished = false;
 let finishedSuccess = false;
 let correctCount = 0;
-let role = 'guide';
+const mp = initMultiplayer(); // no-op unless ?room=&role= is in the URL — see multiplayer.js
+let role = mp.enabled ? mp.role : 'guide';
 let sunP = timeOfDay(1);
 
 // leg: the walk currently in progress, or null while awaiting a decision.
@@ -1553,6 +1636,17 @@ const els = {
   paletteList: document.getElementById('paletteList'),
   charStart: document.getElementById('charStart'),
 };
+
+// Role is assigned by the lobby in a networked game, not togglable — see
+// multiplayer.js. Reflect the assigned role in the button but disable it,
+// rather than hiding it, so it's still visible confirmation of which role
+// this device has.
+if (mp.enabled) {
+  els.role.disabled = true;
+  els.role.dataset.role = role;
+  els.role.textContent = role === 'guide' ? 'Guide view' : 'Player view';
+  els.role.title = 'Role is assigned by the lobby for a networked game';
+}
 
 // ---------------------------------------------------------------- character selection screen
 //
@@ -1645,8 +1739,11 @@ els.charStart.addEventListener('click', () => {
 function refreshUI() {
   updateMarkers();
   const walking = !!leg;
-  els.left.classList.toggle('hidden', walking || finished || falling);
-  els.right.classList.toggle('hidden', walking || finished || falling);
+  // In a networked game only the guide's client acts on a fork — see
+  // multiplayer.js's doc comment for why this is deliberately one-sided.
+  const cannotAct = mp.enabled && role === 'player';
+  els.left.classList.toggle('hidden', walking || finished || falling || cannotAct);
+  els.right.classList.toggle('hidden', walking || finished || falling || cannotAct);
   els.reset.classList.toggle('hidden', !finished);
 
   if (finished) {
@@ -1666,14 +1763,21 @@ function refreshUI() {
   }
 }
 
-// Every piece of path already exists (see buildJourney) — choosing only picks
-// which set of waypoints to walk. A correct pick continues through the fork's
-// branch into whatever follows it; a wrong pick walks the short stub and runs
-// out of stones in mid-air, which ends the journey.
-const choose = (side) => () => {
+// Only the current fork's own two branches exist when this runs (see the
+// journey section header). A correct pick therefore has to *build* what
+// follows — the trunk beyond this fork and the next fork itself — before it
+// can queue the walk through it; a wrong pick builds nothing, and walks the
+// short stub until it runs out of stones in mid-air, which ends the journey.
+function applyChoice(side) {
   if (leg || finished) return;
   const sec = sections[forkIndex - 1];
   if (!sec) return;
+
+  // In a networked game, only the guide's own click should tell the rest of
+  // the room what happened — see multiplayer.js. This runs for both the
+  // guide's own click and a player's replay of the guide's broadcast choice,
+  // so the broadcast has to happen before anything below mutates forkIndex.
+  if (mp.enabled && role === 'guide') mp.broadcastChoice(forkIndex, side);
 
   choiceSide = side; // track which path was chosen for camera angle during fall
   const wasCorrect = side === sec.correct;
@@ -1683,6 +1787,7 @@ const choose = (side) => () => {
 
   if (wasCorrect) {
     correctCount++;
+    extendPastFork(forkIndex); // fills in sec.trunkAfter / sec.approach and plants the next fork
     const continuation = sec.trunkAfter || sec.approach || [];
     queue.push(...continuation);
     realPoints.push(...continuation);
@@ -1695,9 +1800,18 @@ const choose = (side) => () => {
     leg.success = false;
   }
   refreshUI();
-};
-els.left.addEventListener('click', choose('left'));
-els.right.addEventListener('click', choose('right'));
+}
+els.left.addEventListener('click', () => applyChoice('left'));
+els.right.addEventListener('click', () => applyChoice('right'));
+
+// A player device never clicks left/right itself (see refreshUI's
+// `cannotAct`) — it just replays whatever the guide's client broadcast, so
+// its own walk stays in lockstep. `remoteForkIndex` guards against acting on
+// a stale/out-of-order message from a previous fork.
+mp.onRemoteChoice((side, remoteForkIndex) => {
+  if (remoteForkIndex !== forkIndex) return;
+  applyChoice(side);
+});
 
 els.reset.addEventListener('click', () => {
   forkIndex = 1;
