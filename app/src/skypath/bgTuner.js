@@ -1,5 +1,15 @@
 /**
- * THROWAWAY — a live tuning panel for the world-floor backdrop.
+ * A live tuning panel for the world-floor backdrop and the wind clouds.
+ *
+ * NOT MOUNTED BY DEFAULT. Every value it was built to find is baked into
+ * skyPath.js as of 2026-08-26; run with `?solo=1&tune=1` (dev builds only) to
+ * bring the sliders back. It is kept rather than deleted because the next
+ * piece of backdrop art will want it again, and because the numbers it
+ * produces are unguessable — not because anything currently depends on it.
+ *
+ * It writes to the live objects only. Nothing here persists: whatever is
+ * found has to be copied back into the constants in skyPath.js by hand, which
+ * is what the `log values` button is for.
  *
  * Where the sky meets the water is a judgement call you can only make by
  * looking at it: the art is at a fixed aspect ratio, the camera pitches as the
@@ -40,7 +50,7 @@ const rowsFor = (state, isShell) => {
 
 const isShellMesh = (mesh) => !!mesh.userData?.shell;
 
-export function attachBgTuner({ container, panels, toggles = {}, setClearColor = null }) {
+export function attachBgTuner({ container, panels, toggles = {}, extras = {} }) {
   // Flat panels are PlaneGeometry at a fixed size, so "height" is applied as a
   // scale against whatever they were built at rather than by rebuilding the
   // geometry on every slider tick. The ground deck is a plane too — rotated
@@ -156,6 +166,49 @@ export function attachBgTuner({ container, panels, toggles = {}, setClearColor =
     }
   }
 
+  // Loose numeric knobs that aren't a panel's position or size — wind speeds,
+  // layer heights, anything a caller wants on a slider without teaching this
+  // module what it means. The caller owns the setter; this just moves it.
+  const extraValues = {};
+  const extraNames = Object.keys(extras);
+  if (extraNames.length) {
+    const title = document.createElement('div');
+    title.textContent = 'WIND';
+    title.style.cssText = 'margin:8px 0 2px;opacity:0.7;letter-spacing:0.08em;';
+    body.appendChild(title);
+
+    for (const name of extraNames) {
+      const { value, min, max, step = 0.1, set, format } = extras[name];
+      const show = format ?? ((v) => v.toFixed(1));
+      extraValues[name] = Number(value);
+      const row = document.createElement('label');
+      row.style.cssText = 'display:block;margin-bottom:2px;';
+
+      const cap = document.createElement('span');
+      cap.style.cssText = 'display:flex;justify-content:space-between;';
+      const val = document.createElement('span');
+      val.textContent = show(Number(value));
+      cap.append(Object.assign(document.createElement('span'), { textContent: name }), val);
+
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = min;
+      input.max = max;
+      input.step = step;
+      input.value = value;
+      input.style.cssText = 'width:100%;margin:0;';
+      input.addEventListener('input', () => {
+        const v = Number(input.value);
+        extraValues[name] = v;
+        val.textContent = show(v);
+        set(v);
+      });
+
+      row.append(cap, input);
+      body.appendChild(row);
+    }
+  }
+
   // Visibility switches for every other layer that can paint into the horizon
   // band. Identifying an unwanted layer is a process of elimination, and a
   // checkbox does that in one click where reading z values does not.
@@ -183,55 +236,26 @@ export function attachBgTuner({ container, panels, toggles = {}, setClearColor =
     }
   }
 
-  // The clear colour is not a layer — it is the void showing through wherever
-  // no painted panel covers the frame. It can't be toggled off, so the control
-  // is a swatch: set it to magenta to see exactly where the gap is.
-  if (setClearColor) {
-    const title = document.createElement('div');
-    title.textContent = 'VOID (clear colour)';
-    title.style.cssText = 'margin:8px 0 2px;opacity:0.7;letter-spacing:0.08em;';
-    body.appendChild(title);
-
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:4px;align-items:center;';
-
-    const swatch = document.createElement('input');
-    swatch.type = 'color';
-    swatch.value = '#6b4a5a';
-    swatch.style.cssText = 'flex:1;height:22px;padding:0;border:0;background:none;cursor:pointer;';
-    swatch.addEventListener('input', () => setClearColor(swatch.value));
-
-    const mk = (label, fn) => {
-      const b = document.createElement('button');
-      b.textContent = label;
-      b.style.cssText =
-        'border:0;border-radius:5px;padding:4px 6px;font:600 10px/1 system-ui,sans-serif;color:#12212f;background:#cfe3f5;cursor:pointer;';
-      b.addEventListener('click', fn);
-      return b;
-    };
-    row.append(
-      swatch,
-      mk('flag', () => {
-        swatch.value = '#ff00ff';
-        setClearColor('#ff00ff');
-      }),
-      mk('auto', () => setClearColor(null))
-    );
-    body.appendChild(row);
-  }
-
   const dump = document.createElement('button');
   dump.textContent = 'log values';
   dump.style.cssText =
     'width:100%;margin-top:6px;border:0;border-radius:6px;padding:6px;font:600 11px/1 system-ui,sans-serif;color:#12212f;background:#cfe3f5;';
   dump.addEventListener('click', () => {
-    const text = Object.entries(layers)
-      .map(([n, l]) =>
-        l.shell
-          ? `${n}: radius: ${l.state.z}, height: ${l.state.h}, y: ${l.state.y}, arcDeg: ${l.state.arc}`
-          : `${n}: y: ${l.state.y}, h: ${l.state.h}, z: ${l.state.z}`
-      )
-      .join('\n');
+    const panelLines = Object.entries(layers).map(([n, l]) =>
+      l.shell
+        ? `${n}: radius: ${l.state.z}, height: ${l.state.h}, y: ${l.state.y}, arcDeg: ${l.state.arc}`
+        : `${n}: y: ${l.state.y}, h: ${l.state.h}, z: ${l.state.z}`
+    );
+    // Extras and hidden layers are dumped too: between them they are most of
+    // the tunable surface now, and a session that could only copy back the
+    // panel half would be useless.
+    const extraLines = Object.entries(extraValues).map(([n, v]) => `${n}: ${v}`);
+    const hidden = Object.keys(toggles).filter((n) => toggles[n] && !toggles[n].visible);
+    const text = [
+      ...panelLines,
+      ...extraLines,
+      hidden.length ? `hidden: ${hidden.join(', ')}` : 'hidden: none',
+    ].join('\n');
     console.log('[bgTuner]\n' + text);
     navigator.clipboard?.writeText(text).catch(() => {});
     dump.textContent = 'copied ✓';

@@ -330,11 +330,6 @@ export function mountSkyPath(container, options = {}) {
   const fogScratch = new THREE.Color();
   const clearScratch = new THREE.Color();
 
-  // Dev-only pin for the clear colour, so the void behind the painted layers
-  // can be identified and colour-matched by eye instead of by arithmetic on
-  // the three day-cycle stops. Null = follow the day cycle as normal.
-  let clearOverride = null;
-
   function applyAtmosphere(p) {
     threeStopLerp(tintScratch, TINT_DAWN, TINT_NOON, TINT_DUSK, p);
     for (const mat of atmosphereMaterials) mat.color.copy(tintScratch);
@@ -343,7 +338,7 @@ export function mountSkyPath(container, options = {}) {
     scene.fog.color.copy(fogScratch);
 
     threeStopLerp(clearScratch, CLEAR_DAWN, CLEAR_NOON, CLEAR_DUSK, p);
-    renderer.setClearColor(clearOverride ?? clearScratch, 1);
+    renderer.setClearColor(clearScratch, 1);
   }
 
   // ---------------------------------------------------------------- asset loading
@@ -386,6 +381,8 @@ export function mountSkyPath(container, options = {}) {
     cloudDeck: tex('cloud-deck', { repeatWrap: true }),
     cloudsFar: tex('clouds-far', { repeatWrap: true }),
     cloudsMid: tex('clouds-mid', { repeatWrap: true }),
+    cloudDense: tex('cloud-dense', { ext: 'webp', tile: true }),
+    cloudLight: tex('cloud-light', { tile: true }),
     stoneA: tex('stone-a'),
     stoneB: tex('stone-b'),
     stoneC: tex('stone-c'),
@@ -665,6 +662,294 @@ export function mountSkyPath(container, options = {}) {
     parent: backdropRig,
   });
 
+  // Which of the older ambient cloud layers survive alongside the wind sheets,
+  // settled by eye on 2026-08-26 rather than derived from anything:
+  //
+  //   horizonBank  off — its job was hiding where the old decks ran out, and
+  //                      the land/sea deck now reaches the horizon on its own.
+  //   deckDeep     on  — reads as distant cloud far below, well under the wind
+  //   deckHigh     on    sheets, and gives the drop past the path edge a floor.
+  //   cloudRows    off — the four recycling billboard rows; they occupied the
+  //                      same band the wind sheets now own, and doubled up.
+  //
+  // The fork curtains are not part of this: those are gameplay, not weather.
+  const LEGACY_HORIZON_BANK = false;
+  const LEGACY_FAR_DECKS = true;
+  const LEGACY_CLOUD_ROWS = false;
+
+  // ------------------------------------------------------------ wind clouds
+  //
+  // Two horizontal sheets of cloud just under the path, blowing right to left
+  // across the player's view — the top, lighter one noticeably faster than the
+  // dense one beneath it, which is what sells them as two separate altitudes
+  // rather than one texture with a pattern in it.
+  //
+  // "Tiled to infinity" is two tricks working together. The sheets live in the
+  // camera-following backdropRig, so they are always centred on the viewer and
+  // can never be walked off; and their UV offsets are driven from the camera's
+  // own position, which cancels that following exactly. The result is a texture
+  // that stays pinned to the world — full parallax as the walker moves — on a
+  // mesh that is always underneath them. Wind is then simply an extra term
+  // added to the same offset.
+  //
+  // Sign, once, so it never has to be re-derived: deck() lays the plane so
+  // local +x is world +x and local +y is world -z. Raising offset.x slides the
+  // sampled texel right, which drags the image left. The player faces -z, so
+  // their right hand is +x — image drifting toward -x is right-to-left across
+  // their view, which is the direction asked for.
+  const WIND_TILE_W = 60; // world size of one cloud tile across
+  const WIND_TILE_D = WIND_TILE_W / (2400 / 1309); // ...and along, at the art's own aspect
+  const WIND_EXTENT = 1400; // sheet size; only has to outrun the frame, not the world
+
+  // Neither cloud image tiles seamlessly — each is a single ragged patch with
+  // transparent margins — so one sheet repeats as an obvious grid of gaps.
+  // Every layer is therefore built from several passes of cloud art at
+  // *different tile sizes*, so each pass's gaps fall on another's cloud.
+  //
+  // The scales are deliberately awkward ratios: 1 : 1.47 : 4.3 only realign
+  // after tens of tiles, far outside anything visible. Phase shifts stop them
+  // coinciding at the origin, and `mirror` flips a pass's UVs so it isn't even
+  // the same image at a different size.
+  //
+  // The third pass is the one doing the real work against uniformity. Two
+  // passes at similar scales fix the grid but leave the cover statistically
+  // even everywhere — the eye reads that as flat. A pass at 4.3x has tiles
+  // ~260 units across, which is large enough to be *composition* rather than
+  // texture: it thickens whole regions and opens whole clearings, so the sheet
+  // has weather in it rather than a uniform mat. `swap` gives it the other
+  // layer's art, so the big shapes don't echo the small ones.
+  const WIND_PASSES = [
+    { scale: 1, mirror: false, phase: [0, 0], dy: 0, alpha: 0.78, swap: false },
+    { scale: 1.47, mirror: true, phase: [0.37, 0.61], dy: -0.9, alpha: 0.62, swap: false },
+    { scale: 4.3, mirror: false, phase: [0.13, 0.29], dy: -2.2, alpha: 0.5, swap: true },
+  ];
+
+  // Gaps: a shared grid of soft holes punched through every pass of a layer.
+  //
+  // Two things make this work that a naive "drop every Nth tile" would not.
+  //
+  // First, the grid is shared. Each pass tiles at its own scale, so if each
+  // dropped 1-in-N of its *own* tiles, a real gap would need all three to drop
+  // in the same place — odds of (1/N)^3. Instead every pass hashes the same
+  // world-space cell, so when a cell is chosen the whole layer opens at once.
+  //
+  // Second, the hole is a soft blob inside its cell rather than the cell
+  // itself. Clearing a whole cell would leave hard straight edges where the
+  // cell boundary cut through cloud, which reads far worse than the uniformity
+  // it was meant to fix. The blob is jittered off-centre and sized to stay
+  // inside its cell, so no boundary is ever visible. Cells are the base tile's
+  // shape, so the holes come out slightly stretched along the wind.
+  //
+  // Hashing is the sine-free integer hash: the cell coordinate grows without
+  // bound as the wind blows, and a sin() hash bands badly once its input gets
+  // large.
+  const HOLE_GLSL_HEAD = `
+    varying vec2 vCloudXZ;
+    uniform vec2 uCellSize;
+    uniform vec2 uCellPan;
+    uniform float uHoleCut;
+    uniform float uStagger;
+    float cloudHash(vec2 p) {
+      vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+  `;
+  const HOLE_GLSL_BODY = `
+    if (uHoleCut > 0.0) {
+      vec2 q = (vCloudXZ + uCellPan) / uCellSize;
+      // Same running-bond shift as the texture, so a hole always sits inside
+      // one staggered tile rather than straddling two.
+      q.x += uStagger * mod(floor(q.y), 2.0);
+      vec2 cell = vec2(floor(q.x), floor(q.y));
+      if (cloudHash(cell) < uHoleCut) {
+        vec2 centre = vec2(cloudHash(cell + 11.3), cloudHash(cell + 27.7)) * 0.5 + 0.25;
+        float radius = 0.30 + 0.18 * cloudHash(cell + 5.1);
+        float d = length(fract(q) - centre);
+        diffuseColor.a *= smoothstep(radius * 0.55, radius, d);
+      }
+    }
+  `;
+
+  // Running bond: every other row of tiles is shifted half a tile sideways, so
+  // the vertical seams between tiles never line up into a continuous column.
+  // This is the one thing the passes-at-different-scales trick cannot do, since
+  // a UV transform is affine and a stagger is not.
+  //
+  // It has to replace the map lookup rather than pre-multiply the UV, because
+  // vMapUv is a fragment input and is read-only. And it needs explicit
+  // gradients: uv.x jumps half a tile at each row boundary, so the implicit
+  // derivative spikes there and the GPU drops to the coarsest mip — a blurred
+  // line along every row. textureGrad with the *unstaggered* derivatives gives
+  // the mip level the pixel actually deserves. Guarded on __VERSION__ so the
+  // shader still compiles if three ever emits GLSL ES 1.00 here, where the
+  // worst case is that faint seam rather than a broken material.
+  const STAGGER_GLSL = `
+    #ifdef USE_MAP
+      vec2 stagUv = vMapUv;
+      stagUv.x += uStagger * mod(floor(stagUv.y), 2.0);
+      #if __VERSION__ >= 300
+        diffuseColor *= textureGrad( map, stagUv, dFdx( vMapUv ), dFdy( vMapUv ) );
+      #else
+        diffuseColor *= texture2D( map, stagUv );
+      #endif
+    #endif
+  `;
+
+  /** Adds the hole-punch to one sheet's material; returns its uniform set. */
+  function punchHoles(mesh) {
+    const mat = mesh.material;
+    const held = {
+      uCellSize: { value: new THREE.Vector2(WIND_TILE_W, WIND_TILE_D) },
+      uCellPan: { value: new THREE.Vector2() },
+      uHoleCut: { value: 0 },
+      uStagger: { value: 0.5 },
+    };
+    // Three's default program cache key ignores onBeforeCompile, so without
+    // this an ordinary MeshBasicMaterial could be handed our patched program,
+    // or vice versa.
+    mat.customProgramCacheKey = () => 'windCloudHoles';
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, held);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec2 vCloudXZ;')
+        .replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\nvCloudXZ = (modelMatrix * vec4(transformed, 1.0)).xz;'
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>' + HOLE_GLSL_HEAD)
+        .replace('#include <map_fragment>', STAGGER_GLSL)
+        .replace('#include <alphatest_fragment>', HOLE_GLSL_BODY + '#include <alphatest_fragment>');
+    };
+    return held;
+  }
+
+  // Speeds in world units per second. The ratio matters more than the absolute
+  // numbers: 3x is comfortably past the point where the eye reads two layers.
+  const wind = { dense: 1.6, light: 5.0 };
+
+  /**
+   * One cloud altitude, built as WIND_PASSES sheets that move as a unit.
+   *
+   * Every pass is driven at the same *world* speed — each divides the same
+   * blown distance by its own tile size — so they never drift apart and keep
+   * reading as one layer rather than several.
+   *
+   * `map` is the layer's own art; `other` is the neighbouring layer's, used by
+   * any pass marked `swap`.
+   */
+  function windLayer(map, other, { y, order, opacity }) {
+    const passes = WIND_PASSES.map((cfg, i) => {
+      const tileW = WIND_TILE_W * cfg.scale;
+      const tileD = WIND_TILE_D * cfg.scale;
+      // A negative repeat mirrors the tile. The offset maths below is written
+      // in terms of the repeat itself, so the sign is handled for free.
+      const rx = (cfg.mirror ? -1 : 1) * (WIND_EXTENT / tileW);
+      const ry = WIND_EXTENT / tileD;
+      const mesh = deck(cfg.swap ? other : map, {
+        w: WIND_EXTENT,
+        d: WIND_EXTENT,
+        y: y + cfg.dy,
+        z: 0, // centred on the camera; the rig does the following
+        repeat: [rx, ry],
+        order: order + i * 0.05,
+        opacity: opacity * cfg.alpha,
+        tint: false,
+        parent: backdropRig,
+      });
+      return { rx, ry, phase: cfg.phase, dy: cfg.dy, mesh, holes: punchHoles(mesh) };
+    });
+    // Duck-typed `visible`/`y` so the tuner can drive a layer exactly as if it
+    // were the single mesh it used to be. `chaos` scales the big pass alone,
+    // which is the dial between "even mat" and "patchy weather".
+    return {
+      passes,
+      get y() {
+        return passes[0].mesh.position.y;
+      },
+      set y(v) {
+        for (const p of passes) p.mesh.position.y = v + p.dy;
+      },
+      get visible() {
+        return passes[0].mesh.visible;
+      },
+      set visible(v) {
+        for (const p of passes) p.mesh.visible = v;
+      },
+      get chaos() {
+        return passes[passes.length - 1].mesh.material.opacity;
+      },
+      set chaos(v) {
+        passes[passes.length - 1].mesh.material.opacity = v;
+      },
+      // Expressed as the denominator the slider shows: 8 means one cell in 8
+      // is opened. 0 is off, which the shader short-circuits on.
+      get gaps() {
+        const cut = passes[0].holes.uHoleCut.value;
+        return cut > 0 ? Math.round(1 / cut) : 0;
+      },
+      set gaps(n) {
+        const cut = n > 0 ? 1 / n : 0;
+        for (const p of passes) p.holes.uHoleCut.value = cut;
+      },
+      // 0 = plain grid, 0.5 = classic running bond.
+      get stagger() {
+        return passes[0].holes.uStagger.value;
+      },
+      set stagger(v) {
+        for (const p of passes) p.holes.uStagger.value = v;
+      },
+    };
+  }
+
+  // renderOrder 5 and 5.2: after every distant backdrop, before the ground.
+  // These sit below the path, so the stones must always draw over them.
+  const cloudDense = windLayer(TEX.cloudDense, TEX.cloudLight, { y: -16.9, order: 5, opacity: 1 });
+  const cloudLight = windLayer(TEX.cloudLight, TEX.cloudDense, { y: -20.6, order: 5.2, opacity: 0.9 });
+
+  // Tuned by eye through the slider panel on 2026-08-26 and baked here. See
+  // bgTuner.js for how to put the sliders back.
+  //
+  // Note the heights: `cloudLight` ended up *below* `cloudDense`, which is the
+  // opposite of how they were first built and of what their names imply. It was
+  // chosen deliberately from the look of it. One consequence worth knowing if
+  // these are ever retuned: draw order is fixed by renderOrder (5 vs 5.2), not
+  // by depth, so the lower sheet currently paints over the higher one. With two
+  // pale semi-transparent sheets that is not visible, but swapping the two
+  // `order` values would make it physically right if it ever does show.
+  cloudDense.gaps = 4;
+  cloudLight.gaps = 2;
+  cloudDense.chaos = 0.5;
+  cloudLight.chaos = 0.5;
+  cloudDense.stagger = 0.5;
+  cloudLight.stagger = 0.5;
+
+  // Distance blown so far, kept as its own accumulator rather than derived from
+  // elapsed time, so the speeds can be retuned live without the clouds jumping.
+  const windDist = { dense: 0, light: 0 };
+
+  function updateWindClouds(dt) {
+    windDist.dense += wind.dense * dt;
+    windDist.light += wind.light * dt;
+    const { x: cx, z: cz } = camera.position;
+    for (const [layer, blown] of [
+      [cloudDense, windDist.dense],
+      [cloudLight, windDist.light],
+    ]) {
+      for (const p of layer.passes) {
+        // Written against the repeat rather than the tile size so a mirrored
+        // pass (negative repeat) stays world-locked and blows the same way.
+        const o = p.mesh.material.map.offset;
+        o.x = (p.rx / WIND_EXTENT) * (cx + blown) + p.phase[0];
+        o.y = (-p.ry / WIND_EXTENT) * cz + p.phase[1];
+        // Same blown distance, same sign convention: the gaps travel with the
+        // cloud they are cut from rather than sitting still in the world.
+        p.holes.uCellPan.value.set(blown, 0);
+      }
+    }
+  }
+
   const peaksBand = backdrop(TEX.peaks, { w: 190, h: 17, y: -1.5, z: -118, order: 1, fog: false, opacity: 0.75 });
 
   // soft band of cloud along the horizon, hiding where the decks run out
@@ -678,6 +963,9 @@ export function mountSkyPath(container, options = {}) {
   // white floor" — a deck that runs under your feet just reads as ground.
   const deckDeep = deck(TEX.cloudDeck, { w: 1800, d: 1200, y: -95, z: -800, repeat: [18, 12], order: 3, opacity: 0.55 });
   const deckHigh = deck(TEX.cloudDeck, { w: 900, d: 620, y: -40, z: -390, repeat: [11, 8], order: 4, opacity: 0.75 });
+  horizonBank.visible = LEGACY_HORIZON_BANK;
+  deckDeep.visible = LEGACY_FAR_DECKS;
+  deckHigh.visible = LEGACY_FAR_DECKS;
 
   // The temple: a single flat billboard-style cut-out, planted at a fixed world
   // position straight ahead. No manual scaling logic needed — a real
@@ -777,6 +1065,7 @@ export function mountSkyPath(container, options = {}) {
       row.add(m);
     });
     row.position.z = -i * CLOUD_ROW_SPACING;
+    row.visible = LEGACY_CLOUD_ROWS;
     scene.add(row);
     cloudRows.push(row);
   }
@@ -1880,15 +2169,33 @@ export function mountSkyPath(container, options = {}) {
 
   // Throwaway sky/sea slider panel — dev builds only, since it exists purely
   // to find numbers to bake back into the layer block above.
-  const bgTuner = import.meta.env.DEV
+  // Gap sliders read as a denominator, not a magnitude: bigger means rarer.
+  const oneIn = (n) => (n > 0 ? `1 in ${n}` : 'off');
+
+  // The backdrop slider panel is off by default now that every value it was
+  // built to find has been baked in above. It is kept wired rather than
+  // deleted, because the next art change will want it again and rebuilding it
+  // costs more than carrying it: add `&tune=1` to the URL to bring it back.
+  // Anything adjusted here has to be copied back into the constants by hand —
+  // the panel writes to the live objects, not to the source.
+  const bgTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('tune')
     ? attachBgTuner({
         container,
         panels: { sky, landSea },
         // Everything else that can paint into the horizon band, so a stray
         // layer can be identified by switching it off rather than guessed at.
-        toggles: { landSea, peaks: peaksBand, horizonBank, deckDeep, deckHigh },
-        setClearColor: (hex) => {
-          clearOverride = hex === null ? null : new THREE.Color(hex);
+        toggles: { landSea, cloudDense, cloudLight, peaks: peaksBand, horizonBank, deckDeep, deckHigh },
+        extras: {
+          'dense speed': { value: wind.dense, min: 0, max: 20, step: 0.1, set: (v) => (wind.dense = v) },
+          'light speed': { value: wind.light, min: 0, max: 20, step: 0.1, set: (v) => (wind.light = v) },
+          'dense Y': { value: cloudDense.y, min: -60, max: 0, step: 0.1, set: (v) => (cloudDense.y = v) },
+          'light Y': { value: cloudLight.y, min: -60, max: 0, step: 0.1, set: (v) => (cloudLight.y = v) },
+          'dense chaos': { value: cloudDense.chaos, min: 0, max: 1, step: 0.02, set: (v) => (cloudDense.chaos = v) },
+          'light chaos': { value: cloudLight.chaos, min: 0, max: 1, step: 0.02, set: (v) => (cloudLight.chaos = v) },
+          'dense gaps': { value: cloudDense.gaps, min: 0, max: 24, step: 1, set: (v) => (cloudDense.gaps = v), format: oneIn },
+          'light gaps': { value: cloudLight.gaps, min: 0, max: 24, step: 1, set: (v) => (cloudLight.gaps = v), format: oneIn },
+          'dense stagger': { value: cloudDense.stagger, min: 0, max: 0.5, step: 0.05, set: (v) => (cloudDense.stagger = v), format: (v) => v.toFixed(2) },
+          'light stagger': { value: cloudLight.stagger, min: 0, max: 0.5, step: 0.05, set: (v) => (cloudLight.stagger = v), format: (v) => v.toFixed(2) },
         },
       })
     : null;
@@ -2376,6 +2683,9 @@ export function mountSkyPath(container, options = {}) {
     // no y, no rotation — so the horizon holds its height and the composition
     // stays exactly where it was tuned, however far the walker has travelled.
     backdropRig.position.set(camera.position.x, 0, camera.position.z);
+    // Must run after the rig has been placed: the cloud UV offsets cancel the
+    // rig's own following, so they need the camera position it was just given.
+    updateWindClouds(dt);
 
     key.target.position.set(walker.x, 0, walker.z);
 
