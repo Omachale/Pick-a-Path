@@ -19,6 +19,7 @@ export default function SkyPath({
   forks = null,
   role = 'guide',
   canAct = true,
+  crowd = 0,
   onForkChoice,
   onRoundEnd,
   gameRef,
@@ -32,6 +33,7 @@ export default function SkyPath({
       forks,
       role,
       canAct,
+      crowd,
       // Only forward a handler if the parent actually supplied one — the game
       // treats a missing onForkChoice as "solo, decide it yourself".
       onForkChoice: onForkChoice
@@ -45,7 +47,7 @@ export default function SkyPath({
       if (gameRef) gameRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forks, role, canAct]);
+  }, [forks, role, canAct, crowd]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
 }

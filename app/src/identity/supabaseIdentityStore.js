@@ -91,6 +91,18 @@ export function createSupabaseIdentityStore({ classId, supabase, storage = globa
       return toParticipant(token, localGroup.get(token) ?? null, data);
     },
 
+    /**
+     * Alias so this store satisfies the same `setDisplayName(token, name)`
+     * every other store gets called with from useLobby.join() — here "the
+     * name typed in" means "the roster name claimed," per identityStore.js's
+     * own doc comment ("same method, different validation, callers don't
+     * need to know"). Throws if `displayName` isn't an existing roster
+     * entry, same as claimByName.
+     */
+    setDisplayName(token, displayName) {
+      return this.claimByName(token, displayName);
+    },
+
     async getParticipant(token) {
       const rowId = getClaimedRowId(token);
       if (!rowId) return null; // caller must claimByName() before this means anything

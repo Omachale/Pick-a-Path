@@ -5,6 +5,7 @@
  */
 import { useState } from 'react';
 import GroupEditor from './GroupEditor.jsx';
+import JoinByCode from './JoinByCode.jsx';
 
 function groupLabel(groupId) {
   return groupId === null || groupId === undefined ? 'Unassigned' : `Group ${groupId}`;
@@ -45,8 +46,9 @@ function ParticipantList({ participants, myToken }) {
   );
 }
 
-export default function Lobby({ lobby }) {
-  const [name, setName] = useState(lobby.participant.displayName || '');
+export default function Lobby({ lobby, isTeacher, onRosterStoreReady, onOpenTeacherView }) {
+  const [name, setName] = useState(lobby.participant?.displayName || '');
+  const [rosterActive, setRosterActive] = useState(false);
 
   return (
     <div className="screen">
@@ -54,8 +56,18 @@ export default function Lobby({ lobby }) {
 
       <p className="hint" style={{ color: '#666', fontSize: '0.9rem' }}>
         My identity token: <code>{lobby.token}</code>{' '}
-        <button onClick={lobby.resetDevice}>New device (reset identity)</button>
+        <button onClick={lobby.resetDevice}>New device (reset identity)</button>{' '}
+        <button onClick={onOpenTeacherView}>Teacher? Manage classes →</button>
       </p>
+
+      <JoinByCode
+        joined={lobby.joined}
+        onRosterStoreReady={(store) => {
+          setRosterActive(true);
+          onRosterStoreReady(store);
+        }}
+        onPickName={(pickedName) => setName(pickedName)}
+      />
 
       <p>
         <input
@@ -63,16 +75,16 @@ export default function Lobby({ lobby }) {
           placeholder="Your name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          disabled={lobby.joined}
+          disabled={lobby.joined || rosterActive}
         />{' '}
-        <button onClick={() => lobby.join(name)} disabled={lobby.joined}>
+        <button onClick={() => lobby.join(name)} disabled={lobby.joined || !name.trim()}>
           Join lobby
         </button>
       </p>
       <p style={{ fontWeight: 'bold' }}>{lobby.status}</p>
 
       <p>
-        <button onClick={lobby.addPoint} disabled={!lobby.joined}>
+        <button onClick={() => lobby.addPoint()} disabled={!lobby.joined}>
           +1 point (test score sync)
         </button>
       </p>
@@ -84,7 +96,7 @@ export default function Lobby({ lobby }) {
       <h2>Participants</h2>
       <ParticipantList participants={lobby.participants} myToken={lobby.token} />
 
-      <GroupEditor participants={lobby.participants} onApply={lobby.applyGroups} />
+      {isTeacher && <GroupEditor participants={lobby.participants} onApply={lobby.applyGroups} />}
 
       <section style={{ borderTop: '1px solid #ddd', paddingTop: '1rem', marginTop: '1.5rem' }}>
         <h2>Start Sky Path</h2>
@@ -92,8 +104,11 @@ export default function Lobby({ lobby }) {
           Room status: <span>{lobby.roomStatus}</span>
         </p>
         <p>
-          <button onClick={lobby.startSkyPath} disabled={lobby.myGroupId === null}>
-            Start Sky Path for my group
+          <button
+            onClick={lobby.startSkyPath}
+            disabled={lobby.myGroupId === null || lobby.roundPhase === 'assigning'}
+          >
+            {lobby.roundPhase === 'assigning' ? 'Starting…' : 'Start Sky Path for my group'}
           </button>
         </p>
       </section>

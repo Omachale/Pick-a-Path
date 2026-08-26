@@ -7,13 +7,18 @@
  * `onForkChoiceReceived` is what calls back into the running game once that
  * tap comes back from Supabase — for every device in the room, including
  * whoever tapped.
+ *
+ * Stage D: `onRoundEnd` is now `useLobby`'s `reportRoundEnd`, not a
+ * console.log — it broadcasts the result so the whole room (not just this
+ * device) transitions to the results screen. Whether that credits a
+ * participant's roster row is still Stage E's job, unwired either way.
  */
 import { useEffect, useRef } from 'react';
 import SkyPath from '../skypath/SkyPath.jsx';
 
-export default function GameRoom({ session, sendForkChoice, onForkChoiceReceived, onLeave }) {
+export default function GameRoom({ round, sendForkChoice, onForkChoiceReceived, onRoundEnd, onLeave }) {
   const gameRef = useRef(null);
-  const { forks, role } = session;
+  const { forks, role } = round;
 
   useEffect(() => {
     onForkChoiceReceived((forkIndex, side) => {
@@ -30,11 +35,7 @@ export default function GameRoom({ session, sendForkChoice, onForkChoiceReceived
         canAct={role === 'player'}
         gameRef={gameRef}
         onForkChoice={sendForkChoice}
-        onRoundEnd={(result) => {
-          // Stage E credits this to the participant's roster row. For now it
-          // just proves the round reports upward through the real room.
-          console.log('[round end]', result);
-        }}
+        onRoundEnd={onRoundEnd}
       />
       <button
         onClick={onLeave}

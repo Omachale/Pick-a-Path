@@ -1,8 +1,9 @@
 /**
- * Top-level view switch: lobby until a round starts, then the game, then
- * back to the lobby — the "persistent lobby" decision from the handoff doc
- * (a game doesn't replace the lobby, it sits on top of it and hands control
- * back when the player leaves).
+ * Top-level view switch, following useLobby's round-phase state machine
+ * (Stage D): lobby -> [assigning, still the lobby view] -> playing -> results
+ * -> back to lobby. A game doesn't replace the lobby, it sits on top of it
+ * and hands control back when the round ends — the "persistent lobby"
+ * decision from the handoff doc.
  *
  * `?solo=1` bypasses the lobby entirely and mounts Sky Path directly with
  * `?forks=`/`role=` read from the URL, exactly like the old standalone
@@ -11,11 +12,15 @@
  * user-facing flow, and not gated behind import.meta.env.DEV because it's
  * harmless in production (an ordinary player has no reason to add it).
  */
-import { useRef } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { useLobby } from './lobby/useLobby.js';
 import Lobby from './lobby/Lobby.jsx';
 import GameRoom from './lobby/GameRoom.jsx';
+import RoundResults from './lobby/RoundResults.jsx';
 import SkyPath from './skypath/SkyPath.jsx';
+import TeacherDashboard from './lobby/TeacherDashboard.jsx';
+import { supabase } from './supabase.js';
+import { createSupabaseIdentityStore } from './identity/supabaseIdentityStore.js';
 
 const params = new URLSearchParams(location.search);
 
@@ -26,6 +31,7 @@ function SoloSkyPath() {
       <SkyPath
         forks={params.get('forks')}
         role={params.get('role') === 'player' ? 'player' : 'guide'}
+        crowd={Number(params.get('crowd')) || 0}
         gameRef={gameRef}
         onRoundEnd={(result) => console.log('[round end]', result)}
       />
@@ -34,20 +40,62 @@ function SoloSkyPath() {
 }
 
 export default function App() {
-  const lobby = useLobby();
+  const [identityStore, setIdentityStore] = useState(undefined); // undefined -> useLobby's local-store default
+  const [teacherView, setTeacherView] = useState(false);
+  const [teacherSession, setTeacherSession] = useState(undefined); // undefined = loading, null = signed out
+  const lobby = useLobby(identityStore);
+
+  useEffect(() => {
+    const classId = localStorage.getItem('skypath.rosterClassId');
+    if (classId) {
+      setIdentityStore(createSupabaseIdentityStore({ classId, supabase }));
+    }
+  }, []);
+
+  // Tracked at the App level, not just inside TeacherDashboard, because a
+  // signed-in teacher needs to be recognised in the Lobby too (to see group
+  // management) after switching back from the dashboard — the auth session
+  // outlives which screen is currently showing.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setTeacherSession(data.session ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setTeacherSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
   if (params.get('solo') === '1') return <SoloSkyPath />;
 
-  if (lobby.gameSession) {
+  if (teacherView) return <TeacherDashboard onExit={() => setTeacherView(false)} />;
+
+  if (lobby.roundPhase === 'playing' && lobby.round) {
     return (
       <GameRoom
-        session={lobby.gameSession}
+        round={lobby.round}
         sendForkChoice={lobby.sendForkChoice}
         onForkChoiceReceived={lobby.onForkChoiceReceived}
+        onRoundEnd={lobby.reportRoundEnd}
         onLeave={lobby.leaveGame}
       />
     );
   }
 
-  return <Lobby lobby={lobby} />;
+  if (lobby.roundPhase === 'results' && lobby.round) {
+    return (
+      <RoundResults
+        round={lobby.round}
+        participants={lobby.participants}
+        myToken={lobby.token}
+        onPlayAgain={lobby.startSkyPath}
+        onBackToLobby={lobby.leaveGame}
+      />
+    );
+  }
+
+  return (
+    <Lobby
+      lobby={lobby}
+      isTeacher={!!teacherSession}
+      onRosterStoreReady={setIdentityStore}
+      onOpenTeacherView={() => setTeacherView(true)}
+    />
+  );
 }

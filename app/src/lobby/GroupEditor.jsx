@@ -5,12 +5,16 @@
  * the prototype's "both end up as the same {token: groupNumber} shape"
  * design, whether the numbers came from the button or from typing.
  *
- * Known gap carried over unchanged from the prototype (recorded in TODO.md):
- * the draft rebuilds from the live participant list on every render, so an
- * in-progress edit can be overwritten by someone else joining or leaving
- * mid-edit. Acceptable for proving the mechanism; not acceptable for the
- * real teacher UX — flagged for Stage C alongside the "no teacher-role
- * gating yet" gap this panel also still has (anyone can open it).
+ * Teacher-only: App.jsx tracks the Supabase auth session and Lobby.jsx only
+ * mounts this component when one exists (Stage C). The prototype's clobbering
+ * gap — the draft supposedly rebuilding from the live participant list on
+ * every render, discarding in-progress edits when someone joins/leaves mid-
+ * edit — turned out not to reproduce here: `draft` is real component state
+ * keyed by token, not derived from `participants` each render, so an
+ * unrelated participant joining/leaving just adds/removes a row without
+ * touching existing entries. Verified in the browser: typed a draft group
+ * number for one participant, had a second device join then leave (two
+ * separate presence syncs), and the typed value was untouched by either.
  */
 import { useState } from 'react';
 
@@ -44,8 +48,7 @@ export default function GroupEditor({ participants, onApply }) {
     <section style={{ borderTop: '1px solid #ddd', paddingTop: '1rem', marginTop: '1.5rem' }}>
       <h2>Group management</h2>
       <p className="hint" style={{ color: '#666', fontSize: '0.9rem' }}>
-        No teacher-role gating yet — anyone in the lobby can open this. "Randomise" only fills the table below;
-        "Apply groups" is what actually broadcasts it to everyone.
+        "Randomise" only fills the table below; "Apply groups" is what actually broadcasts it to everyone.
       </p>
       <p>
         Students per group:{' '}

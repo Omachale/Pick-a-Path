@@ -32,6 +32,8 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
+import { attachCrowdHarness } from './crowdHarness.js';
+import { attachBgTuner } from './bgTuner.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
 // be used. Module-scope so it happens once per page load, not once per mount.
@@ -54,6 +56,7 @@ export function mountSkyPath(container, options = {}) {
     canAct = true,
     onForkChoice = null,
     onRoundEnd = null,
+    crowd = 0,
   } = options;
 
   container.classList.add('skypath-surface');
@@ -240,7 +243,19 @@ export function mountSkyPath(container, options = {}) {
   // per-role near/far swap here.
   scene.fog = new THREE.Fog(0xbcd8ea, 24, 260);
 
-  const camera = new THREE.PerspectiveCamera(52, surfaceWidth() / surfaceHeight(), 0.1, 400);
+  // The far plane has to clear the whole backdrop rig with room to spare. It
+  // clips at constant *view-space* depth, so an axis-aligned backdrop panel
+  // meets it at an angle once the camera yaws — the panel gets sliced off along
+  // a diagonal that sweeps across it as the camera turns, rather than simply
+  // vanishing. At the old 400 that started biting as soon as the sky was pushed
+  // past ~380 out, which is well inside the range the composition needs.
+  //
+  // `near` is raised alongside it: depth precision goes as the near/far ratio,
+  // and near is by far the stronger term, so lifting it from 0.1 to 0.5 buys
+  // back most of what the longer far plane costs. Nothing in the scene comes
+  // within half a unit of the camera — it trails 7.3 behind the walker and
+  // looks 4.6 ahead of it.
+  const camera = new THREE.PerspectiveCamera(52, surfaceWidth() / surfaceHeight(), 0.5, 5000);
 
   // Lighting: one key light that stands in for the sun. Its position, colour and
   // intensity are all driven by sunP (0 = dawn, 0.5 = midday, 1 = dusk) each
@@ -302,9 +317,9 @@ export function mountSkyPath(container, options = {}) {
   // driven from sunP too. Cut-outs (figure, pillars, markers) are deliberately
   // left out of this so they keep their flat "puppet" colour throughout.
   const atmosphereMaterials = [];
-  const TINT_DAWN = new THREE.Color(0xcf8a5e);
+  const TINT_DAWN = new THREE.Color(0xecd0bf);
   const TINT_NOON = new THREE.Color(0xffffff);
-  const TINT_DUSK = new THREE.Color(0xc4795a);
+  const TINT_DUSK = new THREE.Color(0xe7c9bd);
   const FOG_DAWN = new THREE.Color(0xe7a37c);
   const FOG_NOON = new THREE.Color(0xbcd8ea);
   const FOG_DUSK = new THREE.Color(0xcf8266);
@@ -315,6 +330,11 @@ export function mountSkyPath(container, options = {}) {
   const fogScratch = new THREE.Color();
   const clearScratch = new THREE.Color();
 
+  // Dev-only pin for the clear colour, so the void behind the painted layers
+  // can be identified and colour-matched by eye instead of by arithmetic on
+  // the three day-cycle stops. Null = follow the day cycle as normal.
+  let clearOverride = null;
+
   function applyAtmosphere(p) {
     threeStopLerp(tintScratch, TINT_DAWN, TINT_NOON, TINT_DUSK, p);
     for (const mat of atmosphereMaterials) mat.color.copy(tintScratch);
@@ -323,7 +343,7 @@ export function mountSkyPath(container, options = {}) {
     scene.fog.color.copy(fogScratch);
 
     threeStopLerp(clearScratch, CLEAR_DAWN, CLEAR_NOON, CLEAR_DUSK, p);
-    renderer.setClearColor(clearScratch, 1);
+    renderer.setClearColor(clearOverride ?? clearScratch, 1);
   }
 
   // ---------------------------------------------------------------- asset loading
@@ -357,7 +377,8 @@ export function mountSkyPath(container, options = {}) {
   const TEX = {
     // Real art test (Option B): one wide dawn→noon→dusk strip, panned via UV
     // offset instead of tinted, since it already carries its own colour grading.
-    skyStrip: tex('sky-strip', { ext: 'webp' }),
+    skyStrip: tex('skybig', { ext: 'jpg' }),
+    landSea: tex('landsea', { ext: 'jpg' }),
     cloudReal: tex('cloud-real'),
     cloud2: tex('cloud-2'),
     cloud3: tex('cloud-3'),
@@ -387,6 +408,17 @@ export function mountSkyPath(container, options = {}) {
   const ROSTER = [
     { key: 'woman2', tex: 'figure-woman2', ext: 'webp' },
     { key: 'indy', tex: 'figure-indy', ext: 'png' },
+    { key: 'woman1', tex: 'figure-woman1', ext: 'webp' },
+    { key: 'alien', tex: 'figure-alien', ext: 'webp' },
+    { key: 'bat', tex: 'figure-bat', ext: 'webp' },
+    { key: 'dolphin', tex: 'figure-dolphin', ext: 'webp' },
+    { key: 'ghost', tex: 'figure-ghost', ext: 'webp' },
+    { key: 'man1', tex: 'figure-man1', ext: 'webp' },
+    { key: 'man2', tex: 'figure-man2', ext: 'webp' },
+    { key: 'meerkat', tex: 'figure-meerkat', ext: 'webp' },
+    { key: 'monkey', tex: 'figure-monkey', ext: 'webp' },
+    { key: 'robot', tex: 'figure-robot', ext: 'webp' },
+    { key: 'wizard', tex: 'figure-wizard', ext: 'webp' },
   ];
   const CHAR_TEX = {};
   for (const c of ROSTER) {
@@ -414,7 +446,7 @@ export function mountSkyPath(container, options = {}) {
    * An unlit flat panel. Used for every distant layer — sky, peaks, cloud banks.
    * Unlit keeps the poster-flat look and costs almost nothing to draw.
    */
-  function backdrop(map, { w, h, x = 0, y = 0, z, order, fog = true, opacity = 1, tint = true }) {
+  function backdrop(map, { w, h, x = 0, y = 0, z, order, fog = true, opacity = 1, tint = true, parent = scene }) {
     const mesh = new THREE.Mesh(
       new THREE.PlaneGeometry(w, h),
       new THREE.MeshBasicMaterial({
@@ -428,7 +460,7 @@ export function mountSkyPath(container, options = {}) {
     );
     mesh.position.set(x, y, z);
     mesh.renderOrder = order;
-    scene.add(mesh);
+    parent.add(mesh);
     if (tint) atmosphereMaterials.push(mesh.material);
     return mesh;
   }
@@ -465,14 +497,78 @@ export function mountSkyPath(container, options = {}) {
   // perspective camera is what makes the parallax correct rather than faked.
 
   /**
+   * The sky, as a section of a cylinder wrapped around the camera.
+   *
+   * A flat panel cannot cover a wide view. Its angular width is 2*atan(w/2d),
+   * so the only ways to widen it are to bring it closer — which crops it
+   * vertically and makes it loom — or to stretch it. Neither survives the
+   * camera panning: the panel's vertical edges swing into frame, which is
+   * exactly the artefact this replaces.
+   *
+   * Bending the same panel into an arc fixes it outright. Every point stays at
+   * `radius` from the camera, so nothing foreshortens and there is no edge to
+   * find until you pass `arcDeg/2` off-centre. It is also strictly better value
+   * than the flat version: the same strip of texture bent at the same distance
+   * covers arcLength/radius radians instead of 2*atan(w/2d), which is more.
+   *
+   * Kept a section rather than a full 360 ring on purpose. Only a third of the
+   * sky strip is visible at a time (the rest is other times of day), so
+   * wrapping it the whole way round would smear that third over four times the
+   * angle. A section spends the texture where the camera can actually look.
+   *
+   * `arcDeg` and `height` are related: the image is undistorted when the arc
+   * length (radius * arc in radians) divided by the height matches the visible
+   * third's own aspect ratio. SKY_ASPECT below carries that number.
+   */
+  function skyShell(map, { radius, height, y, arcDeg, order, opacity = 1, parent = scene }) {
+    const build = (deg) => {
+      const arc = THREE.MathUtils.degToRad(deg);
+      // thetaStart puts the middle of the arc on -z, i.e. straight ahead.
+      return new THREE.CylinderGeometry(1, 1, 1, 96, 1, true, Math.PI - arc / 2, arc);
+    };
+    const mesh = new THREE.Mesh(
+      build(arcDeg),
+      new THREE.MeshBasicMaterial({
+        map,
+        transparent: true,
+        depthWrite: false,
+        opacity,
+        fog: false,
+        // The camera is inside the cylinder, so it is the inner face we need.
+        side: THREE.BackSide,
+      })
+    );
+    // Unit geometry scaled to size, so radius and height stay independent
+    // dials for the tuner without rebuilding anything.
+    mesh.scale.set(radius, height, radius);
+    mesh.position.set(0, y, 0);
+    mesh.renderOrder = order;
+    // Changing the arc is the one adjustment that does need new geometry.
+    mesh.userData.shell = {
+      arcDeg,
+      setArc(deg) {
+        mesh.geometry.dispose();
+        mesh.geometry = build(deg);
+        mesh.userData.shell.arcDeg = deg;
+      },
+    };
+    parent.add(mesh);
+    return mesh;
+  }
+
+  /**
    * A cloud deck: a flat panel lying horizontally far below the path. Seen edge-on
    * from above it reads as an endless floor of cloud, which is what actually
    * conveys "we are very high up" — vertical cloud panels just look like walls.
    */
-  function deck(map, { w, d, y, z, repeat, order, opacity }) {
+  function deck(map, { w, d, y, z, repeat, order, opacity, tint = true, mirror = false, parent = scene }) {
     const m = map.clone();
     m.needsUpdate = true;
-    m.wrapS = m.wrapT = THREE.RepeatWrapping;
+    // Mirrored wrapping flips every other copy, so a non-tiling photograph can
+    // be repeated sideways with no seam at all — each join meets its own
+    // reflection. For an aerial coastline that reads as the coast simply
+    // continuing, which is what lets the deck run wider than the frame.
+    m.wrapS = m.wrapT = mirror ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
     m.repeat.set(repeat[0], repeat[1]);
     const mesh = new THREE.Mesh(
       new THREE.PlaneGeometry(w, d),
@@ -487,8 +583,8 @@ export function mountSkyPath(container, options = {}) {
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(0, y, z);
     mesh.renderOrder = order;
-    scene.add(mesh);
-    atmosphereMaterials.push(mesh.material);
+    parent.add(mesh);
+    if (tint) atmosphereMaterials.push(mesh.material);
     return mesh;
   }
 
@@ -497,14 +593,79 @@ export function mountSkyPath(container, options = {}) {
   // band near the horizon has to be *small* relative to its distance — getting
   // this wrong is what turns a sky into a white floor.
 
+  // ---------------------------------------------------------- the world floor
+  //
+  // Two pieces only: one flat deck carrying land *and* sea in a single image,
+  // and a curved sky wrapped around it. The coastline is painted into the art
+  // rather than being a seam between two planes, which removes the whole class
+  // of gap-at-the-join problem that dogged the split version.
+  //
+  // They live in a rig that follows the camera in x/z (see the animate loop),
+  // which is what makes the composition hold. Fixed in world space these would
+  // slide past as the walker advances — 6 forks is over 100 units of travel —
+  // and the horizon would climb the screen over the course of a round.
+  //
+  // Both are sized with real margin beyond the frame, because the camera pans:
+  // anything sized to *exactly* fill the view shows its edge the moment it
+  // moves.
+  const backdropRig = new THREE.Group();
+  scene.add(backdropRig);
+
+  const FLOOR_Y = -40; // how far the world floor sits below the path
+  const HORIZON_Z = -360; // the deck's far edge — where the sea stops
+
+  // The art is square (4000x4000). One tile is kept square so it never
+  // stretches; the deck then repeats sideways to run far wider than the frame,
+  // with MirroredRepeatWrapping so the copies meet as reflections and leave no
+  // seam. Four tiles across puts the left and right edges ~1100 units off
+  // centre at the horizon, which no amount of panning brings into shot.
+  //
+  // deck() lays the plane down such that the top of the image ends up at the
+  // far edge, so the open sea at the top of LandSea.jpg lands at the horizon
+  // and the fields at the bottom end up nearest — the way round we want
+  // without any flipping. Its depth also puts the near edge behind the camera,
+  // so there is ground underfoot rather than an edge in shot.
+  const LANDSEA_D = 562;
+  const LANDSEA_TILES = 4;
+  const landSea = deck(TEX.landSea, {
+    w: LANDSEA_D * LANDSEA_TILES,
+    d: LANDSEA_D,
+    y: FLOOR_Y,
+    z: HORIZON_Z + LANDSEA_D / 2,
+    repeat: [LANDSEA_TILES, 1],
+    mirror: true,
+    order: 0.5,
+    opacity: 1,
+    parent: backdropRig,
+  });
+
   // The sky strip is one wide dawn→noon→dusk image; only a third of it is
   // visible at once (repeat.x = 1/3), and offset.x pans across it as sunP goes
   // 0→1. tint:false because the art already carries the correct colour grading
   // — multiplying a day-cycle tint over it would double the effect.
+  //
+  // Curved rather than flat so that panning never finds its vertical edges —
+  // see skyShell. Its radius sits just beyond the deck's far edge and it draws
+  // after the deck, so pulling the radius in eats into the back of the sea,
+  // which is the adjustment that sets where the horizon reads.
   TEX.skyStrip.wrapS = THREE.ClampToEdgeWrapping;
   TEX.skyStrip.repeat.set(1 / 3, 1);
-  const sky = backdrop(TEX.skyStrip, { w: 460, h: 330, y: -4, z: -170, order: 0, fog: false, tint: false });
-  backdrop(TEX.peaks, { w: 190, h: 17, y: -1.5, z: -118, order: 1, fog: false, opacity: 0.75 });
+  const SKY_R = 400;
+  const SKY_ARC = 160; // degrees; edges sit 80° off centre, far outside any pan
+  // Undistorted height: the visible third of the 8000x2000 strip is 4:3, so the
+  // arc length and the height have to hold that same ratio.
+  const SKY_ASPECT = 8000 / 3 / 2000;
+  const SKY_H = (SKY_R * THREE.MathUtils.degToRad(SKY_ARC)) / SKY_ASPECT;
+  const sky = skyShell(TEX.skyStrip, {
+    radius: SKY_R,
+    height: SKY_H,
+    arcDeg: SKY_ARC,
+    y: FLOOR_Y - 10 + SKY_H / 2,
+    order: 0.6,
+    parent: backdropRig,
+  });
+
+  const peaksBand = backdrop(TEX.peaks, { w: 190, h: 17, y: -1.5, z: -118, order: 1, fog: false, opacity: 0.75 });
 
   // soft band of cloud along the horizon, hiding where the decks run out
   const horizonBank = backdrop(TEX.cloudsFar, { w: 200, h: 11, y: -2.5, z: -100, order: 2, fog: false, opacity: 0.9 });
@@ -1689,6 +1850,49 @@ export function mountSkyPath(container, options = {}) {
 
   startJourney();
 
+  // How far back the trailing camera sits, as a multiple of CAM_BACK. Only the
+  // crowd harness moves it today; it exists as a dial because "the guide's
+  // camera pulls back slightly to show the whole group" is the change this
+  // harness is being used to size.
+  let camPull = 1;
+
+  const harness =
+    crowd > 0
+      ? attachCrowdHarness({
+          count: crowd,
+          scene,
+          container,
+          makeRig: makeCharacterRig,
+          disposeRig,
+          localToWorld,
+          sections,
+          getForkIndex: () => forkIndex,
+          isWalking: () => !!leg,
+          FIGURE_H,
+          WALK_SPEED,
+          ROSTER,
+          placeStone,
+          setCamPull: (v) => {
+            camPull = v;
+          },
+        })
+      : null;
+
+  // Throwaway sky/sea slider panel — dev builds only, since it exists purely
+  // to find numbers to bake back into the layer block above.
+  const bgTuner = import.meta.env.DEV
+    ? attachBgTuner({
+        container,
+        panels: { sky, landSea },
+        // Everything else that can paint into the horizon band, so a stray
+        // layer can be identified by switching it off rather than guessed at.
+        toggles: { landSea, peaks: peaksBand, horizonBank, deckDeep, deckHigh },
+        setClearColor: (hex) => {
+          clearOverride = hex === null ? null : new THREE.Color(hex);
+        },
+      })
+    : null;
+
   // ---------------------------------------------------------------- controls
 
   const els = {
@@ -1936,6 +2140,13 @@ export function mountSkyPath(container, options = {}) {
   const look = { x: 0, y: 0, tx: 0, ty: 0 };
   let dragging = null;
 
+  // Look is a lateral *slide* of the camera, not a yaw: it keeps looking at a
+  // point 4.6 ahead of the walker while sitting CAM_BACK behind it, so an
+  // offset of L swings the view by atan(L / (CAM_BACK + 4.6)). At the old 2.2
+  // that was only about 10 degrees each way. 6.9 buys roughly 30, which is what
+  // the curved sky was widened to cover.
+  const LOOK_X_LIMIT = 6.9;
+
   renderer.domElement.addEventListener('pointerdown', (e) => {
     dragging = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: look.tx, oy: look.ty };
     renderer.domElement.setPointerCapture(e.pointerId);
@@ -1943,7 +2154,7 @@ export function mountSkyPath(container, options = {}) {
   renderer.domElement.addEventListener('pointermove', (e) => {
     if (!dragging || dragging.id !== e.pointerId) return;
     const s = 6 / surfaceWidth();
-    look.tx = THREE.MathUtils.clamp(dragging.ox + (e.clientX - dragging.x) * s, -2.2, 2.2);
+    look.tx = THREE.MathUtils.clamp(dragging.ox + (e.clientX - dragging.x) * s, -LOOK_X_LIMIT, LOOK_X_LIMIT);
     look.ty = THREE.MathUtils.clamp(dragging.oy - (e.clientY - dragging.y) * s, -0.7, 1.3);
   });
   const endDrag = () => { dragging = null; };
@@ -2149,11 +2360,11 @@ export function mountSkyPath(container, options = {}) {
       look.x += (look.tx - look.x) * Math.min(1, dt * 4);
       look.y += (look.ty - look.y) * Math.min(1, dt * 4);
 
-      const behind = forward(facing, CAM_BACK);
+      const behind = forward(facing, CAM_BACK * camPull);
       const ahead = forward(facing, 4.6);
       camera.position.set(
         walker.x - behind.x + look.x,
-        3.9 + look.y + Math.sin(t * 0.6) * 0.05,
+        3.9 * (1 + (camPull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
         walker.z - behind.z
       );
       camera.lookAt(walker.x + ahead.x, 1.25, walker.z + ahead.z);
@@ -2161,8 +2372,14 @@ export function mountSkyPath(container, options = {}) {
     // else: just fell — camera stays exactly where the fall left it, frozen
     // alongside the figure, until "Again" resets everything at once.
 
+    // The land/sea/sky rig rides with the camera on the ground plane only —
+    // no y, no rotation — so the horizon holds its height and the composition
+    // stays exactly where it was tuned, however far the walker has travelled.
+    backdropRig.position.set(camera.position.x, 0, camera.position.z);
+
     key.target.position.set(walker.x, 0, walker.z);
 
+    harness?.update(dt);
     updateBirds(dt);
 
     renderer.render(scene, camera);
@@ -2337,6 +2554,8 @@ export function mountSkyPath(container, options = {}) {
       if (disposed) return;
       disposed = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
+      harness?.dispose();
+      bgTuner?.dispose();
       resizeObserver.disconnect();
       renderer.dispose();
       renderer.forceContextLoss();
