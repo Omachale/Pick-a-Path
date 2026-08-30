@@ -34,6 +34,9 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
 import { attachCrowdHarness } from './crowdHarness.js';
 import { attachBgTuner } from './bgTuner.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { buildIsland } from './islandGen.js';
+import { buildNameTagCanvas, normalizePlayerName } from './nameTag.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
 // be used. Module-scope so it happens once per page load, not once per mount.
@@ -85,22 +88,66 @@ export function mountSkyPath(container, options = {}) {
   // section further down for why that matters for fairness, not just memory.
 
   const N_FORKS = 6; // fixed for a given round; would come from teacher setup in a real build
-  const FORK_HALF_ANGLE = THREE.MathUtils.degToRad(12); // each branch's turn off centre — kept tight so a run of same-direction picks can't build up a big drift
+  // Each branch's turn off centre. This was 12° for as long as branches led to
+  // *different* destinations, "kept tight so a run of same-direction picks
+  // can't build up a big drift" — that reason died with converging branches
+  // (Step 4): both sides now land on the same target whichever is picked, so
+  // lateral drift is set entirely by templeHeading()/HEADING_CORRECTION and
+  // this angle contributes none of it.
+  //
+  // What it *does* now control is how far apart the two branches are where
+  // they meet an island: 2 * ISLAND_RADIUS * sin(angle) between their two
+  // edge points. At 12° that came to 2.49 units against a paved path width of
+  // ~2.45 — i.e. the two paths were touching at their widest before any
+  // curvature was applied at all, which is half of why they never read as two
+  // separate routes (the other half was the crossing bug, see genForkCurve).
+  // This is why the angle has to move whenever ISLAND_RADIUS does: shrinking
+  // the island shrinks this same gap right along with it (both scale with
+  // ISLAND_RADIUS), so the angle is re-picked each time to keep it — see
+  // FORK_PINCH_WIDTH below, which the two are tuned together against.
+  const FORK_HALF_ANGLE = THREE.MathUtils.degToRad(30);
   const HEADING_CORRECTION = 0.7; // how strongly the trunk after a branch re-aims at the temple (0 = keep the branch's heading, 1 = point straight at it) — see templeHeading()
   const TRUNK_SEGMENTS = 4;
   const BRANCH_SEGMENTS = 3;
 
-  // The temple's distance is the one dial that matters for pacing — everything
-  // below derives from it, so changing it doesn't require re-tuning trunk and
-  // branch lengths by hand. CRUISE_FRACTION is how much of that distance the
-  // N_FORKS ordinary forks cover; the gap between CRUISE_FRACTION and
-  // STOP_FRACTION is the dramatic final close-in walked only on a correct last
-  // pick (see choose()); the last (1 - STOP_FRACTION) is just clearance so the
-  // camera never ends up clipped into the temple's plane.
-  const TEMPLE_DISTANCE = 70; // straight-line world distance from spawn to the temple
+  // World scale: the island is the base unit, and path spacing derives from
+  // it — not the other way around. This used to run backwards (TEMPLE_DISTANCE
+  // was picked first, path lengths derived from it, and island size was a
+  // separate number chosen by eye), and the two collided: islands ended up
+  // wider than the spacing meant to hold them. The island's size is authored
+  // art (Blender) and about to have stones relate to its edge too, so it
+  // drives everything else now. See TODO.md "World scale rework" for the full
+  // reasoning. ISLAND_RADIUS must match the deck's own scale target
+  // (ISLAND_TARGET_RADIUS, set from this same constant further down).
+  const ISLAND_RADIUS = 4; // world units — was 6; shrunk by a third, 2026-08-28. See FORK_HALF_ANGLE/FORK_PINCH_WIDTH above and below: both were re-tuned alongside this, since the gap they carve between the two branches at an island scales with ISLAND_RADIUS too and would otherwise have closed to overlapping.
+  const ISLAND_PATH_GAP = 8; // visible gap between two islands' *edges* — the one real pacing knob
+  const FORK_DISTANCE = 2 * ISLAND_RADIUS + ISLAND_PATH_GAP; // forward distance, fork centre to fork centre
+
+  // The character, separately, was shrunk for a sense of scale — but "the
+  // world is big" has to mean the *world* is big relative to a normal-sized
+  // person, not that the person has shrunk inside a normal-sized world. That
+  // distinction matters concretely: it means a stone must stay the same size
+  // relative to the character it always was — shrinking both together would
+  // just be zooming out, not scale — while the island and path, which really
+  // are meant to be huge, correctly do *not* carry this factor (an earlier
+  // pass wrongly reasoned the opposite way round; corrected 2026-08-27).
+  // FIGURE_SCALE is applied to the character (FIGURE_H below) and to
+  // anything sized *relative to the character* rather than relative to the
+  // world — currently just STONE_SIZE.
+  const FIGURE_SCALE = 0.72;
+
+  // CRUISE_FRACTION is how much of the whole trip the N_FORKS ordinary forks
+  // cover; the gap between CRUISE_FRACTION and STOP_FRACTION is the dramatic
+  // final close-in walked only on a correct last pick (see choose()); the
+  // last (1 - STOP_FRACTION) is just clearance so the camera never ends up
+  // clipped into the temple's plane. TEMPLE_DISTANCE is a *result*, not an
+  // input: whatever distance makes CRUISE_FRACTION of the trip equal
+  // N_FORKS * FORK_DISTANCE. The temple is a backdrop billboard, so it is
+  // free to move without needing its own scale re-tuned.
   const CRUISE_FRACTION = 0.75;
   const STOP_FRACTION = 0.9;
-  const CRUISE_DISTANCE = TEMPLE_DISTANCE * CRUISE_FRACTION;
+  const CRUISE_DISTANCE = N_FORKS * FORK_DISTANCE;
+  const TEMPLE_DISTANCE = CRUISE_DISTANCE / CRUISE_FRACTION; // straight-line world distance from spawn to the temple
   const APPROACH_DISTANCE = TEMPLE_DISTANCE * (STOP_FRACTION - CRUISE_FRACTION);
 
   // Trunk:branch pacing shape (branch slightly longer than trunk) — only the
@@ -111,6 +158,71 @@ export function mountSkyPath(container, options = {}) {
   const ROUND_SCALE = CRUISE_DISTANCE / (N_FORKS * ROUND_UNIT);
   const TRUNK_LEN = ROUND_SHAPE_TRUNK * ROUND_SCALE;
   const BRANCH_LEN = ROUND_SHAPE_BRANCH * ROUND_SCALE;
+
+  // Converging branches (Step 4, added 2026-08-27, reworked 2026-08-28 — see
+  // TODO.md "Fork branches: both routes lead to the same island"): both
+  // branches of a fork now curve all the way to the *same* next island,
+  // rather than heading off to two separate destinations. This is what makes
+  // island positions deterministic — the next island's position no longer
+  // depends on which side the player picks — which the planned intro camera
+  // move needs (it has to know where every island in the round will be
+  // before the player has chosen anything).
+  //
+  // Each branch covers the fork's *entire* forward span to the next island —
+  // `FORK_DISTANCE`, not some shorter branch-only distance — because the two
+  // branches used to converge onto a single shared line partway there, with
+  // a separate plain trunk carrying that one line the rest of the way in.
+  // Luke's call, 2026-08-28: that read as the two paths becoming one before
+  // they'd actually arrived. The fix is symmetry — arrival should mirror
+  // departure, staying two separate lines the whole way and only joining on
+  // the *next* island's own deck, exactly as they only separated on *this*
+  // one's. See genForkCurve() below for the shape that produces; there is no
+  // separate "trunk" phase for forks any more (TRUNK_LEN/TRUNK_SEGMENTS
+  // remain in use for the intro walk to fork 1 only, which has no branching
+  // to mirror).
+  const FORK_CURVE_SEGMENTS = 8; // waypoints per branch past the island's edge — enough to read as a curve, not a kink
+
+  // Where each branch meets an island, in that island's own local frame:
+  // EDGE_LATERAL to its own side of the centreline, EDGE_FORWARD along the
+  // island's heading. Both edge points (leaving one island, reaching the
+  // next) use the same pair — see genForkCurve.
+  const EDGE_LATERAL = ISLAND_RADIUS * Math.sin(FORK_HALF_ANGLE); // 2.0 at 30°/R4 — half the gap between the two branches at an island
+  const EDGE_FORWARD = ISLAND_RADIUS * Math.cos(FORK_HALF_ANGLE);
+
+  // Pinches the two branches *toward* each other at their midpoint, not away
+  // — the opposite of a lens/eye shape. Luke's illustration, 2026-08-28: the
+  // two lines should read as curving toward one another without ever
+  // touching, each still landing on its own separate point on the next
+  // island — an hourglass waist, not a bulge.
+  //
+  // The budget this has to live inside: the branches are 2 * EDGE_LATERAL
+  // (3.96) apart at each island, and each is ~2.45 wide once paved (see
+  // PATH_WIDTH/STONE_COLS/STONE_SIZE), leaving ~1.5 units of daylight there.
+  // Each unit of pinch closes that gap by 2. At 0.5 the waist keeps ~0.5
+  // units of daylight — tighter than before ISLAND_RADIUS shrank (that
+  // shrink took the whole budget down with it, both ends scaling with
+  // ISLAND_RADIUS via EDGE_LATERAL), but still positive. Matching the
+  // *proportions* of the illustration (waist roughly half the end gap) would
+  // need to close this further still and would put the two paved paths in
+  // contact — that isn't a tuning problem but a width one, and belongs with
+  // the 3D stones work, which is what actually sets how wide a path is.
+  const FORK_PINCH_WIDTH = 0.5;
+
+  // The wrong branch is generated with the exact same curve as a correct one
+  // would be (see genForkCurve) and only diverges from it by being cut short.
+  // Both fractions are of the *branch's own total length*, measured via
+  // truncateAtFraction() below rather than assumed. At this geometry the fog
+  // curtain (CURTAIN_DIST, below) sits at roughly 40% along the branch and
+  // the mirrored arrival edge — where the branch reaches the next island —
+  // at roughly 70%; these two fractions sit in the open-air gap between
+  // those two landmarks, comfortably past the curtain and comfortably short
+  // of the island. Stones stop at WRONG_GAP_FRACTION — the gap the
+  // player falls through; the queue (and so the fall trigger, see the main
+  // loop's `leg.queue.length === 0` case) runs a little further, to
+  // WRONG_FALL_FRACTION, so the last stride is onto bare air inside the fog
+  // rather than a wall stopping dead at the last stone.
+  const WRONG_GAP_FRACTION = 0.6;
+  const WRONG_FALL_FRACTION = 0.68;
 
   // Correct side is randomised per fork — including runs of the same side
   // (left,left,left,... etc). The heading-correction step above pulls the
@@ -168,6 +280,102 @@ export function mountSkyPath(container, options = {}) {
     const pts = [];
     for (let i = 1; i <= segments; i++) pts.push(advance(from, heading, (len * i) / segments));
     return pts;
+  }
+
+  /**
+   * The sin(pi*t)-pinched run of `segments` waypoints from `fromPt` to
+   * `toPt`. `sideSign` is the side this branch departed on (+1 right, -1
+   * left, matching genForkCurve) — the curve pinches *toward the opposite
+   * side* (negative of its own side) at its midpoint, tapering back to
+   * exactly `sideSign`'s own straight line at both ends. Ends exactly on
+   * `toPt`.
+   */
+  function genBowPoints(fromPt, toPt, sideSign, segments) {
+    const dx = toPt.x - fromPt.x;
+    const dz = toPt.z - fromPt.z;
+    const legHeading = Math.atan2(dx, -dz);
+    const pts = [];
+    for (let i = 1; i <= segments; i++) {
+      const t = i / segments;
+      const pinchAmt = -FORK_PINCH_WIDTH * Math.sin(Math.PI * t) * sideSign;
+      const off = forward(legHeading + Math.PI / 2, pinchAmt);
+      pts.push({ x: fromPt.x + dx * t + off.x, z: fromPt.z + dz * t + off.z });
+    }
+    return pts;
+  }
+
+  /**
+   * One fork branch: straight from `cursor` to the island's edge along
+   * cursor.heading ± FORK_HALF_ANGLE (sideSign = +1 right, -1 left), then a
+   * bowed curve (genBowPoints, above) onward.
+   *
+   * `mirrorArrival` picks which of two shapes that curve takes, and is false
+   * only for the last fork of a round (there is no next island to mirror
+   * into there — `target` is just the point the final approach to the temple
+   * starts from):
+   *  - **true** (every fork but the last): the curve runs to the *matching*
+   *    edge point of the `target` island — mirrored the same way, off
+   *    target.heading — then one final straight step onto `target` itself.
+   *    Arrival mirrors departure on purpose (Luke, 2026-08-28): the two
+   *    branches used to bow together and merge into one line while still out
+   *    in open air, well short of the destination, which read wrong —
+   *    departing an island fans out from its centre to two edge points, so
+   *    arriving at the next should be the same shape reversed, staying two
+   *    separate lines all the way to that island's edge and only joining on
+   *    its deck, not before it. This is also why the branch now runs the
+   *    fork's whole `FORK_DISTANCE` rather than a shorter branch-only span —
+   *    see the constants above.
+   *  - **false** (last fork only): the curve runs straight to `target`
+   *    itself, the older single-point convergence — there being no island to
+   *    stay separate toward, the two lines have nothing to mirror and simply
+   *    join before the temple approach picks up from there.
+   */
+  function genForkCurve(cursor, target, sideSign, segments, mirrorArrival) {
+    // Both edge points are the same offset in their own island's local frame:
+    // `EDGE_LATERAL` to this branch's own side, `EDGE_FORWARD` along the
+    // island's heading — forward of centre on departure, behind it on
+    // arrival. Written via localToWorld rather than advance() because the
+    // arrival point needs the *forward* component negated and the *lateral*
+    // one kept: `advance(target, heading + offset, -ISLAND_RADIUS)` negates
+    // both, which silently put each branch's arrival on the *opposite* side
+    // from its departure. That made the two branches cross in an X and meet
+    // at the midpoint — "converging significantly too early" (Luke,
+    // 2026-08-28). It went unnoticed for a round of fixes because the
+    // distance between the two arrival points is identical either way, so
+    // measuring that gap could never detect it; only the signed lateral
+    // offset can.
+    const departEdge = localToWorld(cursor, sideSign * EDGE_LATERAL, EDGE_FORWARD);
+    if (!mirrorArrival) return [departEdge, ...genBowPoints(departEdge, target, sideSign, segments)];
+    const arriveEdge = localToWorld(target, sideSign * EDGE_LATERAL, -EDGE_FORWARD);
+    return [departEdge, ...genBowPoints(departEdge, arriveEdge, sideSign, segments), { x: target.x, z: target.z }];
+  }
+
+  /**
+   * Cuts a waypoint chain (as walked from `fromPos`) off at `fraction` of its
+   * own total length, interpolating a new final point exactly at the cut
+   * rather than snapping to the nearest existing waypoint. Used to give the
+   * wrong branch a shorter stone run and an even-shorter walkable queue,
+   * both measured against the curve's real length rather than guessed at —
+   * see WRONG_GAP_FRACTION / WRONG_FALL_FRACTION above.
+   */
+  function truncateAtFraction(fromPos, pts, fraction) {
+    const total = pathLength([fromPos, ...pts]);
+    const targetLen = total * fraction;
+    const out = [];
+    let prev = fromPos;
+    let acc = 0;
+    for (const pt of pts) {
+      const segLen = dist(prev, pt);
+      if (acc + segLen >= targetLen) {
+        const t = segLen > 1e-6 ? (targetLen - acc) / segLen : 0;
+        out.push({ x: prev.x + (pt.x - prev.x) * t, z: prev.z + (pt.z - prev.z) * t });
+        return out;
+      }
+      out.push(pt);
+      acc += segLen;
+      prev = pt;
+    }
+    return out;
   }
   /** World position offset from a cursor by a lateral (right) and forward amount in its local frame. */
   function localToWorld(cursor, right, fwd) {
@@ -395,7 +603,93 @@ export function mountSkyPath(container, options = {}) {
     temple: tex('temple', { ext: 'webp' }),
     gull1: tex('gull-1', { ext: 'webp' }),
     gull2: tex('gull-2', { ext: 'webp' }),
+    islandDeck1: tex('island-circle'),
   };
+
+  // ---------------------------------------------------------------- island models
+  //
+  // Hand-modelled islands (Blender, starting from an islandGen.js export —
+  // see TODO.md), each a base mesh plus a texture for its deck. Registered
+  // with the shared `manager` like every other asset, so the character-select
+  // screen doesn't show until these are ready too.
+  const ISLAND_MODELS = [{ model: 'models/island-basic-v2.glb', deckTex: TEX.islandDeck1 }];
+  const gltfLoader = new GLTFLoader(manager);
+  const islandTemplates = []; // filled in as each model's onLoad fires
+
+  for (const { model, deckTex } of ISLAND_MODELS) {
+    gltfLoader.load(model, (gltf) => {
+      // Exported by islandProto.js's "export .glb" button, which hands over
+      // exactly the group buildIsland() returns (rock, then deck). Node names
+      // aren't a reliable way to find the deck, though — Blender's own export
+      // (after whatever hand editing happens there) has changed exactly what
+      // gets split into which named node between every version of this file
+      // so far, including merging the deck into the same mesh object as the
+      // rock. What's stable regardless is the *shape*: the deck is a flat
+      // disc (near-zero vertical extent) sitting on top of a rock body that
+      // is not, so the flattest mesh in the file is the deck.
+      let deckMesh = null;
+      let flattestHeight = Infinity;
+      gltf.scene.traverse((o) => {
+        if (!o.isMesh) return;
+        o.geometry.computeBoundingBox();
+        const box = o.geometry.boundingBox;
+        const height = box.max.y - box.min.y;
+        if (height < flattestHeight) {
+          flattestHeight = height;
+          deckMesh = o;
+        }
+      });
+      // Cloned rather than edited in place: the deck's material has been
+      // shared with stray extra geometry in more than one export so far (a
+      // Blender artifact, not something this code can prevent) — editing it
+      // directly risks texturing whatever else that material happens to
+      // touch.
+      const deckMat = deckMesh.material.clone();
+      deckMat.map = deckTex;
+      deckMat.vertexColors = false;
+      deckMat.color.set(0xffffff);
+      deckMat.needsUpdate = true;
+      deckMesh.material = deckMat;
+
+      // The deck's *horizontal* reach — how far from the island's axis you
+      // can still be standing on paving. Measured straight off the vertices,
+      // deliberately, rather than via a bounding volume: `Box3` around a flat
+      // disc is a square, and `Box3.getBoundingSphere()` returns that box's
+      // half-diagonal, which overstates a disc of radius r as r*sqrt(2). That
+      // is not a rounding error — it silently shrank every island to 1/sqrt(2)
+      // (71%) of its intended size while the code went on believing the
+      // number it asked for, which is what put the walkable edge 1.76 units
+      // inside where the stone-suppression radius assumed it was. Anything
+      // derived from this (ISLAND_CLEAR_R, WRONG_STUB_LEN, spacing) inherits
+      // the error, so it is worth measuring exactly.
+      gltf.scene.updateWorldMatrix(true, true);
+      const dPos = deckMesh.geometry.attributes.position;
+      const dVert = new THREE.Vector3();
+      let deckRadius = 0;
+      for (let i = 0; i < dPos.count; i++) {
+        // Through the mesh's own transform: the deck has been a separately
+        // translated child node in some exports and merged into the rock's
+        // mesh in others, so its vertices are not always already in the
+        // scene root's space.
+        dVert.fromBufferAttribute(dPos, i).applyMatrix4(deckMesh.matrixWorld);
+        deckRadius = Math.max(deckRadius, Math.hypot(dVert.x, dVert.z));
+      }
+      // Rescale to the size the game is laid out around (ISLAND_TARGET_RADIUS
+      // below) — this export's own scale depends on whatever the tuning
+      // page's size slider happened to be at export time, and on the Blender
+      // edit afterward, neither of which has any reason to already match.
+      const scale = ISLAND_TARGET_RADIUS / deckRadius;
+      const t = { scene: gltf.scene, scale, deckRadiusScaled: deckRadius * scale };
+      islandTemplates.push(t);
+      // startJourney() (below) runs synchronously at mount, long before any
+      // network fetch can resolve — so the very first fork's island is
+      // *always* built from the procedural fallback, not a rare race. Once a
+      // model does arrive, swap it into any island still standing on that
+      // fallback rather than leaving it stuck with the placeholder rock for
+      // the rest of the round.
+      upgradeFallbackIslands(t);
+    });
+  }
 
   // ---------------------------------------------------------------- character roster
   //
@@ -950,10 +1244,22 @@ export function mountSkyPath(container, options = {}) {
     }
   }
 
-  const peaksBand = backdrop(TEX.peaks, { w: 190, h: 17, y: -1.5, z: -118, order: 1, fog: false, opacity: 0.75 });
+  // Both of these were missing `parent: backdropRig` — every other backdrop
+  // layer (landSea, sky, the cloud decks) rides the camera-following rig so
+  // it always sits the same apparent distance away, but these two were fixed
+  // at an absolute world Z instead. That went unnoticed as long as the
+  // journey never travelled far enough to reach z=-100/-118, but the world
+  // scale rework pushed TEMPLE_DISTANCE out to 160 (from 70) specifically so
+  // path spacing could fit the island — which put both bands *inside* the
+  // now-longer walk instead of beyond it. The player was walking through a
+  // fixed-position translucent panel meant to be perpetually distant scenery,
+  // which is the "grey area that appears then disappears" — it does not move
+  // as the camera approaches, so it grows, fills the view, then is passed
+  // through and left behind.
+  const peaksBand = backdrop(TEX.peaks, { w: 190, h: 17, y: -1.5, z: -118, order: 1, fog: false, opacity: 0.75, parent: backdropRig });
 
   // soft band of cloud along the horizon, hiding where the decks run out
-  const horizonBank = backdrop(TEX.cloudsFar, { w: 200, h: 11, y: -2.5, z: -100, order: 2, fog: false, opacity: 0.9 });
+  const horizonBank = backdrop(TEX.cloudsFar, { w: 200, h: 11, y: -2.5, z: -100, order: 2, fog: false, opacity: 0.9, parent: backdropRig });
 
   // Two cloud decks lying flat, a long way down. Because they are far below, they
   // only occupy a band near the horizon — the open blue between them and the path
@@ -987,8 +1293,19 @@ export function mountSkyPath(container, options = {}) {
   // Sized/placed so it starts noticeably large (~4x the frame-height fraction
   // a "realistic" small building at this distance would read as) and fills
   // nearly the whole frame by the final approach — measured directly in the
-  // browser and tuned by eye, not derived from the sizing-note formula above.
-  const TEMPLE_H = 13 * 1.5;
+  // browser and tuned by eye, not derived from the sizing-note formula above,
+  // against TEMPLE_DISTANCE_REF (70 — TEMPLE_DISTANCE's old fixed value).
+  // TEMPLE_DISTANCE became a *derived* number in the world scale rework (see
+  // TODO.md) and grew to 160 once ISLAND_RADIUS/ISLAND_PATH_GAP were set —
+  // left uncompensated, the same absolute TEMPLE_H at more than double the
+  // distance reads at under half its tuned apparent (angular) size. A
+  // billboard that small resolves far less of its own texture detail, which
+  // reads flatter and more "cartoonish" — this is almost certainly what
+  // looked wrong after the last round of changes. Scaling by the ratio to the
+  // distance this was actually tuned against keeps the apparent size correct
+  // regardless of how TEMPLE_DISTANCE is derived from here on.
+  const TEMPLE_DISTANCE_REF = 70;
+  const TEMPLE_H = 13 * 1.5 * (TEMPLE_DISTANCE / TEMPLE_DISTANCE_REF);
   const temple = cutout(TEX.temple, {
     w: TEMPLE_H * TEMPLE_ASPECT,
     h: TEMPLE_H,
@@ -1019,6 +1336,15 @@ export function mountSkyPath(container, options = {}) {
   const CLOUD_SPAN = CLOUD_ROWS * CLOUD_ROW_SPACING;
   const CLOUD_Y = -8;
   const CAM_BACK = 7.3; // how far behind the avatar the camera trails
+  // Lowered 2026-08-27 alongside the character shrink (see TODO.md "World
+  // scale rework"): pulling CAM_BACK in to compensate for a smaller figure
+  // would fight the sense of scale being built here, so the pitch comes down
+  // instead — a flatter, more horizon-level view reads as grander than a
+  // closer, steeper one. CAM_HEIGHT was 3.9, CAM_LOOK_Y 1.25 (tuned against
+  // the old, taller figure); this is a first pass, worth eyeballing live and
+  // adjusting rather than trusting blind.
+  const CAM_HEIGHT = 2.8;
+  const CAM_LOOK_Y = 0.9;
 
   // Heights come from each image's own aspect ratio so nothing is stretched.
   const CLOUD_KINDS = [
@@ -1081,7 +1407,7 @@ export function mountSkyPath(container, options = {}) {
   // capacity generous enough for a full playthrough — so however many hundred
   // stones end up on screen, it's still only 4 draw calls, which matters for
   // holding frame rate on the target phone.
-  const STONE_SIZE = 1.0; // world units, square
+  const STONE_SIZE = 1.0 * FIGURE_SCALE; // world units, square — scales with the character (see FIGURE_SCALE above), not with the world
   const STONE_COLS = 3; // stones across the path width
   const PATH_WIDTH = 2.6;
   const ROW_SPACING = STONE_SIZE * 0.83; // rows overlap along the direction of travel too, so no gaps
@@ -1116,6 +1442,7 @@ export function mountSkyPath(container, options = {}) {
   let stoneVariant = 0; // round-robins which mesh gets the next stone
 
   function placeStone(x, z) {
+    if (nearIsland(x, z)) return; // the island's own paving covers this
     const mesh = stoneMeshes[stoneVariant % stoneMeshes.length];
     stoneVariant++;
     if (mesh.count >= STONE_CAPACITY) return; // headroom exhausted — drop silently rather than throw
@@ -1168,6 +1495,121 @@ export function mountSkyPath(container, options = {}) {
   function resetGround() {
     for (const mesh of stoneMeshes) mesh.count = 0;
     stoneVariant = 0;
+  }
+
+  // ------------------------------------------------------------- fork islands
+  //
+  // Each fork stands on a floating rock island: the player lands on it, and
+  // the two branches leave from its edge. This was first tried as a painted
+  // billboard (a single fixed-angle image, yaw-rotated to face the camera and
+  // leaned back to fake the missing depth) — see git history around
+  // 2026-08-26 for that version and TODO.md for why it was shelved: a flat
+  // card has a hard ceiling on how convincing it can be as the camera pans,
+  // and its pillars/edges couldn't track the fork's actual branch angles.
+  //
+  // This is real geometry instead (islandGen.js), which sidesteps both
+  // problems at once — no billboarding needed, since it's genuinely 3-D from
+  // every angle.
+  //
+  // As of 2026-08-27 the shipped islands are hand-modelled: a shape found on
+  // the tuning page at island-proto.html, exported to .glb, then refined in
+  // Blender and given a real deck texture (see ISLAND_MODELS above, loaded
+  // via GLTFLoader into `islandTemplates`). buildIsland() itself is still
+  // used — as the generator that produces the starting mesh for that export
+  // — just not to build what ships. Falling back to it directly here too, if
+  // for some reason a model failed to load, is cheap insurance: better an
+  // island with the old procedural rock than a fork with no island at all.
+  // No grass: it was scattered right at the deck edge, on the far side of the
+  // one spot players actually look closely at — the boundary they're about to
+  // walk past — so it mostly just added noise there.
+  //
+  // size is 2*ISLAND_RADIUS (the world-scale master constant, set at the top
+  // of the file) rather than its own number — the fallback's rock must be the
+  // same size as the loaded models it stands in for, since path spacing
+  // (FORK_DISTANCE) is now built around ISLAND_RADIUS specifically. A
+  // mismatched fallback would reintroduce the same gap-or-overlap problem
+  // this rework fixed, just for whichever fork happens to load before its
+  // model arrives.
+  const ISLAND_FALLBACK_PARAMS = { bump: 0.32, taper: 0.75, depth: 0.43, size: ISLAND_RADIUS * 2, grassCount: 0 };
+  // The radius every model gets rescaled to on load (see ISLAND_MODELS
+  // above) — the same ISLAND_RADIUS that FORK_DISTANCE is built around, so a
+  // loaded model always occupies exactly the footprint the path was spaced
+  // for, not whatever size it happened to be modelled at.
+  const ISLAND_TARGET_RADIUS = ISLAND_RADIUS;
+  let ISLAND_Y = 0; // nudges the deck off the walker's plane
+
+  // Stones are suppressed within this radius of a fork so the island's own
+  // paving shows there instead of loose pavers scattered over the rock.
+  // Matched exactly to the deck radius — no margin needed, now that both this
+  // and the deck's own size come from the same ISLAND_RADIUS constant.
+  const ISLAND_CLEAR_R = ISLAND_TARGET_RADIUS;
+
+  const islands = [];
+  const islandSpots = []; // fork centres, registered before the stones arrive
+
+  /**
+   * Marks where a fork will stand. Called *before* the run of stones leading
+   * to it is laid, because placeStone needs to know to skip that area and the
+   * trunk is scattered before the fork itself is built.
+   */
+  function registerIsland(pos) {
+    islandSpots.push({ x: pos.x, z: pos.z });
+  }
+
+  function nearIsland(x, z) {
+    for (const s of islandSpots) {
+      if (Math.hypot(x - s.x, z - s.z) < ISLAND_CLEAR_R) return true;
+    }
+    return false;
+  }
+
+  /** Populates `group` (assumed empty) with a clone of template `t`. */
+  function fillGroupFromTemplate(group, t) {
+    group.userData.fromTemplate = true;
+    for (const child of t.scene.clone().children) group.add(child);
+    group.scale.setScalar(t.scale);
+  }
+
+  /**
+   * Called whenever a model finishes loading (see ISLAND_MODELS above):
+   * upgrades any island still standing on the procedural fallback — built
+   * before this model was ready — to the real thing, in place. Only the
+   * *contents* of the group change; its position (and any physics/suppression
+   * bookkeeping keyed to that position) is untouched.
+   */
+  function upgradeFallbackIslands(t) {
+    for (const group of islands) {
+      if (group.userData.fromTemplate) continue;
+      // The fallback owns every child outright (buildIsland() makes fresh
+      // geometry/material each call), so this is a plain, safe dispose —
+      // unlike the shared-resource case handled in clearJourney().
+      for (const child of [...group.children]) {
+        group.remove(child);
+        child.geometry.dispose();
+        child.material.dispose();
+      }
+      fillGroupFromTemplate(group, t);
+    }
+  }
+
+  function spawnIsland(forkCursor) {
+    const seed = Math.floor(Math.random() * 1e9);
+    const group = new THREE.Group();
+    if (islandTemplates.length) {
+      // One of possibly several hand-modelled variants (see ISLAND_MODELS) —
+      // picked at random per fork, same as the procedural version picked a
+      // random seed, so no two forks need look alike.
+      const t = islandTemplates[Math.floor(Math.random() * islandTemplates.length)];
+      fillGroupFromTemplate(group, t);
+    } else {
+      // Model still loading — see upgradeFallbackIslands above, which
+      // replaces this with a real model as soon as one is ready.
+      for (const child of buildIsland({ seed, ...ISLAND_FALLBACK_PARAMS }).children) group.add(child);
+    }
+    group.position.set(forkCursor.x, ISLAND_Y, forkCursor.z);
+    scene.add(group);
+    islands.push(group);
+    return group;
   }
 
   const pillars = [];
@@ -1247,7 +1689,16 @@ export function mountSkyPath(container, options = {}) {
   const PUFF_PUSH = 2.6; // outward drift once dissolving
   const PUFF_LIFT = 1.5;
 
-  const CURTAIN_DIST = BRANCH_LEN * 0.4; // how far past the fork the curtain stands
+  // Was `BRANCH_LEN * 0.4` — a fraction of *path* length, with no reference to
+  // the island's own size. At the old, smaller island (radius 3.5) that
+  // happened to land past the deck edge; at the current radius (6) it lands
+  // at ~4.2, well *inside* the deck — the curtain would stand on top of solid
+  // paving rather than out past its edge. Tied directly to ISLAND_RADIUS
+  // instead: this needs to track the island's actual size, not a fraction of
+  // an unrelated path-length constant. (The wrong branch's own length used to
+  // be tied to this the same way; as of the converging-branches rework it's a
+  // fraction of the branch's own curve instead — see WRONG_GAP_FRACTION.)
+  const CURTAIN_DIST = ISLAND_RADIUS + 1.5; // how far past the fork the curtain stands — must clear the deck's edge
   const CURTAIN_OPEN_LEAD = 1.6; // starts dissolving this far before the avatar reaches it
   const CURTAIN_OPEN_TIME = 1.0; // seconds to fully dissolve
   const CURTAIN_GUIDE_OPACITY = 0.28; // guide sees through it — the cheap version of "the guide can see ahead"
@@ -1730,14 +2181,15 @@ export function mountSkyPath(container, options = {}) {
   // is still standing at the fork). So it is hidden from the moment it exists,
   // with none of the mid-walk state machine that deferring it would need.
   //
-  // Both branches of a fork look identical up to the curtain. Past it, the
-  // correct one carries on to the next fork while the wrong one simply stops
-  // in mid-air a short way further — invisible until you are already inside
+  // Both branches of a fork are the same curve (see genForkCurve), converging
+  // on the same next island, so they look identical up to the curtain. Past
+  // it, the correct one carries on to that island while the wrong one's
+  // stones simply run out mid-curve — invisible until you are already inside
   // the fog, which is what makes taking it a fall rather than a dead end you
-  // could have seen coming.
-  const WRONG_STUB_LEN = BRANCH_LEN * 0.8; // wrong branch stops here — past the curtain, short of anywhere
+  // could have seen coming. See WRONG_GAP_FRACTION / WRONG_FALL_FRACTION
+  // above for exactly where.
 
-  const sections = []; // one per fork, built on demand: { fork, correct, branch:{left,right}, trunkAfter, approach, curtain, nextCursor, endPhase }
+  const sections = []; // one per fork, built on demand: { fork, correct, branch:{left,right}, extended, approach, curtain, nextCursor, endPhase }
   let introTrunkPts = [];
 
   // Where the *next* fork will be planted, and the stone-row phase carried along
@@ -1748,6 +2200,27 @@ export function mountSkyPath(container, options = {}) {
 
   function clearJourney() {
     resetGround();
+    for (const group of islands) {
+      scene.remove(group);
+      group.traverse((o) => {
+        // A template-cloned island's Mesh children (rock, deck) share their
+        // geometry and material with the template itself and every other
+        // fork using it, including ones in the *next* round — Object3D.clone
+        // copies those references, it doesn't duplicate the underlying GPU
+        // resources. Disposing them here would break every other island
+        // built from the same template, so a template-sourced island disposes
+        // nothing. A procedural-fallback island (no template loaded yet) owns
+        // everything it has — fresh geometry/material from that one
+        // buildIsland() call — and disposes normally.
+        const sharesTemplateResources = group.userData.fromTemplate;
+        if ((o.isMesh || o.isInstancedMesh) && !sharesTemplateResources) {
+          o.geometry.dispose();
+          o.material.dispose();
+        }
+      });
+    }
+    islands.length = 0;
+    islandSpots.length = 0;
     for (const p of pillars) {
       scene.remove(p);
       p.geometry.dispose();
@@ -1777,43 +2250,67 @@ export function mountSkyPath(container, options = {}) {
 
   /**
    * Plants fork `k` at the current journeyCursor: its pillars, both branches,
-   * and its curtain. Records where the correct branch ends (nextCursor) so
+   * and its curtain. Records the shared destination (nextCursor) so
    * extendPastFork can carry on from there later, without rebuilding anything.
+   *
+   * The destination is fixed *before* either branch is drawn, and both curves
+   * (see genForkCurve) are built to land on it — this is what "converging
+   * branches" means: which side is correct no longer decides where the next
+   * island sits, only whether the player's own branch actually reaches it.
    */
   function buildFork(k) {
     const cursor = journeyCursor;
     const correct = CORRECT_BY_FORK[k - 1];
-    spawnPillars(cursor);
+    // The island art carries its own pillars, so the procedural pair is off.
+    // spawnPillars(cursor) — kept callable for when extra props are wanted.
+    spawnIsland(cursor);
+
+    const isLastFork = k === N_FORKS;
+
+    // Straighten *toward the temple*, not merely toward world heading 0.
+    // Correcting to 0 fixes the direction of travel but is blind to lateral
+    // drift already accumulated, so a run of same-side correct picks used to
+    // leave the walker tracking parallel to the temple's centreline rather
+    // than converging on it — arriving off to one side. Aiming at the temple
+    // itself straightens and re-centres in the same step, and needs no
+    // separate drift term: the further off-centre the cursor is, the more
+    // this heading differs from straight-ahead, so the pull scales itself.
+    //
+    // FORK_DISTANCE (the fork-to-fork forward span) is used here even for the
+    // last fork, whose `target` isn't a real island — that keeps the overall
+    // pacing (CRUISE_DISTANCE = N_FORKS * FORK_DISTANCE) unaffected by which
+    // fork is last; only the curve *shape* differs there (mirrorArrival
+    // below), not its forward reach.
+    const straightEnd = advance(cursor, cursor.heading, FORK_DISTANCE);
+    const targetHeading = THREE.MathUtils.lerp(cursor.heading, templeHeading(straightEnd), HEADING_CORRECTION);
+    const target = { ...advance(cursor, targetHeading, FORK_DISTANCE), heading: targetHeading };
+    const nextCursor = target;
+
+    // Register the next island's stone-suppression zone before either branch
+    // is scattered — same reasoning as buildJourney's intro trunk: whichever
+    // side turns out correct runs stones right up to that island's edge, and
+    // placeStone has to already know to leave that patch clear. No visible
+    // geometry is created here (spawnIsland/buildFork(k+1) still wait for a
+    // correct choice, in extendPastFork below), so this doesn't leak which
+    // side is correct — only that a next island exists, which the branches'
+    // shared destination already implies.
+    if (!isLastFork) registerIsland(target);
 
     const branch = {};
     const forkPhase = journeyPhase; // both branches leave the fork on the same row phase
-    let nextCursor = null;
     let endPhase = forkPhase;
 
     for (const side of ['left', 'right']) {
       const isCorrect = side === correct;
-      const heading = cursor.heading + (side === 'right' ? FORK_HALF_ANGLE : -FORK_HALF_ANGLE);
-      const len = isCorrect ? BRANCH_LEN : WRONG_STUB_LEN;
-      const segs = isCorrect ? BRANCH_SEGMENTS : 2;
-      const pts = genStraight(cursor, heading, len, segs);
-      const p = scatterAlong(cursor, pts, forkPhase);
-      branch[side] = pts;
+      const sideSign = side === 'right' ? 1 : -1;
+      const fullPts = genForkCurve(cursor, target, sideSign, FORK_CURVE_SEGMENTS, !isLastFork);
       if (isCorrect) {
-        endPhase = p;
-        const end = pts[pts.length - 1];
-        // Straighten *toward the temple*, not merely toward world heading 0.
-        // Correcting to 0 fixes the direction of travel but is blind to lateral
-        // drift already accumulated, so a run of same-side correct picks used to
-        // leave the walker tracking parallel to the temple's centreline rather
-        // than converging on it — arriving off to one side. Aiming at the temple
-        // itself straightens and re-centres in the same step, and needs no
-        // separate drift term: the further off-centre the cursor is, the more
-        // this heading differs from straight-ahead, so the pull scales itself.
-        nextCursor = {
-          x: end.x,
-          z: end.z,
-          heading: THREE.MathUtils.lerp(heading, templeHeading(end), HEADING_CORRECTION),
-        };
+        branch[side] = fullPts;
+        endPhase = scatterAlong(cursor, fullPts, forkPhase);
+      } else {
+        const stonePts = truncateAtFraction(cursor, fullPts, WRONG_GAP_FRACTION);
+        scatterAlong(cursor, stonePts, forkPhase); // dead-ends here — no phase carried forward
+        branch[side] = truncateAtFraction(cursor, fullPts, WRONG_FALL_FRACTION);
       }
     }
 
@@ -1821,7 +2318,7 @@ export function mountSkyPath(container, options = {}) {
       fork: { ...cursor },
       correct,
       branch,
-      trunkAfter: null,
+      extended: false,
       approach: null,
       nextCursor,
       endPhase,
@@ -1832,26 +2329,26 @@ export function mountSkyPath(container, options = {}) {
   }
 
   /**
-   * Commits the correct branch of fork `k`: lays the trunk beyond it (or, at the
-   * last fork, the final approach to the temple) and plants the *next* fork.
-   * Called from choose() the moment a correct pick is made — see the section
-   * header for why building this far ahead doesn't show the player anything.
+   * Commits the correct branch of fork `k`: plants the *next* fork directly
+   * at its destination (the branch itself already reaches that island — see
+   * genForkCurve — so there is no separate trunk stretch left to lay), or, at
+   * the last fork, lays the final approach to the temple instead. Called
+   * from applyChoice() the moment a correct pick is made — see the journey
+   * section header for why building this far ahead doesn't show the player
+   * anything.
    *
-   * Must run before choose() reads sec.trunkAfter / sec.approach, since this is
-   * what fills them in.
+   * Must run before applyChoice() reads sec.approach, since this is what
+   * fills it in.
    */
   function extendPastFork(k) {
     const sec = sections[k - 1];
-    if (!sec || sec.trunkAfter || sec.approach) return; // already extended — don't double-build
+    if (!sec || sec.extended) return; // already extended — don't double-build
+    sec.extended = true;
     const nextCursor = sec.nextCursor;
     journeyPhase = sec.endPhase;
 
     if (k < N_FORKS) {
-      const trunkPts = genStraight(nextCursor, nextCursor.heading, TRUNK_LEN, TRUNK_SEGMENTS);
-      journeyPhase = scatterAlong(nextCursor, trunkPts, journeyPhase);
-      sec.trunkAfter = trunkPts;
-      const end = trunkPts[trunkPts.length - 1];
-      journeyCursor = { x: end.x, z: end.z, heading: nextCursor.heading };
+      journeyCursor = { x: nextCursor.x, z: nextCursor.z, heading: nextCursor.heading };
       buildFork(k + 1);
     } else {
       const approachPts = genStraight(nextCursor, nextCursor.heading, APPROACH_DISTANCE, 3);
@@ -1870,9 +2367,12 @@ export function mountSkyPath(container, options = {}) {
     journeyPhase = ROW_SPACING;
 
     introTrunkPts = genStraight(origin, origin.heading, TRUNK_LEN, TRUNK_SEGMENTS);
+    // Register fork 1's island *before* scattering: the trunk runs right into
+    // it, and placeStone has to already know to leave that patch clear.
+    const introEnd = introTrunkPts[introTrunkPts.length - 1];
+    registerIsland(introEnd);
     journeyPhase = scatterAlong(origin, introTrunkPts, journeyPhase);
 
-    const introEnd = introTrunkPts[introTrunkPts.length - 1];
     journeyCursor = { x: introEnd.x, z: introEnd.z, heading: origin.heading };
 
     buildFork(1);
@@ -1884,9 +2384,19 @@ export function mountSkyPath(container, options = {}) {
   // screen choice. Figure art is 400x563 (728x1024 source, resized) — wider
   // relative to its height than the old placeholder, so width is derived from
   // that aspect ratio rather than reused, to avoid a stretched look. Height is
-  // 80% of the original placeholder's 2.2.
-  const FIGURE_H = 2.2 * 0.8;
+  // 80% of the original placeholder's 2.2, then FIGURE_SCALE on top of that
+  // (declared with the other world-scale constants near the top of the file —
+  // see the comment there for why).
+  const FIGURE_H = 2.2 * 0.8 * FIGURE_SCALE;
   const FIGURE_ASPECT = 400 / 563;
+
+  // Name tag: sized off the figure's own width/height rather than a fixed
+  // constant, so it scales correctly if FIGURE_H/FIGURE_SCALE ever change.
+  // "Slightly wider than the card" (Luke, 2026-08-30) — 15% wider, a
+  // starting value, easy to retune here if it reads too wide or too tight
+  // once it's actually next to a figure in the game.
+  const NAME_TAG_WIDTH_FACTOR = 1.15;
+  const NAME_TAG_GAP = 0.12; // world units between the card's top edge and the tag's bottom edge
 
   /**
    * Builds one character rig: the character art as a single plane.
@@ -1914,6 +2424,11 @@ export function mountSkyPath(container, options = {}) {
     scene.remove(r.group);
     r.frontMesh.geometry.dispose();
     r.frontMesh.material.dispose();
+    if (r.nameTagMesh) {
+      r.nameTagMesh.geometry.dispose();
+      r.nameTagMesh.material.map?.dispose();
+      r.nameTagMesh.material.dispose();
+    }
   }
 
   let characterKey = ROSTER[0].key;
@@ -1928,6 +2443,35 @@ export function mountSkyPath(container, options = {}) {
       figure = rig.group;
       disposeRig(old);
     }
+  }
+
+  /**
+   * Builds the name-tag texture (async — it loads the letter/background art
+   * on demand) and attaches it above the given rig's figure once ready.
+   * Fire-and-forget from the Start button: by the time it resolves the
+   * player is already walking, and the tag just appears a beat later.
+   * Guards against the rig having been swapped or the game unmounted in
+   * the meantime (neither happens in the current flow — character can't
+   * change after Start — but cheap to guard against regardless).
+   */
+  function attachNameTag(targetRig, name) {
+    if (!name) return;
+    buildNameTagCanvas(name)
+      .then(({ canvas, aspect }) => {
+        if (disposed || rig !== targetRig) return;
+        const texture = new THREE.CanvasTexture(canvas);
+        const w = FIGURE_H * FIGURE_ASPECT;
+        const tagW = w * NAME_TAG_WIDTH_FACTOR;
+        const tagH = tagW * aspect;
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(tagW, tagH),
+          new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide })
+        );
+        mesh.position.y = FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2;
+        targetRig.group.add(mesh);
+        targetRig.nameTagMesh = mesh;
+      })
+      .catch((err) => console.error('[nameTag] failed to build', err));
   }
   setCharacter(ROSTER[0].key);
 
@@ -1952,7 +2496,7 @@ export function mountSkyPath(container, options = {}) {
   const FALL_FIXED_DT = 1 / 60;
   fallWorld.timestep = FALL_FIXED_DT;
 
-  const CARD_THICK = 0.05;
+  const CARD_THICK = 0.05 * FIGURE_SCALE; // scales with the figure — it's the card's own depth, not a scene-relative distance
   // The "you fell" message/Again button and the card actually stopping are two
   // different clocks: the UI shows up at FALL_UI_DELAY, but the card keeps
   // tumbling in the background for FALL_EXTRA_DURATION more seconds after
@@ -2103,7 +2647,12 @@ export function mountSkyPath(container, options = {}) {
   // figure has travelled, so the sky changes continuously rather than snapping
   // at each fork. facing (below) drives the camera's heading the same way.
 
-  const WALK_SPEED = 3.2; // world units / second
+  // Raised 3.2 -> 4.0 alongside the character shrink (agreed 2026-08-27, see
+  // TODO.md "World scale rework") — covering ground faster reads as part of
+  // the same "the world is big" effect as a smaller figure, and it is the
+  // agreed lever for pulling total walk time back down from the ~37s the
+  // bigger islands now take at the old speed, if that turns out to drag.
+  const WALK_SPEED = 4.0; // world units / second
 
   let forkIndex = 1; // 1..N_FORKS — the fork currently awaiting a decision
   let finished = false;
@@ -2195,6 +2744,20 @@ export function mountSkyPath(container, options = {}) {
           'dense gaps': { value: cloudDense.gaps, min: 0, max: 24, step: 1, set: (v) => (cloudDense.gaps = v), format: oneIn },
           'light gaps': { value: cloudLight.gaps, min: 0, max: 24, step: 1, set: (v) => (cloudLight.gaps = v), format: oneIn },
           'dense stagger': { value: cloudDense.stagger, min: 0, max: 0.5, step: 0.05, set: (v) => (cloudDense.stagger = v), format: (v) => v.toFixed(2) },
+          // The island's shape (bump/taper/depth/size/grass) isn't tunable
+          // here — that's what island-proto.html is for, since changing any
+          // of those means rebuilding the mesh, not just repositioning it.
+          // Y is cheap to leave live since it's a plain reposition.
+          'island Y': {
+            value: ISLAND_Y,
+            min: -4,
+            max: 4,
+            step: 0.05,
+            set: (v) => {
+              ISLAND_Y = v;
+              for (const g of islands) g.position.y = v;
+            },
+          },
           'light stagger': { value: cloudLight.stagger, min: 0, max: 0.5, step: 0.05, set: (v) => (cloudLight.stagger = v), format: (v) => v.toFixed(2) },
         },
       })
@@ -2212,6 +2775,7 @@ export function mountSkyPath(container, options = {}) {
     charSelect: $('charSelect'),
     charList: $('charList'),
     paletteList: $('paletteList'),
+    nameInput: $('nameInput'),
     charStart: $('charStart'),
   };
 
@@ -2309,6 +2873,7 @@ export function mountSkyPath(container, options = {}) {
 
   els.charStart.addEventListener('click', () => {
     setCharacter(pickedCharacter);
+    attachNameTag(rig, normalizePlayerName(els.nameInput.value));
     els.charSelect.classList.remove('visible');
     setTimeout(() => els.charSelect.classList.remove('show'), 350);
   });
@@ -2360,9 +2925,10 @@ export function mountSkyPath(container, options = {}) {
 
   // Only the current fork's own two branches exist when this runs (see the
   // journey section header). A correct pick therefore has to *build* what
-  // follows — the trunk beyond this fork and the next fork itself — before it
-  // can queue the walk through it; a wrong pick builds nothing, and walks the
-  // short stub until it runs out of stones in mid-air, which ends the journey.
+  // follows — the next fork itself, already reachable directly since the
+  // branch runs all the way to it — before it can queue the walk through it;
+  // a wrong pick builds nothing, and walks the truncated branch until it
+  // runs out of stones in mid-air, which ends the journey.
   function applyChoice(side) {
     if (leg || finished) return;
     const sec = sections[forkIndex - 1];
@@ -2376,12 +2942,13 @@ export function mountSkyPath(container, options = {}) {
 
     if (wasCorrect) {
       correctCount++;
-      extendPastFork(forkIndex); // fills in sec.trunkAfter / sec.approach and plants the next fork
-      const continuation = sec.trunkAfter || sec.approach || [];
+      const isLastFork = forkIndex === N_FORKS;
+      extendPastFork(forkIndex); // plants the next fork, or (last fork only) fills in sec.approach
+      const continuation = sec.approach || [];
       queue.push(...continuation);
       realPoints.push(...continuation);
-      const arriveFork = sec.trunkAfter ? forkIndex + 1 : null;
-      const toP = sec.trunkAfter ? timeOfDay(forkIndex + 1) : timeOfDay(N_FORKS);
+      const arriveFork = isLastFork ? null : forkIndex + 1;
+      const toP = isLastFork ? timeOfDay(N_FORKS) : timeOfDay(forkIndex + 1);
       leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), toP, arriveFork);
       leg.success = true;
     } else {
@@ -2499,10 +3066,10 @@ export function mountSkyPath(container, options = {}) {
   // down — one lobe of walkPhase (0..PI) per half-step. Only advances while
   // walking; see the clamp-to-next-boundary logic in tick() for why a stop
   // never lands mid-lobe.
-  const WALK_BOB_RATE = Math.PI / 0.35; // radians/sec — 0.35s per lobe
-  const WALK_BOB_HEIGHT = 0.09;
-  const WALK_BOB_LATERAL = 0.07;
-  const WALK_BOB_TILT = THREE.MathUtils.degToRad(9);
+  const WALK_BOB_RATE = Math.PI / 0.35; // radians/sec — 0.35s per lobe; a cadence, not a length, so untouched by FIGURE_SCALE
+  const WALK_BOB_HEIGHT = 0.09 * FIGURE_SCALE; // a distance the figure moves, so it scales with the figure
+  const WALK_BOB_LATERAL = 0.07 * FIGURE_SCALE;
+  const WALK_BOB_TILT = THREE.MathUtils.degToRad(9); // an angle, not a length — no scaling needed
   let walkPhase = 0;
 
   function tick() {
@@ -2644,11 +3211,64 @@ export function mountSkyPath(container, options = {}) {
       const dx = head.x - walker.x;
       const dz = head.z - walker.z;
       if (Math.hypot(dx, dz) > 1e-3) {
-        const targetHeading = Math.atan2(dx, -dz);
+        // The *last* waypoint of a branch that leads to a real next island is
+        // always that island's own centre (genForkCurve's mirrored-arrival
+        // case) — reached via one final straight hop in from the arrival
+        // edge. That hop cuts laterally back to the centreline and so has a
+        // much steeper heading than the approach as a whole (~30° at current
+        // geometry, confirmed by tracing a live walk — see TODO.md, Luke
+        // reported the camera still skewed after the at-rest fix below).
+        // Chasing that literal direction for the final ~3.5 units genuinely
+        // swings the camera hard right before arrival; the earlier fix only
+        // straightened it back out *after* stopping, which is too late to
+        // read as anything but a last-second snap-then-correct.
+        //
+        // Once this last waypoint is the only one left, steer toward the
+        // *known* destination heading — sections[leg.arriveFork - 1].fork.heading,
+        // already computed when that fork was built — instead of the literal
+        // direction to it, so the camera straightens out gradually over the
+        // whole final hop rather than swinging onto its steep heading and
+        // then straight back off it once the walk stops. Falls back to the
+        // literal direction when there's no known destination (a wrong
+        // branch's truncated end, or the last fork's approach to the
+        // temple — both already straight, so this never fires for them
+        // anyway since neither has a sharp final hop to correct for).
+        const dest = leg.queue.length === 1 && leg.arriveFork ? sections[leg.arriveFork - 1] : null;
+        const targetHeading = dest ? dest.fork.heading : Math.atan2(dx, -dz);
         let delta = targetHeading - facing;
         delta = ((delta + Math.PI) % (Math.PI * 2)) - Math.PI; // shortest angular distance
         facing += delta * Math.min(1, dt * 2.5);
       }
+    } else if (!falling && !finished) {
+      // Arrival: the block above only runs while a leg is in progress, so the
+      // instant the queue empties it stops updating `facing` at all — it was
+      // left pointing wherever the branch's final waypoint happened to aim
+      // (toward the mirrored arrival edge, post Step 4, rather than straight
+      // ahead), and stayed there for as long as the player takes to choose.
+      //
+      // The target is the *fork's own heading* (sec.fork.heading — what
+      // cursor.heading was when this fork's branches were built, ± only
+      // FORK_HALF_ANGLE from either one), not templeHeading(walker) directly.
+      // The first attempt used the raw temple bearing and Luke reported the
+      // camera still looked skewed — because it is: fork.heading is only
+      // HEADING_CORRECTION (0.7) of the way rebent toward the temple, by
+      // design (see buildFork), so aiming dead at the temple swings the
+      // camera off-axis from the two branches actually on screen, which is
+      // what "skewed" was — not skewed relative to the temple, skewed
+      // relative to the fork in front of you. templeHeading(walker) is kept
+      // as a fallback for a section that doesn't exist for some reason;
+      // in normal play sec is always defined here (leg only goes null at a
+      // fork, or at the very end where `finished` is already true and this
+      // branch doesn't run).
+      //
+      // Eased over ~0.2s (dt * 20 reaches the target in about four time
+      // constants by then) rather than snapped, matching how the walking
+      // case above eases rather than jumps.
+      const sec = sections[forkIndex - 1];
+      const targetHeading = sec ? sec.fork.heading : templeHeading(walker);
+      let delta = targetHeading - facing;
+      delta = ((delta + Math.PI) % (Math.PI * 2)) - Math.PI;
+      facing += delta * Math.min(1, dt * 20);
     }
 
     // Recomputed fresh here rather than reusing a value from the block above —
@@ -2671,10 +3291,10 @@ export function mountSkyPath(container, options = {}) {
       const ahead = forward(facing, 4.6);
       camera.position.set(
         walker.x - behind.x + look.x,
-        3.9 * (1 + (camPull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
+        CAM_HEIGHT * (1 + (camPull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
         walker.z - behind.z
       );
-      camera.lookAt(walker.x + ahead.x, 1.25, walker.z + ahead.z);
+      camera.lookAt(walker.x + ahead.x, CAM_LOOK_Y, walker.z + ahead.z);
     }
     // else: just fell — camera stays exactly where the fall left it, frozen
     // alongside the figure, until "Again" resets everything at once.
@@ -2773,7 +3393,7 @@ export function mountSkyPath(container, options = {}) {
         forkZ: +s.fork.z.toFixed(2),
         leftPts: s.branch.left.length,
         rightPts: s.branch.right.length,
-        hasTrunkAfter: !!s.trunkAfter,
+        extended: s.extended,
         hasApproach: !!s.approach,
       }));
     window.__figureZ = () => walker.z;

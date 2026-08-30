@@ -23,6 +23,8 @@ export const SKY_PATH_CHROME = `
   <div id="charList"></div>
   <h2>Choose your colour</h2>
   <div id="paletteList"></div>
+  <h2>Name your character</h2>
+  <input id="nameInput" type="text" maxlength="10" placeholder="Name (optional)" autocomplete="off" />
   <button id="charStart">Start</button>
 </div>
 
@@ -207,6 +209,20 @@ export const SKY_PATH_CSS = `
   box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
 }
 .skypath-surface .swatch.selected { border-color: #ffe9b8; }
+.skypath-surface #nameInput {
+  width: 220px;
+  max-width: 80vw;
+  height: 44px;
+  padding: 0 14px;
+  border: 2px solid rgba(244, 247, 250, 0.25);
+  border-radius: 10px;
+  background: rgba(244, 247, 250, 0.08);
+  color: var(--paper);
+  font: 600 16px/1.2 system-ui, sans-serif;
+  text-align: center;
+}
+.skypath-surface #nameInput:focus { outline: none; border-color: #ffe9b8; }
+.skypath-surface #nameInput::placeholder { color: rgba(244, 247, 250, 0.45); }
 .skypath-surface #charStart {
   margin-top: 4px;
   min-height: 52px;

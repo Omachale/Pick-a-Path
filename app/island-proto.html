@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Island prototype</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0a1420; overflow: hidden; }
+      #ui {
+        position: absolute; top: 10px; left: 10px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.6); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 220px;
+      }
+      #ui label { display: block; margin-bottom: 6px; }
+      #ui .row { display: flex; justify-content: space-between; }
+      #ui input[type=range] { width: 100%; }
+      #ui button {
+        width: 100%; margin-top: 4px; border: 0; border-radius: 6px; padding: 7px;
+        font: 700 12px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <label>seed <button id="reroll" style="width:auto;float:right;padding:2px 8px;margin:0;">reroll</button></label>
+      <label class="row">bumpiness <span id="bumpV"></span><input id="bump" type="range" min="0" max="1" step="0.01" value="0.35" /></label>
+      <label class="row">taper <span id="taperV"></span><input id="taper" type="range" min="0" max="1" step="0.01" value="0.55" /></label>
+      <label class="row">depth <span id="depthV"></span><input id="depth" type="range" min="0.1" max="1.5" step="0.01" value="0.5" /></label>
+      <label class="row">size <span id="sizeV"></span><input id="size" type="range" min="3" max="14" step="0.1" value="7" /></label>
+      <label class="row">grass <span id="grassV"></span><input id="grass" type="range" min="0" max="60" step="1" value="24" /></label>
+      <button id="wire">toggle wireframe</button>
+      <button id="exportBtn">export .glb (for Blender)</button>
+    </div>
+    <script type="module" src="/src/islandProto.js"></script>
+  </body>
+</html>
