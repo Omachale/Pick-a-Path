@@ -1,0 +1,238 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Letter Size Tuner</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #2b2b2b; color: #eee; padding: 30px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  p.hint { color: #aaa; font-size: 13px; margin-top: 0; margin-bottom: 24px; max-width: 700px; }
+  #stage-wrap { overflow: auto; padding-bottom: 10px; }
+  #stage {
+    position: relative;
+    background-image: url('textures/card-background.png');
+    background-size: cover;
+    background-position: center;
+    border-radius: 6px;
+    /* gamma via SVG filter (#gammaFix) + contrast via CSS, both locked at 1.2 for this demo */
+    filter: url(#gammaFix) contrast(120%);
+  }
+  #stage img {
+    position: absolute;
+    display: block;
+    cursor: pointer;
+    transition: box-shadow 0.1s;
+  }
+  #stage img.selected {
+    box-shadow: 0 0 0 3px #4fc3f7;
+    border-radius: 4px;
+  }
+  #stage img:hover:not(.selected) {
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.5);
+    border-radius: 4px;
+  }
+  .controls {
+    position: fixed;
+    top: 30px;
+    right: 30px;
+    background: #1e1e1e;
+    border-radius: 8px;
+    padding: 16px 20px;
+    width: 240px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  .controls .selected-label { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+  .controls .selected-label .char { color: #4fc3f7; font-size: 20px; }
+  .controls label { display: block; font-size: 13px; margin-bottom: 8px; }
+  .controls input[type=range] { width: 100%; }
+  .readout { font-variant-numeric: tabular-nums; color: #9cf; font-weight: 600; }
+  .placeholder { color: #888; font-size: 13px; }
+  button { margin-top: 12px; width: 100%; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 8px 12px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #444; }
+  .log { margin-top: 10px; font-size: 12px; color: #9cf; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <!-- Hidden SVG gamma filter: feComponentTransfer with a gamma-type function
+       per channel is the standard way to apply true gamma to on-screen
+       content via CSS (`filter: url(#id)`), same math as the canvas
+       getImageData/pow lookup-table approach used in nameTag.js, just
+       expressed as a filter primitive instead of a per-pixel loop. -->
+  <svg width="0" height="0" style="position:absolute">
+    <filter id="gammaFix">
+      <feComponentTransfer>
+        <feFuncR type="gamma" exponent="0.8333" amplitude="1" offset="0"></feFuncR>
+        <feFuncG type="gamma" exponent="0.8333" amplitude="1" offset="0"></feFuncG>
+        <feFuncB type="gamma" exponent="0.8333" amplitude="1" offset="0"></feFuncB>
+      </feComponentTransfer>
+    </filter>
+  </svg>
+
+  <h1>Letter size tuner</h1>
+  <p class="hint">Click any letter to select every instance of it, then drag the slider to enlarge it (100%–140%). Gamma and contrast are locked at 1.20 for this demo, matching the values found in the photo-viewer test. Standalone — nothing here touches the game.</p>
+
+  <div id="stage-wrap">
+    <div id="stage"></div>
+  </div>
+
+  <div class="controls">
+    <div id="selectedLabel" class="placeholder">Click a letter to select it</div>
+    <label id="sliderRow" style="display:none;">
+      <span style="display:flex;justify-content:space-between;">
+        <span>Size</span>
+        <span class="readout" id="readout">100%</span>
+      </span>
+      <input type="range" id="slider" min="100" max="140" step="1" value="100">
+    </label>
+    <button id="logBtn">Log values</button>
+    <div class="log" id="log"></div>
+  </div>
+
+<script>
+  const UPPER_H = 150;
+  const LOWER_H = Math.round(UPPER_H * 0.7);
+  const DESC_OFFSET = 6;
+  const J_SCALE = 1.15;
+  const SPACING = 10;
+  const WORD_GAP = 34;
+  const PAD_X = 40;
+  const PAD_Y = 40;
+  const DESCENDERS = new Set(['g', 'j', 'p', 'q', 'y']);
+  const SENTENCE = "The quick brown fox jumps over the lazy dog";
+
+  // Baked into the real game 2026-08-31 from a first round of results out of
+  // this exact tool -- kept here (rather than left at 1.0 for everything) so
+  // 100% on the slider still means "this letter's current appearance" for a
+  // second round of tuning, same convention as before. Keep in sync with
+  // LETTER_SCALE in nameTag.js and letter_scale_pct() in
+  // render-cardboard-text.sh if any of these change again.
+  const BAKED_SCALE = {
+    b: 1.18, d: 1.15, f: 1.14, g: 1.06, h: 1.24, i: 1.19,
+    j: 1.15, l: 1.15, p: 1.12, q: 1.05, t: 1.15, u: 0.9,
+  };
+
+  // Per-lowercase-letter extra scale on top of BAKED_SCALE, 1.0 = no further
+  // change from the current baked size -- this is what the slider drives.
+  const letterScale = {};
+  for (const c of "abcdefghijklmnopqrstuvwxyz") letterScale[c] = 1.0;
+
+  function letterSrc(ch) {
+    return /[A-Z]/.test(ch) ? `textures/letters/upper-v2/${ch}.png` : `textures/letters/lower/${ch}.png`;
+  }
+
+  // Preload every unique glyph used in the sentence before laying out, since
+  // layout needs each image's natural aspect ratio.
+  const uniqueChars = [...new Set([...SENTENCE].filter((c) => c !== ' '))];
+  const images = {};
+  Promise.all(uniqueChars.map((ch) => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => { images[ch] = img; resolve(); };
+    img.onerror = reject;
+    img.src = letterSrc(ch);
+  }))).then(layout);
+
+  const stage = document.getElementById('stage');
+  const elements = []; // { el, ch }
+
+  function layout() {
+    const baselineY = PAD_Y + UPPER_H;
+    let x = PAD_X;
+    let maxH = 0;
+    const placed = [];
+
+    for (const ch of SENTENCE) {
+      if (ch === ' ') { x += WORD_GAP; continue; }
+      const isUpper = /[A-Z]/.test(ch);
+      const lower = ch.toLowerCase();
+      let baseH = isUpper ? UPPER_H : LOWER_H;
+      if (lower === 'j') baseH *= J_SCALE;
+      if (!isUpper) baseH *= BAKED_SCALE[lower] ?? 1;
+      const extra = isUpper ? 1 : letterScale[lower];
+      const h = baseH * extra;
+      const img = images[ch];
+      const w = img.naturalWidth * (h / img.naturalHeight);
+
+      // Extra side-gap grows with how much taller than a normal lowercase
+      // letter this glyph is being rendered right now (generalises the
+      // j-specific gap-growth rule to any letter at any scale).
+      const totalRatio = isUpper ? 1 : h / LOWER_H;
+      const gapLeft = totalRatio > 1 ? SPACING * (totalRatio - 1) : 0;
+      const gapRight = totalRatio > 1 ? SPACING * totalRatio : SPACING;
+
+      x += gapLeft;
+      let y = baselineY - h;
+      if (!isUpper && DESCENDERS.has(lower)) y += DESC_OFFSET;
+
+      placed.push({ ch, x, y, w, h });
+      x += w + gapRight;
+      maxH = Math.max(maxH, y + h);
+    }
+
+    const totalW = x + PAD_X;
+    const totalH = PAD_Y + UPPER_H + PAD_Y + 20;
+    stage.style.width = totalW + 'px';
+    stage.style.height = totalH + 'px';
+
+    // Rebuild DOM elements fresh each layout -- simplest way to keep this
+    // in sync with a variable-length placed[] array, and this tool only
+    // re-lays-out on a slider drag, not per frame.
+    stage.innerHTML = '';
+    elements.length = 0;
+    for (const p of placed) {
+      const img = document.createElement('img');
+      img.src = letterSrc(p.ch);
+      img.style.left = p.x + 'px';
+      img.style.top = p.y + 'px';
+      img.style.width = p.w + 'px';
+      img.style.height = p.h + 'px';
+      img.dataset.char = p.ch.toLowerCase();
+      img.addEventListener('click', () => selectChar(p.ch.toLowerCase()));
+      stage.appendChild(img);
+      elements.push({ el: img, ch: p.ch.toLowerCase() });
+    }
+    applySelectionHighlight();
+  }
+
+  let selected = null;
+  const selectedLabel = document.getElementById('selectedLabel');
+  const sliderRow = document.getElementById('sliderRow');
+  const slider = document.getElementById('slider');
+  const readout = document.getElementById('readout');
+
+  function selectChar(ch) {
+    if (!/[a-z]/.test(ch)) return; // only lowercase letters are individually tunable
+    selected = ch;
+    selectedLabel.innerHTML = `Selected: <span class="char">${ch}</span>`;
+    sliderRow.style.display = '';
+    const pct = Math.round(letterScale[ch] * 100);
+    slider.value = pct;
+    readout.textContent = pct + '%';
+    applySelectionHighlight();
+  }
+
+  function applySelectionHighlight() {
+    for (const { el, ch } of elements) {
+      el.classList.toggle('selected', ch === selected);
+    }
+  }
+
+  slider.addEventListener('input', () => {
+    if (!selected) return;
+    const pct = Number(slider.value);
+    readout.textContent = pct + '%';
+    letterScale[selected] = pct / 100;
+    layout();
+    selectChar(selected); // re-apply selection highlight/slider position after rebuild
+  });
+
+  document.getElementById('logBtn').addEventListener('click', () => {
+    const changed = Object.entries(letterScale).filter(([, v]) => v !== 1);
+    const text = changed.length
+      ? changed.map(([ch, v]) => `${ch}: ${Math.round(v * 100)}%`).join('\n')
+      : '(no letters changed from 100%)';
+    document.getElementById('log').textContent = text;
+    navigator.clipboard?.writeText(text).catch(() => {});
+  });
+</script>
+</body>
+</html>

@@ -27,8 +27,32 @@ PAD_Y=40
 BASELINE_Y=$((PAD_Y + UPPER_H))
 DESC_OFFSET=6         # FINAL: g/j/p/q/y shift down 6px from bottom-aligned bbox, agreed 2026-08-30
 J_SCALE_PCT=115       # FINAL: lowercase j rendered at 115% size, agreed 2026-08-30
+# FINAL, agreed 2026-08-31 -- see nameTag.js's GAMMA_DEFAULT/CONTRAST_DEFAULT/
+# SATURATION_DEFAULT. GAMMA maps directly to ImageMagick's -gamma (same
+# input^(1/gamma) formula as the canvas version). CONTRAST/SATURATION are
+# approximations of the canvas version's CSS contrast()/saturate() filters --
+# -brightness-contrast and -modulate use different curves, so treat this
+# script's color output as "close enough for a preview," not pixel-identical
+# to what actually ships in-game.
+GAMMA=0.85       # updated 2026-08-30 to match nameTag.js's GAMMA_DEFAULT (was 0.95)
+CONTRAST_PCT=40       # -brightness-contrast contrast param, approximating CSS contrast(140%)
+SATURATION_PCT=130    # -modulate saturation param, approximating CSS saturate(130%)
 
 is_descender() { case "$1" in g|j|p|q|y) return 0;; *) return 1;; esac; }
+
+# Per-letter size corrections, agreed with Luke 2026-08-31 after he compared
+# every lowercase letter side by side in app/letter-size-tuner.html. Percents
+# multiply on top of whatever a letter's height already was (LOWER_H
+# normally, LOWER_H*J_SCALE_PCT for j) -- see nameTag.js's LETTER_SCALE
+# comment for the fuller explanation, keep the two in sync.
+letter_scale_pct() {
+  case "$1" in
+    b) echo 118;; d) echo 115;; f) echo 114;; g) echo 106;; h) echo 124;;
+    i) echo 119;; j) echo 115;; l) echo 115;; p) echo 112;; q) echo 105;;
+    t) echo 115;; u) echo 90;;
+    *) echo 100;;
+  esac
+}
 
 cd "$TMP"
 rm -f parts_${NAME}_*.png
@@ -48,21 +72,26 @@ for (( i=0; i<len; i++ )); do
   if [[ "$ch" =~ [A-Z] ]]; then
     magick "$UPPER/$ch.png" -resize x${UPPER_H} "$f"
     h=$UPPER_H
+    gl=0; gr=$SPACING
   else
-    magick "$LOWER/$ch.png" -resize x${LOWER_H} "$f"
     h=$LOWER_H
     if [ "$ch" = "j" ]; then
-      newh=$(awk -v h="$h" -v p="$J_SCALE_PCT" 'BEGIN{printf "%.0f", h*p/100}')
-      magick "$LOWER/j.png" -resize x${newh} "$f"
-      h=$newh
+      h=$(awk -v h="$h" -v p="$J_SCALE_PCT" 'BEGIN{printf "%.0f", h*p/100}')
+    fi
+    extra_pct=$(letter_scale_pct "$ch")
+    h=$(awk -v h="$h" -v p="$extra_pct" 'BEGIN{printf "%.0f", h*p/100}')
+    magick "$LOWER/$ch.png" -resize x${h} "$f"
+    # extra side-gap grows with how much taller than a plain lowercase
+    # letter this glyph ends up (generalises the old j-only rule)
+    ratio=$(awk -v h="$h" -v base="$LOWER_H" 'BEGIN{printf "%.4f", h/base}')
+    if awk -v r="$ratio" 'BEGIN{exit !(r>1)}'; then
+      gl=$(awk -v s="$SPACING" -v r="$ratio" 'BEGIN{printf "%.1f", s*(r-1)}')
+      gr=$(awk -v s="$SPACING" -v r="$ratio" 'BEGIN{printf "%.1f", s*r}')
+    else
+      gl=0; gr=$SPACING
     fi
   fi
   w=$(magick "$f" -format "%w" info:)
-  gl=0; gr=$SPACING
-  if [ "$ch" = "j" ]; then
-    gl=$(awk -v s="$SPACING" -v p="$J_SCALE_PCT" 'BEGIN{printf "%.1f", s*(p/100-1)}')
-    gr=$(awk -v s="$SPACING" -v p="$J_SCALE_PCT" 'BEGIN{printf "%.1f", s*p/100}')
-  fi
   letters+=("$f:$w:$h:$gl:$gr:$ch")
   total_w=$((total_w + w + SPACING))
 done
@@ -91,5 +120,5 @@ for entry in "${letters[@]}"; do
   gr_i=$(awk -v v="$gr" 'BEGIN{printf "%.0f", v}')
   x=$((x + w + gr_i))
 done
-cp "$canvas" "$OUT_DIR/${NAME}.png"
+magick "$canvas" -gamma $GAMMA -brightness-contrast 0x${CONTRAST_PCT} -modulate 100,${SATURATION_PCT},100 "$OUT_DIR/${NAME}.png"
 echo "wrote $OUT_DIR/${NAME}.png"

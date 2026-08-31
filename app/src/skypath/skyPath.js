@@ -2394,8 +2394,11 @@ export function mountSkyPath(container, options = {}) {
   // constant, so it scales correctly if FIGURE_H/FIGURE_SCALE ever change.
   // "Slightly wider than the card" (Luke, 2026-08-30) — 15% wider, a
   // starting value, easy to retune here if it reads too wide or too tight
-  // once it's actually next to a figure in the game.
-  const NAME_TAG_WIDTH_FACTOR = 1.15;
+  // once it's actually next to a figure in the game. Bumped 50% larger
+  // still (1.15 -> 1.725) 2026-08-30 while testing whether alternating
+  // tags above/below (see TEST_TAGS below) solves overlap between
+  // closely-spaced players at this bigger size.
+  const NAME_TAG_WIDTH_FACTOR = 1.725;
   const NAME_TAG_GAP = 0.12; // world units between the card's top edge and the tag's bottom edge
 
   /**
@@ -2424,11 +2427,7 @@ export function mountSkyPath(container, options = {}) {
     scene.remove(r.group);
     r.frontMesh.geometry.dispose();
     r.frontMesh.material.dispose();
-    if (r.nameTagMesh) {
-      r.nameTagMesh.geometry.dispose();
-      r.nameTagMesh.material.map?.dispose();
-      r.nameTagMesh.material.dispose();
-    }
+    removeNameTag(r);
   }
 
   let characterKey = ROSTER[0].key;
@@ -2446,34 +2445,190 @@ export function mountSkyPath(container, options = {}) {
   }
 
   /**
-   * Builds the name-tag texture (async — it loads the letter/background art
-   * on demand) and attaches it above the given rig's figure once ready.
-   * Fire-and-forget from the Start button: by the time it resolves the
-   * player is already walking, and the tag just appears a beat later.
-   * Guards against the rig having been swapped or the game unmounted in
-   * the meantime (neither happens in the current flow — character can't
-   * change after Start — but cheap to guard against regardless).
+   * Name tags: a screen-space DOM overlay, not a mesh on the rig.
+   *
+   * History: this started (2026-08-30) as a plane mesh parented to the
+   * rig's group, positioned above the figure's head in local Y. That broke
+   * the moment an alternate "below the card" placement was needed (see
+   * TEST_TAGS below, for testing tag overlap between close-together
+   * players): mirroring the above-the-head math put it *underground*,
+   * because the ground is solid right at the feet — there's no open
+   * "underneath" in world space the way there's open sky above the head.
+   * Found live by extracting the mesh's actual world position; the tag was
+   * there, just buried in the stone floor.
+   *
+   * Rewritten 2026-08-31 as a plain positioned <div> per tag, layered in
+   * `#nameTagLayer` above the canvas, repositioned every frame by
+   * projecting each rig's anchor point through the camera (`worldToScreen`
+   * below). This sidesteps the ground problem entirely — a pixel offset
+   * can't clip into terrain — and comes with two things Luke asked for
+   * that were awkward as mesh-local geometry:
+   *   - visibility is now a plain per-tag flag, not a position hack, so
+   *     "hide while the card is moving, show once it's standing still on
+   *     an island" (Luke, 2026-08-31 — see `moving` in updateNameTags) is
+   *     one boolean, and any future per-avatar exception (an abduction
+   *     animation that should hide the tag mid-flight, say) is too.
+   *   - each viewer's own camera does the projecting, so who reads as
+   *     "left" or "right" — and thus how far off-centre a tag lands — is
+   *     naturally per-viewer with zero extra bookkeeping, which matters
+   *     once other players are actually networked (see TODO.md).
+   * No per-tag screen-collision layout yet (letting two tags overlap on
+   * screen if the projected math says they should) — flagged in TODO.md as
+   * the natural next step once there are several real networked players
+   * to test it against, rather than guessed at now.
    */
-  function attachNameTag(targetRig, name) {
+  const nameTags = []; // { rig, localY, tagW, tagH, el, alwaysVisible }
+
+  function worldToScreen(pos) {
+    const v = pos.clone().project(camera);
+    return {
+      x: (v.x * 0.5 + 0.5) * surfaceWidth(),
+      y: (1 - (v.y * 0.5 + 0.5)) * surfaceHeight(),
+      behind: v.z > 1,
+    };
+  }
+
+  // Run every frame regardless of state (see tick()) — visibility itself is
+  // state-dependent, so the check has to happen every frame, not just while
+  // walking. `moving` covers falling too: a mid-fall tag would be exactly
+  // as nonsensical as a mid-walk one.
+  function updateNameTags() {
+    const moving = !!leg || falling;
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    for (const t of nameTags) {
+      if (moving && !t.alwaysVisible) {
+        t.el.style.display = 'none';
+        continue;
+      }
+      const anchor = t.rig.group.position.clone();
+      anchor.y += t.localY;
+      const center = worldToScreen(anchor);
+      if (center.behind) {
+        t.el.style.display = 'none';
+        continue;
+      }
+      // Calibrate on-screen width by projecting two points a real tagW
+      // apart at the anchor's own depth, rather than a fixed px size or a
+      // distance-ratio guess — this is exactly the perspective size a 3D
+      // plane of that world width would have rendered at, so it keeps
+      // looking right if the camera FOV/distance ever changes, with
+      // nothing here to re-tune.
+      const half = right.clone().multiplyScalar(t.tagW / 2);
+      const edgeA = worldToScreen(anchor.clone().add(half));
+      const edgeB = worldToScreen(anchor.clone().sub(half));
+      const pxWidth = Math.hypot(edgeA.x - edgeB.x, edgeA.y - edgeB.y);
+      t.el.style.display = '';
+      t.el.style.left = `${center.x}px`;
+      t.el.style.top = `${center.y}px`;
+      t.el.style.width = `${pxWidth}px`;
+      t.el.style.height = `${pxWidth * (t.tagH / t.tagW)}px`;
+    }
+  }
+
+  function removeNameTag(targetRig) {
+    if (!targetRig.nameTag) return;
+    const idx = nameTags.indexOf(targetRig.nameTag);
+    if (idx !== -1) nameTags.splice(idx, 1);
+    targetRig.nameTag.el.remove();
+    targetRig.nameTag = null;
+  }
+
+  /**
+   * Builds the name-tag canvas (async — it loads the letter/background art
+   * on demand) and registers a screen-space tag for the given rig once
+   * ready. Fire-and-forget from the Start button: by the time it resolves
+   * the player is already walking, and the tag just appears a beat later
+   * (hidden until they stop, per updateNameTags above). Guards against the
+   * rig having been swapped or the game unmounted in the meantime (neither
+   * happens for the player's own rig in the current flow — character can't
+   * change after Start — but cheap to guard against regardless, and does
+   * matter for TEST_TAGS companions, which are never "current" under the
+   * default guard — see `isCurrent` below).
+   *
+   * Glow thickness/brightness and gamma/contrast/saturation were all tuned
+   * live via a bottom-right slider panel (removed 2026-08-31 once Luke
+   * settled on final numbers — see TODO.md for the values and the two real
+   * bugs that turned up while tuning them). Not passing any tuning options
+   * here at all, deliberately: buildNameTagCanvas's own defaults
+   * (GLOW_BLUR_DEFAULT, GAMMA_DEFAULT, etc. in nameTag.js) already are
+   * those final numbers, so there's nothing for this call site to override.
+   */
+  function attachNameTag(targetRig, name, glowColorHex, opts = {}) {
     if (!name) return;
-    buildNameTagCanvas(name)
+    // `side` places the tag above the head or down near the feet (see the
+    // TEST_TAGS block below for why "below" isn't a mirror-image offset).
+    // `isCurrent` replaces the old hardcoded `rig === targetRig` guard
+    // (which assumed the *only* rig in play was the player's own,
+    // swappable one — not true once static companion rigs that never
+    // change exist alongside it). `alwaysVisible` skips the
+    // hide-while-moving rule entirely — unused today (every tag currently
+    // follows the same rule, per Luke, 2026-08-31) but cheap to leave
+    // wired in for whenever the player's own tag, say, needs to differ.
+    const { side = 'above', isCurrent = () => rig === targetRig, alwaysVisible = false } = opts;
+    const glowColor = `#${glowColorHex.toString(16).padStart(6, '0')}`;
+    buildNameTagCanvas(name, { glowColor })
       .then(({ canvas, aspect }) => {
-        if (disposed || rig !== targetRig) return;
-        const texture = new THREE.CanvasTexture(canvas);
+        if (disposed || !isCurrent()) return;
+        removeNameTag(targetRig); // drop any previous tag for this rig first — avoids a leaked duplicate on re-attach
         const w = FIGURE_H * FIGURE_ASPECT;
         const tagW = w * NAME_TAG_WIDTH_FACTOR;
         const tagH = tagW * aspect;
-        const mesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(tagW, tagH),
-          new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide })
-        );
-        mesh.position.y = FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2;
-        targetRig.group.add(mesh);
-        targetRig.nameTagMesh = mesh;
+        // "below" isn't a mirror of "above": the ground is solid right at
+        // the figure's feet (world y=0), so mirroring the above-the-head
+        // math buried the old mesh version under the stone floor. Instead
+        // it hovers just above ground near the shins/knees, low enough to
+        // read as "beneath the player" without clipping into the terrain.
+        const localY = side === 'below'
+          ? -(FIGURE_H / 2) + NAME_TAG_GAP + tagH / 2
+          : FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2;
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+        canvas.style.display = 'block';
+        const el = document.createElement('div');
+        el.className = 'nameTagChip';
+        el.appendChild(canvas);
+        els.nameTagLayer.appendChild(el);
+        const entry = { rig: targetRig, localY, tagW, tagH, el, alwaysVisible };
+        targetRig.nameTag = entry;
+        nameTags.push(entry);
       })
       .catch((err) => console.error('[nameTag] failed to build', err));
   }
   setCharacter(ROSTER[0].key);
+
+  // ------------------------------------------------------------ TEST_TAGS
+  // Temporary, gated behind ?testTags=1 — not a real multiplayer feature
+  // (other players' positions aren't networked yet, see TODO.md). Spawns
+  // four static "Player N" companions beside the real player so Luke can
+  // eyeball whether alternating name tags above/below fixes overlap
+  // between close-together players at the new 50%-bigger tag size.
+  // Left-to-right: Player 1 (top), Player 2 (bottom), the real player as
+  // "Player 3" (top), Player 4 (bottom), Player 5 (top) — bottom-tag
+  // players also stand a little lower, per Luke, so their body position
+  // roughly matches their tag position. Delete this whole block (and its
+  // two call sites below) once the above/below question is settled.
+  const TEST_TAGS = new URLSearchParams(location.search).has('testTags');
+  const testCompanions = []; // { rig, offsetX, yStagger }
+
+  function spawnTestCompanions() {
+    const SPACING_X = FIGURE_H * FIGURE_ASPECT * 1.5;
+    const STAGGER_Y = FIGURE_H * 0.15;
+    // Spelled-out numbers, not digits — the letter art has no digit glyphs
+    // (see normalizePlayerName/WORD_GAP), same reason the empty-input
+    // default is "Player One" rather than "Player 1".
+    const slots = [
+      { label: 'Player One', offsetX: -2 * SPACING_X, side: 'above', yStagger: 0 },
+      { label: 'Player Two', offsetX: -1 * SPACING_X, side: 'below', yStagger: -STAGGER_Y },
+      { label: 'Player Four', offsetX: 1 * SPACING_X, side: 'below', yStagger: -STAGGER_Y },
+      { label: 'Player Five', offsetX: 2 * SPACING_X, side: 'above', yStagger: 0 },
+    ];
+    const companionKeys = ROSTER.filter((c) => c.key !== pickedCharacter).slice(0, 4).map((c) => c.key);
+    slots.forEach((slot, i) => {
+      const companionRig = makeCharacterRig(companionKeys[i]);
+      attachNameTag(companionRig, slot.label, pickedColorHex, { side: slot.side, isCurrent: () => true });
+      testCompanions.push({ rig: companionRig, offsetX: slot.offsetX, yStagger: slot.yStagger });
+    });
+  }
 
   // ---------------------------------------------------------------- fall physics (Rapier)
   //
@@ -2721,13 +2876,23 @@ export function mountSkyPath(container, options = {}) {
   // Gap sliders read as a denominator, not a magnitude: bigger means rarer.
   const oneIn = (n) => (n > 0 ? `1 in ${n}` : 'off');
 
-  // The backdrop slider panel is off by default now that every value it was
-  // built to find has been baked in above. It is kept wired rather than
-  // deleted, because the next art change will want it again and rebuilding it
-  // costs more than carrying it: add `&tune=1` to the URL to bring it back.
-  // Anything adjusted here has to be copied back into the constants by hand —
-  // the panel writes to the live objects, not to the source.
-  const bgTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('tune')
+  // The backdrop slider panel (sky/sea/clouds) is off by default now that
+  // every value it was built to find has been baked in above. It is kept
+  // wired rather than deleted, because the next art change will want it
+  // again and rebuilding it costs more than carrying it: add `&tuneBg=1` to
+  // the URL to bring it back. Anything adjusted here has to be copied back
+  // into the constants by hand — the panel writes to the live objects, not
+  // to the source.
+  //
+  // Deliberately its OWN flag, separate from the name-tag tuner's `?tune=1`
+  // below (2026-08-30, Luke: "disable the other, older sliders... make them
+  // invisible again... don't feel the need to re-integrate them without
+  // being asked"). The two panels used to share `tune=1` since this one was
+  // already wired that way when the name-tag tuner was added alongside it —
+  // that accidentally brought this dormant, unrelated panel back on screen.
+  // If a future task wants *this* panel again, that has to be an explicit
+  // ask, not a side effect of some other tuner reusing the same flag.
+  const bgTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('tuneBg')
     ? attachBgTuner({
         container,
         panels: { sky, landSea },
@@ -2763,6 +2928,15 @@ export function mountSkyPath(container, options = {}) {
       })
     : null;
 
+  // The name-tag glow/gamma/contrast/saturation tuner (bottom-right,
+  // ?tune=1) was removed 2026-08-31 once Luke settled on final numbers —
+  // see TODO.md for the values and history. Unlike the backdrop tuner above
+  // (kept behind ?tuneBg=1 for the *next* art pass), this one isn't being
+  // kept dormant: name-tag color grading isn't expected to need re-tuning
+  // the way backdrop placement periodically does, so it was deleted rather
+  // than parked. If that assumption turns out wrong, rebuilding it is
+  // cheap — this file's git history has the full working version.
+
   // ---------------------------------------------------------------- controls
 
   const els = {
@@ -2777,6 +2951,7 @@ export function mountSkyPath(container, options = {}) {
     paletteList: $('paletteList'),
     nameInput: $('nameInput'),
     charStart: $('charStart'),
+    nameTagLayer: $('nameTagLayer'),
   };
 
   // The role button always shows the current role. In a round it is assigned
@@ -2798,7 +2973,9 @@ export function mountSkyPath(container, options = {}) {
   // either way, since they can't see or reach anything behind it.
   let pickedCharacter = ROSTER[0].key;
   let pickedColorHex = PALETTE[0].hex;
-  let charSelectIndex = 0; // carousel index
+  // Randomised (was fixed at 0) per Luke's request 2026-08-30, so the
+  // carousel doesn't always open on the same character.
+  let charSelectIndex = Math.floor(Math.random() * ROSTER.length);
 
   function renderCharSelect() {
     // Carousel: show one character at a time with left/right navigation
@@ -2817,7 +2994,15 @@ export function mountSkyPath(container, options = {}) {
       btn.className = 'swatch' + (p.hex === pickedColorHex ? ' selected' : '');
       btn.style.background = `#${p.hex.toString(16).padStart(6, '0')}`;
       btn.setAttribute('aria-label', p.label);
-      btn.disabled = true;
+      // Re-enabled 2026-08-30: was inert (card-backing recolour never
+      // shipped — see TODO.md), now drives the name-tag glow colour
+      // instead. Secondary to getting the glow's position/look right, per
+      // Luke — not the focus, just wired up since it was trivial once the
+      // glow itself worked.
+      btn.addEventListener('click', () => {
+        pickedColorHex = p.hex;
+        renderCharSelect();
+      });
       els.paletteList.appendChild(btn);
     }
 
@@ -2873,7 +3058,14 @@ export function mountSkyPath(container, options = {}) {
 
   els.charStart.addEventListener('click', () => {
     setCharacter(pickedCharacter);
-    attachNameTag(rig, normalizePlayerName(els.nameInput.value));
+    // "Player One" default per Luke, 2026-08-30 — used whenever the name
+    // field is left empty rather than shipping a blank/missing name tag.
+    // Under TEST_TAGS the real player's own name is overridden to "Player
+    // Three" so the five tags read as one consistent numbered sequence —
+    // see the TEST_TAGS block above.
+    const name = TEST_TAGS ? 'Player Three' : (normalizePlayerName(els.nameInput.value) || 'Player One');
+    attachNameTag(rig, name, pickedColorHex);
+    if (TEST_TAGS) spawnTestCompanions();
     els.charSelect.classList.remove('visible');
     setTimeout(() => els.charSelect.classList.remove('show'), 350);
   });
@@ -3181,7 +3373,21 @@ export function mountSkyPath(container, options = {}) {
       const side = lobe % 2 === 0 ? 1 : -1; // right lobe first, then left, alternating
       figure.position.set(walker.x + side * lift * WALK_BOB_LATERAL, FIGURE_H / 2 + lift * WALK_BOB_HEIGHT, walker.z);
       figure.rotation.z = -side * lift * WALK_BOB_TILT;
+
+      // TEST_TAGS companions: same bob/lateral formula as the real figure,
+      // just offset in x (left/right slot) and y (the "stand a little
+      // lower" stagger for below-tag players) — see the TEST_TAGS block.
+      for (const c of testCompanions) {
+        c.rig.group.position.set(
+          walker.x + c.offsetX + side * lift * WALK_BOB_LATERAL,
+          FIGURE_H / 2 + lift * WALK_BOB_HEIGHT + c.yStagger,
+          walker.z
+        );
+        c.rig.group.rotation.z = -side * lift * WALK_BOB_TILT;
+      }
     }
+
+    updateNameTags();
 
     applySun(sunP);
     applyAtmosphere(sunP); // leaves the current tint in tintScratch for updateCurtains
@@ -3414,6 +3620,11 @@ export function mountSkyPath(container, options = {}) {
       characterKey,
       frontMap: rig.frontMesh.material.map.source.data?.currentSrc || rig.frontMesh.material.map.name,
     });
+    window.__testTags = () => testCompanions.map((c) => ({
+      pos: c.rig.group.position.toArray().map((v) => +v.toFixed(3)),
+      tagLocalY: c.rig.nameTag ? +c.rig.nameTag.localY.toFixed(3) : null,
+      tagVisible: c.rig.nameTag ? c.rig.nameTag.el.style.display !== 'none' : null,
+    }));
     window.__cloudRows = () => cloudRows.map((r) => +r.position.z.toFixed(2));
     window.__markers = () => ({ leftVisible: markerPair.left.visible, rightVisible: markerPair.right.visible });
     window.__stoneCounts = () => stoneMeshes.map((m) => m.count);
