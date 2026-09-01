@@ -37,6 +37,8 @@ import { attachBgTuner } from './bgTuner.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildIsland } from './islandGen.js';
 import { buildNameTagCanvas, normalizePlayerName } from './nameTag.js';
+import { buildBridge, disposeBridge, BRIDGE_DEFAULTS, BRIDGE_ANCHORS } from './bridgeGen.js';
+import { createBridgeWind } from './bridgeWind.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
 // be used. Module-scope so it happens once per page load, not once per mount.
@@ -1547,6 +1549,58 @@ export function mountSkyPath(container, options = {}) {
   const islands = [];
   const islandSpots = []; // fork centres, registered before the stones arrive
 
+  // ------------------------------------------------------------------ bridges
+  //
+  // Replace the scattered stone path between two islands (Luke, 2026-08-31 —
+  // see TODO.md, "Rope bridges replace path stones", and bridgeGen.js /
+  // bridgeWind.js for the generator and sway themselves, both settled on the
+  // standalone tuning page at app/bridge-tuner.html). One shared wind instance
+  // for the whole scene — every bridge's ropes/planks reference the same
+  // uniforms, which is what makes the sway read as one consistent wind rather
+  // than each bridge running its own clock (see bridgeWind.js's header for why
+  // that mattered to Luke: front/back and the two parallel bridges of a fork
+  // needed to lag each other while still visibly sharing one wind).
+  const bridgeWind = createBridgeWind();
+  const bridges = []; // flat list of every built bridge group, for clearJourney()
+
+  // Scope of this port, deliberately: bridges connect two *islands*. The intro
+  // trunk (spawn -> fork 1) and the final approach (last fork -> temple) are
+  // NOT island-to-island — there is no island at the far end for a bridge's
+  // posts to plant into (registerIsland() is never called for the temple
+  // approach's target — see buildFork below), which would reproduce exactly
+  // the mid-air-post bug the tuning page spent a whole round fixing, just at
+  // a different spot. Both of those stretches keep the original stone path.
+  // Only forks 1..N_FORKS-1's branches (fork -> fork, always island-to-island)
+  // become bridges — see buildFork's isLastFork branch below.
+  //
+  // How far along its OWN bridge (not the old stone route's length, which no
+  // longer exists once the branch is straight) the wrong side's plank gap
+  // sits, and how many planks are missing there. Static for now — Luke's
+  // asked-for "a plank breaks and drops as the player reaches it" animation
+  // is an explicit later step (see TODO.md); this only replaces the old
+  // "stones physically stop here" tell with an equivalent "planks are already
+  // missing here" one, discovered at the same moment as before: past the fog
+  // curtain, once already committed to the branch. The wrong branch's walk
+  // queue is truncated at exactly this same fraction, so the player walks up
+  // to the near edge of the gap and falls through it, rather than falling at
+  // an arbitrary point on an otherwise-intact-looking deck.
+  const BRIDGE_WRONG_GAP_T = 0.75;
+  const BRIDGE_WRONG_MISSING = 2;
+
+  /**
+   * The waypoints for one bridge branch, mirroring genForkCurve()'s shape but
+   * straight (a rope bridge cannot bow — see bridgeGen.js's planBow note) and
+   * using BRIDGE_ANCHORS instead of EDGE_LATERAL/EDGE_FORWARD. Always called
+   * with mirrorArrival=true here (the one false case, the last fork, keeps
+   * genForkCurve/stones — see above), so always returns exactly
+   * [departEdge, arriveEdge, target-centre].
+   */
+  function genBridgeRoute(cursor, target, sideSign) {
+    const departEdge = localToWorld(cursor, sideSign * BRIDGE_ANCHORS.lateral, BRIDGE_ANCHORS.forward);
+    const arriveEdge = localToWorld(target, sideSign * BRIDGE_ANCHORS.lateral, -BRIDGE_ANCHORS.forward);
+    return [departEdge, arriveEdge, { x: target.x, z: target.z }];
+  }
+
   /**
    * Marks where a fork will stand. Called *before* the run of stones leading
    * to it is laid, because placeStone needs to know to skip that area and the
@@ -2236,7 +2290,19 @@ export function mountSkyPath(container, options = {}) {
       c.puffs.dispose(); // InstancedMesh also owns its instance buffers
     }
     curtains.length = 0;
+    for (const b of bridges) {
+      scene.remove(b);
+      disposeBridge(b);
+    }
+    bridges.length = 0;
     sections.length = 0;
+    // Guards against a restart after falling on fork 1: nextIslandAlreadySpawned
+    // could be left true (fork 1 pre-spawned fork 2's island, then the player
+    // fell before ever reaching buildFork(2) to consume that flag), and the
+    // island it refers to no longer exists — it was just disposed above.
+    // Left uncleared, the next buildJourney()/buildFork(1) would believe its
+    // own island had already been spawned and skip it entirely.
+    nextIslandAlreadySpawned = false;
   }
 
   /**
@@ -2258,12 +2324,24 @@ export function mountSkyPath(container, options = {}) {
    * branches" means: which side is correct no longer decides where the next
    * island sits, only whether the player's own branch actually reaches it.
    */
+  // Set by the *previous* buildFork() call (see the spawnIsland(target) call
+  // near the end of this function) when it already built the island this call
+  // is about to stand on — reused instead of spawning a duplicate at the same
+  // spot. Only ever true for forks 2..N_FORKS; fork 1 has no previous fork to
+  // have pre-spawned it, and falls through to the plain spawnIsland(cursor)
+  // below exactly as before.
+  let nextIslandAlreadySpawned = false;
+
   function buildFork(k) {
     const cursor = journeyCursor;
     const correct = CORRECT_BY_FORK[k - 1];
     // The island art carries its own pillars, so the procedural pair is off.
     // spawnPillars(cursor) — kept callable for when extra props are wanted.
-    spawnIsland(cursor);
+    if (nextIslandAlreadySpawned) {
+      nextIslandAlreadySpawned = false;
+    } else {
+      spawnIsland(cursor);
+    }
 
     const isLastFork = k === N_FORKS;
 
@@ -2289,29 +2367,92 @@ export function mountSkyPath(container, options = {}) {
     // Register the next island's stone-suppression zone before either branch
     // is scattered — same reasoning as buildJourney's intro trunk: whichever
     // side turns out correct runs stones right up to that island's edge, and
-    // placeStone has to already know to leave that patch clear. No visible
-    // geometry is created here (spawnIsland/buildFork(k+1) still wait for a
-    // correct choice, in extendPastFork below), so this doesn't leak which
-    // side is correct — only that a next island exists, which the branches'
-    // shared destination already implies.
-    if (!isLastFork) registerIsland(target);
+    // placeStone has to already know to leave that patch clear.
+    //
+    // The island's actual geometry is spawned here too, immediately — moved
+    // one full fork earlier than a correct choice (Luke, 2026-09-02). It used
+    // to wait for extendPastFork/buildFork(k+1), which only ever fires on a
+    // correct pick, but "converging branches" (see this function's own doc
+    // comment) means the next island's position has never depended on which
+    // side turns out correct — there was nothing being protected by hiding
+    // it, only a pop-in the moment a choice resolved. Revealing it now
+    // doesn't leak which side is correct either: both branches' bridges
+    // visibly run to the same island regardless, exactly as before.
+    if (!isLastFork) {
+      registerIsland(target);
+      spawnIsland(target);
+      nextIslandAlreadySpawned = true;
+    }
 
     const branch = {};
     const forkPhase = journeyPhase; // both branches leave the fork on the same row phase
     let endPhase = forkPhase;
 
-    for (const side of ['left', 'right']) {
-      const isCorrect = side === correct;
-      const sideSign = side === 'right' ? 1 : -1;
-      const fullPts = genForkCurve(cursor, target, sideSign, FORK_CURVE_SEGMENTS, !isLastFork);
-      if (isCorrect) {
-        branch[side] = fullPts;
-        endPhase = scatterAlong(cursor, fullPts, forkPhase);
-      } else {
-        const stonePts = truncateAtFraction(cursor, fullPts, WRONG_GAP_FRACTION);
-        scatterAlong(cursor, stonePts, forkPhase); // dead-ends here — no phase carried forward
-        branch[side] = truncateAtFraction(cursor, fullPts, WRONG_FALL_FRACTION);
+    if (isLastFork) {
+      // No island at `target` for this one (see registerIsland above) — kept
+      // as the original stone path; see the bridges section header for why.
+      for (const side of ['left', 'right']) {
+        const isCorrect = side === correct;
+        const sideSign = side === 'right' ? 1 : -1;
+        const fullPts = genForkCurve(cursor, target, sideSign, FORK_CURVE_SEGMENTS, false);
+        if (isCorrect) {
+          branch[side] = fullPts;
+          endPhase = scatterAlong(cursor, fullPts, forkPhase);
+        } else {
+          const stonePts = truncateAtFraction(cursor, fullPts, WRONG_GAP_FRACTION);
+          scatterAlong(cursor, stonePts, forkPhase); // dead-ends here — no phase carried forward
+          branch[side] = truncateAtFraction(cursor, fullPts, WRONG_FALL_FRACTION);
+        }
       }
+    } else {
+      // Both sides build an IDENTICAL bridge except for the wrong side's
+      // plank gap — fairness stays structural (the old genForkCurve comment's
+      // point still holds: nothing about the fork itself should tell the two
+      // branches apart), only the gap and the walk queue's truncation differ.
+      for (const side of ['left', 'right']) {
+        const isCorrect = side === correct;
+        const sideSign = side === 'right' ? 1 : -1;
+        const [departEdge, arriveEdge, centreHop] = genBridgeRoute(cursor, target, sideSign);
+        const bridgeOptions = isCorrect
+          ? {}
+          : { missingPlanks: BRIDGE_WRONG_MISSING, gapCenterT: BRIDGE_WRONG_GAP_T };
+        const bridgeGroup = buildBridge(departEdge, arriveEdge, bridgeOptions, bridgeWind);
+        scene.add(bridgeGroup);
+        bridges.push(bridgeGroup);
+        const info = bridgeGroup.userData.bridge;
+
+        // Tag the two anchor points with which bridge they belong to and
+        // where along it (0/1) — tick()'s walk loop reads these off
+        // leg.queue/leg.lastPoint to set the walker's height and sway while
+        // crossing. Every other waypoint (the short hop onto an island's own
+        // deck, or a stone stretch elsewhere) is left untagged and so stays
+        // flat — see the `head.bridge` check in tick().
+        departEdge.bridge = info;
+        departEdge.bridgeT = 0;
+        arriveEdge.bridge = info;
+        arriveEdge.bridgeT = 1;
+
+        if (isCorrect) {
+          branch[side] = [departEdge, arriveEdge, centreHop];
+        } else {
+          // Walk up to the near edge of this bridge's own gap, then fall —
+          // same trigger point the missing planks sit at, so the player
+          // never reaches a spot where the queue simply runs out for no
+          // visible reason.
+          const fallPoint = {
+            x: THREE.MathUtils.lerp(departEdge.x, arriveEdge.x, BRIDGE_WRONG_GAP_T),
+            z: THREE.MathUtils.lerp(departEdge.z, arriveEdge.z, BRIDGE_WRONG_GAP_T),
+            bridge: info,
+            bridgeT: BRIDGE_WRONG_GAP_T,
+          };
+          branch[side] = [departEdge, fallPoint];
+        }
+      }
+      // No stones scattered on this stretch any more, so there is nothing for
+      // `endPhase` to carry forward — left at `forkPhase`, which only matters
+      // again once a later stone stretch (the last fork, or the final
+      // approach) needs a starting phase, and there is no adjacent stone row
+      // for it to stay continuous with regardless.
     }
 
     const sec = {
@@ -2827,7 +2968,22 @@ export function mountSkyPath(container, options = {}) {
   let choiceSide = null; // 'left' or 'right' — tracks which path was chosen, used for camera angle during fall
 
   function makeLeg(queue, realPoints, fromP, toP, arriveFork) {
-    return { queue, total: pathLength(realPoints), traveled: 0, fromP, toP, arriveFork };
+    // `lastPoint` is where the walker stands *right now*, snapshotted as the
+    // leg begins — always flat ground (an island deck, or spawn), never
+    // mid-bridge, since a leg only ever starts where the previous one ended.
+    // tick()'s walk loop advances this to each waypoint as it's reached, and
+    // compares it against the upcoming one's `.bridge` tag to know whether the
+    // *current segment* is a bridge crossing (see the `head.bridge` check
+    // there) — untagged waypoints (islands, stone stretches) leave it null.
+    return {
+      queue,
+      total: pathLength(realPoints),
+      traveled: 0,
+      fromP,
+      toP,
+      arriveFork,
+      lastPoint: { x: walker.x, z: walker.z, bridge: null, bridgeT: 0 },
+    };
   }
 
   function startJourney() {
@@ -3269,6 +3425,13 @@ export function mountSkyPath(container, options = {}) {
     timer.update();
     const dt = Math.min(timer.getDelta(), 0.05);
     const t = timer.getElapsed();
+    bridgeWind.update(t); // one call moves the sway on every bridge in the scene
+
+    // Set while walking a bridge segment (see makeLeg's lastPoint / the
+    // `head.bridge` check below); read further down when placing the figure,
+    // for the walker's own height and cosmetic sway to match the deck.
+    let bridgeUnderfoot = null;
+    let bridgeUnderfootT = 0;
 
     // avatar: walk the current leg's waypoint queue at a constant speed, never
     // jumping — each leg's waypoints continue straight into the next round's
@@ -3290,9 +3453,27 @@ export function mountSkyPath(container, options = {}) {
           walker.z += (dz / distToHead) * moveAmount;
         }
         leg.traveled += moveAmount;
+
+        // Bridge height: only while the segment we are *currently crossing*
+        // (from leg.lastPoint to head) has both ends tagged with the same
+        // bridge — every other segment (the short hop onto an island's own
+        // deck, or a stone stretch) is flat, so walker.y stays 0 there, same
+        // as it always implicitly was before bridges existed.
+        if (head.bridge && leg.lastPoint.bridge === head.bridge) {
+          const segLen = Math.hypot(head.x - leg.lastPoint.x, head.z - leg.lastPoint.z);
+          const remaining = Math.max(0, distToHead - moveAmount);
+          const frac = segLen > 1e-6 ? THREE.MathUtils.clamp(1 - remaining / segLen, 0, 1) : 1;
+          bridgeUnderfootT = THREE.MathUtils.lerp(leg.lastPoint.bridgeT, head.bridgeT, frac);
+          bridgeUnderfoot = head.bridge;
+          walker.y = head.bridge.heightAt(bridgeUnderfootT);
+        } else {
+          walker.y = 0;
+        }
+
         if (distToHead <= moveAmount + 1e-4) {
           walker.x = head.x;
           walker.z = head.z;
+          leg.lastPoint = { x: head.x, z: head.z, bridge: head.bridge ?? null, bridgeT: head.bridgeT ?? 0 };
           leg.queue.shift();
         }
       }
@@ -3371,16 +3552,36 @@ export function mountSkyPath(container, options = {}) {
       const within = walkPhase - lobe * Math.PI;
       const lift = Math.sin(within); // 0 -> 1 -> 0 across each lobe
       const side = lobe % 2 === 0 ? 1 : -1; // right lobe first, then left, alternating
-      figure.position.set(walker.x + side * lift * WALK_BOB_LATERAL, FIGURE_H / 2 + lift * WALK_BOB_HEIGHT, walker.z);
-      figure.rotation.z = -side * lift * WALK_BOB_TILT;
+
+      // Cosmetic-only wind sway while crossing a bridge: this is the JS twin
+      // of the GLSL in bridgeWind.js applied to the *character*, not the
+      // deck — evaluated fresh from walker.x/z each frame rather than folded
+      // into walker itself, so the sway can never feed back into the
+      // straight-line distance math the walk loop above uses to track real
+      // progress along the queue. Without this the ropes/planks visibly sway
+      // under a character standing perfectly rigid on them, which reads as
+      // more obviously broken than no sway at all would have.
+      const bridgeSway = bridgeUnderfoot
+        ? bridgeWind.evaluate(walker.x, walker.z, bridgeUnderfootT)
+        : null;
+
+      figure.position.set(
+        walker.x + side * lift * WALK_BOB_LATERAL + (bridgeSway ? bridgeSway.offset.x : 0),
+        walker.y + FIGURE_H / 2 + lift * WALK_BOB_HEIGHT + (bridgeSway ? bridgeSway.offset.y : 0),
+        walker.z + (bridgeSway ? bridgeSway.offset.z : 0)
+      );
+      figure.rotation.z = -side * lift * WALK_BOB_TILT + (bridgeSway ? bridgeSway.roll : 0);
 
       // TEST_TAGS companions: same bob/lateral formula as the real figure,
       // just offset in x (left/right slot) and y (the "stand a little
       // lower" stagger for below-tag players) — see the TEST_TAGS block.
+      // Follow the walker's own height (so they don't float through a
+      // bridge's sag if the test happens to run on one) but skip the wind
+      // sway — a debug-only feature, not worth the extra complexity.
       for (const c of testCompanions) {
         c.rig.group.position.set(
           walker.x + c.offsetX + side * lift * WALK_BOB_LATERAL,
-          FIGURE_H / 2 + lift * WALK_BOB_HEIGHT + c.yStagger,
+          walker.y + FIGURE_H / 2 + lift * WALK_BOB_HEIGHT + c.yStagger,
           walker.z
         );
         c.rig.group.rotation.z = -side * lift * WALK_BOB_TILT;
@@ -3629,6 +3830,7 @@ export function mountSkyPath(container, options = {}) {
     window.__markers = () => ({ leftVisible: markerPair.left.visible, rightVisible: markerPair.right.visible });
     window.__stoneCounts = () => stoneMeshes.map((m) => m.count);
     window.__stoneMeshes = stoneMeshes;
+    window.__islands = () => islands.map((g) => g.position.toArray().map((v) => +v.toFixed(2)));
     window.__atmos = () => ({
       skyTint: atmosphereMaterials[0].color.getHexString(),
       clear: renderer.getClearColor(new THREE.Color()).getHexString(),

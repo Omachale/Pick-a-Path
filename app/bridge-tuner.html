@@ -1,0 +1,168 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Rope bridge tuner</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #9fc4dd; overflow: hidden; }
+      #ui {
+        position: absolute; top: 10px; left: 10px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 236px;
+        max-height: calc(100vh - 40px); overflow-y: auto;
+      }
+      #ui h3 {
+        margin: 10px 0 6px; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #8fb8d4; font-weight: 700;
+      }
+      #ui h3:first-child { margin-top: 0; }
+      #ui label { display: block; margin-bottom: 5px; }
+      #ui .row { display: flex; justify-content: space-between; align-items: baseline; }
+      #ui .row span { font-variant-numeric: tabular-nums; color: #9cf; font-weight: 600; }
+      #ui input[type=range] { width: 100%; }
+      #ui button {
+        border: 0; border-radius: 6px; padding: 6px 8px;
+        font: 700 11px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+      #ui .btnRow { display: flex; gap: 5px; margin-bottom: 4px; }
+      #ui .btnRow button { flex: 1; }
+      #report {
+        margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.15);
+        font-size: 11px; line-height: 1.6; color: #c8dced;
+      }
+      #report b { color: #fff; }
+      #log { margin-top: 6px; font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; color: #9cf; white-space: pre; }
+      #ui .chk { display: flex; align-items: center; gap: 6px; margin: 7px 0 3px; cursor: pointer; }
+      #ui .chk input { margin: 0; cursor: pointer; }
+      #ui .row.sub { padding-left: 14px; opacity: 0.82; font-size: 11px; }
+      #windPanel input[type=range] { margin-bottom: 2px; }
+      #ui .kind {
+        margin: 9px 0 2px; font-size: 10px; letter-spacing: 0.06em;
+        text-transform: uppercase; color: #7fa8c6; font-weight: 700;
+      }
+      #ui .kind i { font-weight: 400; text-transform: none; letter-spacing: 0; opacity: 0.8; }
+
+      #exportPanel {
+        position: absolute; top: 10px; right: 10px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 200px;
+      }
+      #exportPanel h3 {
+        margin: 0 0 6px; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #8fb8d4; font-weight: 700;
+      }
+      #exportPanel p { margin: 0 0 8px; font-size: 11px; color: #c8dced; }
+      #exportPanel .btnRow { display: flex; gap: 5px; }
+      #exportPanel .btnRow button {
+        flex: 1; border: 0; border-radius: 6px; padding: 7px 8px;
+        font: 700 11px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    ==========================================================================
+    OPTIONAL BRIDGE PARAMETERS: DO NOT REINSTATE WITHOUT CLEAR INSTRUCTIONS
+    ==========================================================================
+    Parked 2026-09-01 (Luke). The bridge numbers are settled and baked into
+    BRIDGE_DEFAULTS / BRIDGE_ANCHORS in src/skypath/bridgeGen.js; this panel is
+    kept intact but hidden, and the page opens as a plain preview of the
+    finished bridge.
+
+        To re-tune deliberately:  bridge-tuner.html?tune=1
+
+    The `value="..."` attributes below are DOCUMENTATION ONLY — src/
+    bridgeProto.js overwrites every slider from BRIDGE_DEFAULTS at load, so
+    that module stays the single source of truth. Editing a value here changes
+    nothing; change it in bridgeGen.js.
+
+    Do not un-hide this by default, and do not re-enable it as a side effect of
+    editing something nearby.
+    ==========================================================================
+    -->
+
+    <!-- Always visible regardless of ?tune=1 — a one-shot export, not a
+         tuning control, so it isn't gated with the rest of the panel below.
+         See the header comment above exportGLB() in src/bridgeProto.js for
+         the axis convention a replacement mesh has to follow. -->
+    <div id="exportPanel">
+      <h3>Export for Blender</h3>
+      <p>Real baked size, current placeholder shape (a box). File &gt; Import &gt; glTF 2.0 in Blender.</p>
+      <div class="btnRow">
+        <button id="exportPlank">plank.glb</button>
+        <button id="exportPost">post.glb</button>
+      </div>
+    </div>
+
+    <div id="ui">
+      <h3>View</h3>
+      <div class="btnRow">
+        <button id="viewOrbit">orbit</button>
+        <button id="viewWalker">walker</button>
+        <button id="viewSide">side</button>
+      </div>
+      <label class="row">walk along <span id="walkTV">0.50</span></label>
+      <input id="walkT" type="range" min="0" max="1" step="0.01" value="0.5" />
+
+      <h3>Anchors</h3>
+      <label class="row">bridge spacing <span id="bridgeSpacingV"></span></label>
+      <input id="bridgeSpacing" type="range" min="0.3" max="3.2" step="0.05" value="0.8" />
+      <label class="row">anchor depth <span id="anchorDepthV"></span></label>
+      <input id="anchorDepth" type="range" min="0" max="2.5" step="0.05" value="0" />
+
+      <h3>Hang</h3>
+      <label class="row">deck height <span id="deckHeightV"></span></label>
+      <input id="deckHeight" type="range" min="0" max="1.2" step="0.01" value="0" />
+      <label class="row">sag <span id="sagV"></span></label>
+      <input id="sag" type="range" min="0" max="2" step="0.01" value="0.78" />
+      <label class="row">sag shape <span id="sagShapeV"></span></label>
+      <input id="sagShape" type="range" min="0.2" max="3.5" step="0.05" value="0.95" />
+      <label class="row">plan bow <span id="planBowV"></span></label>
+      <input id="planBow" type="range" min="-1" max="1" step="0.05" value="0" />
+
+      <h3>Deck</h3>
+      <label class="row">deck width <span id="deckWidthV"></span></label>
+      <input id="deckWidth" type="range" min="0.3" max="3" step="0.05" value="0.75" />
+      <label class="row">plank spacing <span id="plankSpacingV"></span></label>
+      <input id="plankSpacing" type="range" min="0.12" max="0.9" step="0.01" value="0.33" />
+      <label class="row">plank width <span id="plankWidthV"></span></label>
+      <input id="plankWidth" type="range" min="0.06" max="0.6" step="0.01" value="0.19" />
+      <label class="row">plank thickness <span id="plankThicknessV"></span></label>
+      <input id="plankThickness" type="range" min="0.01" max="0.2" step="0.01" value="0.03" />
+      <label class="row">bare rope each end <span id="plankEdgeSkipV">0</span></label>
+      <input id="plankEdgeSkip" type="range" min="0" max="10" step="1" value="0" />
+
+      <h3>Ropes &amp; posts</h3>
+      <label class="row">handrail height <span id="handrailHeightV"></span></label>
+      <input id="handrailHeight" type="range" min="0.2" max="1.4" step="0.02" value="0.5" />
+      <label class="row">rope radius <span id="ropeRadiusV"></span></label>
+      <input id="ropeRadius" type="range" min="0.01" max="0.12" step="0.005" value="0.03" />
+      <label class="row">post height <span id="postHeightV"></span></label>
+      <input id="postHeight" type="range" min="0.3" max="2" step="0.01" value="0.67" />
+      <label class="row">post size <span id="postSizeV"></span></label>
+      <input id="postSize" type="range" min="0.02" max="0.4" step="0.01" value="0.05" />
+      <label class="row">post embed <span id="postEmbedV"></span></label>
+      <input id="postEmbed" type="range" min="0" max="1.2" step="0.02" value="0.58" />
+
+      <h3>Broken bridge (phase 2)</h3>
+      <label class="row">broken planks <span id="missingPlanksV">0</span></label>
+      <input id="missingPlanks" type="range" min="0" max="3" step="1" value="0" />
+
+      <!-- Wind controls are generated from the config in bridgeWind.js (see
+           buildWindPanel in bridgeProto.js) rather than written out here, so a
+           layer can't exist in the module without a control appearing for it. -->
+      <h3>Wind sway</h3>
+      <div id="windPanel"></div>
+
+      <div id="report"></div>
+      <div class="btnRow" style="margin-top:8px;">
+        <button id="logBtn">log values</button>
+        <button id="resetBtn">reset</button>
+      </div>
+      <div id="log"></div>
+    </div>
+    <script type="module" src="/src/bridgeProto.js"></script>
+  </body>
+</html>
