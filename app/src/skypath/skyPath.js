@@ -37,7 +37,7 @@ import { attachBgTuner } from './bgTuner.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildIsland } from './islandGen.js';
 import { buildNameTagCanvas, normalizePlayerName } from './nameTag.js';
-import { buildBridge, disposeBridge, BRIDGE_DEFAULTS, BRIDGE_ANCHORS } from './bridgeGen.js';
+import { buildBridge, disposeBridge, breakPlank, BRIDGE_DEFAULTS, BRIDGE_ANCHORS } from './bridgeGen.js';
 import { createBridgeWind } from './bridgeWind.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
@@ -683,13 +683,6 @@ export function mountSkyPath(container, options = {}) {
       const scale = ISLAND_TARGET_RADIUS / deckRadius;
       const t = { scene: gltf.scene, scale, deckRadiusScaled: deckRadius * scale };
       islandTemplates.push(t);
-      // startJourney() (below) runs synchronously at mount, long before any
-      // network fetch can resolve — so the very first fork's island is
-      // *always* built from the procedural fallback, not a rare race. Once a
-      // model does arrive, swap it into any island still standing on that
-      // fallback rather than leaving it stuck with the placeholder rock for
-      // the rest of the round.
-      upgradeFallbackIslands(t);
     });
   }
 
@@ -1563,6 +1556,44 @@ export function mountSkyPath(container, options = {}) {
   const bridgeWind = createBridgeWind();
   const bridges = []; // flat list of every built bridge group, for clearJourney()
 
+  // ---------------------------------------------------------------- plank models
+  //
+  // Hand-modelled bridge planks (Blender, Luke's own meshes — 2026-09-03),
+  // three variants so a 20-odd-plank bridge doesn't read as one block
+  // stamped down repeatedly. Registered with the shared `manager` like the
+  // island models (`gltfLoader` is the same loader instance those use), so
+  // the journey (built from manager.onLoad — see the comment above
+  // startJourney()'s definition) never gets built before these have arrived.
+  const PLANK_MODELS = ['models/plank1.glb', 'models/plank2.glb', 'models/plank3.glb'];
+  const plankVariants = []; // filled in as each model's onLoad fires — { geometry, material, halfThickness }
+
+  for (const src of PLANK_MODELS) {
+    gltfLoader.load(src, (gltf) => {
+      // Each file is a single node carrying both the mesh and a Blender
+      // Object-mode Scale that was never "Applied" before export — real
+      // (two of the three planks are deliberately different sizes), but it
+      // has to be baked into the geometry itself before this can go into an
+      // InstancedMesh: instancing supplies its own per-instance matrix and
+      // has no idea about a *source* mesh's separate local transform, so
+      // skipping this would render every plank at its pre-scale size. Baked
+      // from the accumulated matrixWorld (not just `.scale`) so this is
+      // still correct if a later re-export adds a position/rotation on top,
+      // or wraps the mesh in a parent node.
+      gltf.scene.updateWorldMatrix(true, true);
+      let mesh = null;
+      gltf.scene.traverse((o) => { if (o.isMesh && !mesh) mesh = o; });
+      mesh.geometry.applyMatrix4(mesh.matrixWorld);
+      mesh.geometry.computeBoundingBox();
+      const halfThickness = (mesh.geometry.boundingBox.max.y - mesh.geometry.boundingBox.min.y) / 2;
+      // Patched once here rather than per-bridge: every bridge that uses this
+      // variant shares this exact material (see bridgeGen.js's plank
+      // section), so the wind uniforms only need wiring in once, not
+      // redundantly on every buildBridge() call.
+      bridgeWind.patch(mesh.material, 'instanced');
+      plankVariants.push({ geometry: mesh.geometry, material: mesh.material, halfThickness });
+    });
+  }
+
   // Scope of this port, deliberately: bridges connect two *islands*. The intro
   // trunk (spawn -> fork 1) and the final approach (last fork -> temple) are
   // NOT island-to-island — there is no island at the far end for a bridge's
@@ -1574,18 +1605,17 @@ export function mountSkyPath(container, options = {}) {
   // become bridges — see buildFork's isLastFork branch below.
   //
   // How far along its OWN bridge (not the old stone route's length, which no
-  // longer exists once the branch is straight) the wrong side's plank gap
-  // sits, and how many planks are missing there. Static for now — Luke's
-  // asked-for "a plank breaks and drops as the player reaches it" animation
-  // is an explicit later step (see TODO.md); this only replaces the old
-  // "stones physically stop here" tell with an equivalent "planks are already
-  // missing here" one, discovered at the same moment as before: past the fog
-  // curtain, once already committed to the branch. The wrong branch's walk
-  // queue is truncated at exactly this same fraction, so the player walks up
-  // to the near edge of the gap and falls through it, rather than falling at
-  // an arbitrary point on an otherwise-intact-looking deck.
-  const BRIDGE_WRONG_GAP_T = 0.75;
-  const BRIDGE_WRONG_MISSING = 2;
+  // longer exists once the branch is straight) the wrong side's breakable
+  // planks sit. 0.5 — the deck's lowest point (the catenary's midspan sag is
+  // symmetric about t=0.5 regardless of sag/sagShape) — per Luke, 2026-09-04:
+  // the break should happen in the middle, at the lowest point, not out past
+  // the fog curtain the way the old static-gap placeholder was. The wrong
+  // branch's walk queue is truncated at exactly this same fraction, so the
+  // player walks right up to the pair of breakable planks and triggers both
+  // breaks the instant they reach them (see the `breakablePlanks` handling
+  // in tick()'s walk loop and triggerPlankBreak()), rather than falling at
+  // some unrelated point on the deck.
+  const BRIDGE_WRONG_GAP_T = 0.5;
 
   /**
    * The waypoints for one bridge branch, mirroring genForkCurve()'s shape but
@@ -1624,28 +1654,6 @@ export function mountSkyPath(container, options = {}) {
     group.scale.setScalar(t.scale);
   }
 
-  /**
-   * Called whenever a model finishes loading (see ISLAND_MODELS above):
-   * upgrades any island still standing on the procedural fallback — built
-   * before this model was ready — to the real thing, in place. Only the
-   * *contents* of the group change; its position (and any physics/suppression
-   * bookkeeping keyed to that position) is untouched.
-   */
-  function upgradeFallbackIslands(t) {
-    for (const group of islands) {
-      if (group.userData.fromTemplate) continue;
-      // The fallback owns every child outright (buildIsland() makes fresh
-      // geometry/material each call), so this is a plain, safe dispose —
-      // unlike the shared-resource case handled in clearJourney().
-      for (const child of [...group.children]) {
-        group.remove(child);
-        child.geometry.dispose();
-        child.material.dispose();
-      }
-      fillGroupFromTemplate(group, t);
-    }
-  }
-
   function spawnIsland(forkCursor) {
     const seed = Math.floor(Math.random() * 1e9);
     const group = new THREE.Group();
@@ -1656,8 +1664,14 @@ export function mountSkyPath(container, options = {}) {
       const t = islandTemplates[Math.floor(Math.random() * islandTemplates.length)];
       fillGroupFromTemplate(group, t);
     } else {
-      // Model still loading — see upgradeFallbackIslands above, which
-      // replaces this with a real model as soon as one is ready.
+      // Not a loading race — the journey is only ever built from
+      // manager.onLoad (see startJourney()'s definition), which fires once
+      // every registered load has already settled, success or failure. So
+      // reaching this branch means the island model's fetch genuinely
+      // failed; there is no "later" for it to arrive in, and nothing revisits
+      // this island once built. A real network failure is rare enough, and
+      // this fallback close enough, that shipping a procedural rock instead
+      // of no island at all is the right trade rather than surfacing an error.
       for (const child of buildIsland({ seed, ...ISLAND_FALLBACK_PARAMS }).children) group.add(child);
     }
     group.position.set(forkCursor.x, ISLAND_Y, forkCursor.z);
@@ -2303,6 +2317,13 @@ export function mountSkyPath(container, options = {}) {
     // Left uncleared, the next buildJourney()/buildFork(1) would believe its
     // own island had already been spawned and skip it entirely.
     nextIslandAlreadySpawned = false;
+    // A previous round's broken plank pieces (see triggerPlankBreak) are
+    // added straight to `scene`, not to any bridge group disposed above, so
+    // they'd otherwise sit there forever across a restart — accumulating
+    // further with every subsequent fall on this same mechanic, since
+    // triggerPlankBreak's own clearBrokenPieces() call only ever fires again
+    // if THIS bridge's plank breaks a second time.
+    clearBrokenPieces();
   }
 
   /**
@@ -2406,17 +2427,16 @@ export function mountSkyPath(container, options = {}) {
       }
     } else {
       // Both sides build an IDENTICAL bridge except for the wrong side's
-      // plank gap — fairness stays structural (the old genForkCurve comment's
-      // point still holds: nothing about the fork itself should tell the two
-      // branches apart), only the gap and the walk queue's truncation differ.
+      // breakable plank — fairness stays structural (the old genForkCurve
+      // comment's point still holds: nothing about the fork itself should
+      // tell the two branches apart), only that plank and the walk queue's
+      // truncation differ.
       for (const side of ['left', 'right']) {
         const isCorrect = side === correct;
         const sideSign = side === 'right' ? 1 : -1;
         const [departEdge, arriveEdge, centreHop] = genBridgeRoute(cursor, target, sideSign);
-        const bridgeOptions = isCorrect
-          ? {}
-          : { missingPlanks: BRIDGE_WRONG_MISSING, gapCenterT: BRIDGE_WRONG_GAP_T };
-        const bridgeGroup = buildBridge(departEdge, arriveEdge, bridgeOptions, bridgeWind);
+        const bridgeOptions = isCorrect ? {} : { breakableT: BRIDGE_WRONG_GAP_T };
+        const bridgeGroup = buildBridge(departEdge, arriveEdge, bridgeOptions, bridgeWind, plankVariants);
         scene.add(bridgeGroup);
         bridges.push(bridgeGroup);
         const info = bridgeGroup.userData.bridge;
@@ -2435,15 +2455,16 @@ export function mountSkyPath(container, options = {}) {
         if (isCorrect) {
           branch[side] = [departEdge, arriveEdge, centreHop];
         } else {
-          // Walk up to the near edge of this bridge's own gap, then fall —
-          // same trigger point the missing planks sit at, so the player
-          // never reaches a spot where the queue simply runs out for no
-          // visible reason.
+          // Walk up to the breakable planks, then fall — the walker's own
+          // queue runs out at exactly the point they break under them (see
+          // `breakablePlanks` below and tick()'s walk loop), rather than
+          // the queue simply running dry for no visible reason.
           const fallPoint = {
             x: THREE.MathUtils.lerp(departEdge.x, arriveEdge.x, BRIDGE_WRONG_GAP_T),
             z: THREE.MathUtils.lerp(departEdge.z, arriveEdge.z, BRIDGE_WRONG_GAP_T),
             bridge: info,
             bridgeT: BRIDGE_WRONG_GAP_T,
+            breakablePlanks: info.breakablePlanks,
           };
           branch[side] = [departEdge, fallPoint];
         }
@@ -2889,6 +2910,74 @@ export function mountSkyPath(container, options = {}) {
     fallBody.applyImpulseAtPoint(impulse, worldPoint, true);
   }
 
+  // ---------------------------------------------------------------- broken plank pieces
+  //
+  // The wrong branch's designated planks (see BRIDGE_WRONG_GAP_T and
+  // genBridgeRoute's fallPoint above — two of them, the one at the bridge's
+  // low point and the one before it, per Luke 2026-09-04: "the middle plank
+  // and the one before it") break into two each the instant the walker
+  // reaches them — replacing the earlier static-gap placeholder with the
+  // real "breaks under you" version. Reuses fallWorld rather than a second
+  // physics world: it's already stepped every frame while `falling` is
+  // true, so all the pieces and the player tumble on exactly the same clock
+  // for free.
+  const PLANK_PIECE_MASS = 0.15;
+  let brokenPieces = []; // { mesh, body }
+
+  /** Removes any pieces left over from a previous break. */
+  function clearBrokenPieces() {
+    for (const { mesh, body } of brokenPieces) {
+      scene.remove(mesh);
+      mesh.geometry.dispose();
+      fallWorld.removeRigidBody(body);
+    }
+    brokenPieces = [];
+  }
+
+  /**
+   * Splits every plank in `breakablePlanks` (via bridgeGen.js's breakPlank())
+   * and hands each resulting piece a dynamic Rapier body sized to its own
+   * bounding box. Only one break event is ever relevant at a time — same
+   * reasoning as startFall()'s `if (fallBody) fallWorld.removeRigidBody
+   * (fallBody)` — so this clears whatever the previous attempt left behind
+   * first, once, before breaking every plank in the new set.
+   */
+  function triggerPlankBreak(breakablePlanks) {
+    clearBrokenPieces();
+    for (const breakablePlank of breakablePlanks) breakOnePlank(breakablePlank);
+  }
+
+  function breakOnePlank(breakablePlank) {
+    // breakPlank() returns the two pieces in a fixed [-1, +1] order (its own
+    // sideSign, along the plank's local "across the deck" axis) — used here
+    // rather than re-deriving a side from world position, since that axis is
+    // whatever direction this particular bridge happens to run in, not
+    // necessarily world X.
+    breakPlank(breakablePlank).forEach(({ mesh, halfExtents }, i) => {
+      const away = i === 0 ? -1 : 1;
+      scene.add(mesh);
+      const body = fallWorld.createRigidBody(
+        RAPIER.RigidBodyDesc.dynamic()
+          .setTranslation(mesh.position.x, mesh.position.y, mesh.position.z)
+          .setRotation({ x: mesh.quaternion.x, y: mesh.quaternion.y, z: mesh.quaternion.z, w: mesh.quaternion.w })
+          .setLinearDamping(0.05)
+          .setAngularDamping(0.15)
+          .setAdditionalMass(PLANK_PIECE_MASS)
+      );
+      fallWorld.createCollider(RAPIER.ColliderDesc.cuboid(halfExtents.x, halfExtents.y, halfExtents.z), body);
+      // A small outward/downward kick, in the plank's own local "across the
+      // deck" direction, so the two halves visibly separate from the first
+      // instant rather than dropping as a still-touching pair.
+      const kick = breakablePlank.side.clone().multiplyScalar(away * 0.6);
+      body.setLinvel({ x: kick.x, y: -0.2, z: kick.z }, true);
+      body.setAngvel(
+        { x: (Math.random() * 2 - 1) * 3, y: (Math.random() * 2 - 1) * 3, z: (Math.random() * 2 - 1) * 3 },
+        true
+      );
+      brokenPieces.push({ mesh, body });
+    });
+  }
+
   // figure.position/rotation are the *visual* transform, redrawn from these
   // every frame (see the step-bob block in tick()) — walker is the actual
   // logical path position everything else (movement, camera, fork/curtain
@@ -2997,7 +3086,22 @@ export function mountSkyPath(container, options = {}) {
     );
   }
 
-  startJourney();
+  // Deliberately NOT called here. It used to be — this is mount-time,
+  // synchronous code, running before a single network fetch can possibly
+  // have resolved, so calling it here always built fork 1 (and every
+  // pre-spawned island/bridge past it) from whatever fallback each generator
+  // falls back to, "correct" geometry arriving only later via an
+  // upgrade-in-place patch. Luke, 2026-09-03: asked why not just wait and
+  // build it right the first time — there wasn't a real reason, once
+  // checked. It's called once, below, from manager.onLoad instead: that
+  // callback only fires once every registered asset (island model, plank
+  // models, textures) has already loaded, which is also the moment the
+  // loading spinner clears and character-select appears — so by the time
+  // this game logic exists, it's already built from the right assets, and
+  // no player ever sees the fallback, because there wasn't a delay to hide:
+  // the render loop below runs the whole time regardless (there is plenty to
+  // draw before a journey exists — sky, sun, temple), and it was rendering
+  // behind a fully opaque loading cover anyway.
 
   // How far back the trailing camera sits, as a multiple of CAM_BACK. Only the
   // crowd harness moves it today; it exists as a dial because "the guide's
@@ -3392,6 +3496,11 @@ export function mountSkyPath(container, options = {}) {
 
   manager.onLoad = () => {
     if (disposed) return; // see manager.onProgress above
+    // Built here, not at mount — see the comment above startJourney()'s
+    // definition. Every asset buildFork()/spawnIsland() can reach for
+    // (island model, plank models, textures) has finished loading by the
+    // time this callback fires, by construction of what manager.onLoad means.
+    startJourney();
     loadMs = Math.round(performance.now() - T_START);
     $('loader').classList.add('done');
     els.charSelect.classList.add('show');
@@ -3473,7 +3582,13 @@ export function mountSkyPath(container, options = {}) {
         if (distToHead <= moveAmount + 1e-4) {
           walker.x = head.x;
           walker.z = head.z;
-          leg.lastPoint = { x: head.x, z: head.z, bridge: head.bridge ?? null, bridgeT: head.bridgeT ?? 0 };
+          leg.lastPoint = {
+            x: head.x,
+            z: head.z,
+            bridge: head.bridge ?? null,
+            bridgeT: head.bridgeT ?? 0,
+            breakablePlanks: head.breakablePlanks ?? null,
+          };
           leg.queue.shift();
         }
       }
@@ -3490,11 +3605,13 @@ export function mountSkyPath(container, options = {}) {
           finishedSuccess = true;
           emitRoundEnd(true);
         } else {
-          // The fall fires here, at the moment the stones run out, rather than
-          // back when the button was pressed — the consequence should land when
-          // the player walks off the edge. startFall() hands the figure off to
+          // The fall fires here, at the moment the stones run out (or, on a
+          // bridge, the breakable plank is reached), rather than back when
+          // the button was pressed — the consequence should land when the
+          // player walks off the edge. startFall() hands the figure off to
           // physics for the drop itself — `finished` doesn't flip true until
           // the fall resolves, below.
+          if (leg.lastPoint.breakablePlanks?.length) triggerPlankBreak(leg.lastPoint.breakablePlanks);
           startFall();
         }
         leg = null;
@@ -3526,6 +3643,17 @@ export function mountSkyPath(container, options = {}) {
       figure.position.set(ft.x, ft.y, ft.z);
       figure.quaternion.set(fr.x, fr.y, fr.z, fr.w);
       if (fallElapsed >= FALL_DISAPPEAR) figure.visible = false;
+
+      // Broken plank pieces (if this fall came from one — see
+      // triggerPlankBreak) ride the same fallWorld.step() calls above; just
+      // read their transforms back, same as the card's own.
+      for (const { mesh, body } of brokenPieces) {
+        const pt = body.translation();
+        const pr = body.rotation();
+        mesh.position.set(pt.x, pt.y, pt.z);
+        mesh.quaternion.set(pr.x, pr.y, pr.z, pr.w);
+      }
+      if (fallElapsed >= FALL_DISAPPEAR) for (const { mesh } of brokenPieces) mesh.visible = false;
 
       // The message/Again button show up at FALL_UI_DELAY, but `falling` stays
       // true — and the physics keeps running, above — for FALL_EXTRA_DURATION
@@ -3831,6 +3959,12 @@ export function mountSkyPath(container, options = {}) {
     window.__stoneCounts = () => stoneMeshes.map((m) => m.count);
     window.__stoneMeshes = stoneMeshes;
     window.__islands = () => islands.map((g) => g.position.toArray().map((v) => +v.toFixed(2)));
+    window.__brokenPieces = () =>
+      brokenPieces.map((b) => ({
+        pos: b.mesh.position.toArray().map((v) => +v.toFixed(3)),
+        visible: b.mesh.visible,
+        inScene: !!b.mesh.parent,
+      }));
     window.__atmos = () => ({
       skyTint: atmosphereMaterials[0].color.getHexString(),
       clear: renderer.getClearColor(new THREE.Color()).getHexString(),

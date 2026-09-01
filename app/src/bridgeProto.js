@@ -284,7 +284,10 @@ function report() {
   const info = bridges[0].userData.bridge;
   const p = currentParams();
   const { spacing, depth } = anchorParams();
-  const drawn = bridges[0].children[1].count;
+  // "plank" can now be 1-3 meshes (see bridgeGen.js's plank variants) — found
+  // by name rather than a fixed children[1], which only ever held for a
+  // single procedural box.
+  const drawn = bridges[0].children.filter((c) => c.name === 'plank').reduce((sum, c) => sum + c.count, 0);
   // The number that decides whether the outer posts stand on anything: under
   // the deck radius means planted, over it means hanging in mid air.
   const r = anchorRadius(spacing, depth);
@@ -586,9 +589,11 @@ function exportGLB(mesh, filename) {
   );
 }
 function plankExportMesh() {
-  // children[1] is the plank InstancedMesh — see buildBridge's group.add()
-  // order (ropes, planks, posts).
-  const geo = bridges[0].children[1].geometry.clone();
+  // Found by name, not a fixed children[1] — see bridgeGen.js's plank
+  // variants, which can mean more than one "plank"-named child now. The
+  // first is representative for an export whose whole point is "here is
+  // roughly the right box to reshape," not a specific variant's nuance.
+  const geo = bridges[0].children.find((c) => c.name === 'plank').geometry.clone();
   // aSpanT is the wind shader's per-instance attribute (see bridgeWind.js) —
   // meaningless outside that shader and not something GLTFExporter knows
   // what to do with; strip it so only real geometry (position/normal/uv) goes
@@ -597,7 +602,7 @@ function plankExportMesh() {
   return new THREE.Mesh(geo, new THREE.MeshStandardMaterial());
 }
 function postExportMesh() {
-  const geo = bridges[0].children[2].geometry.clone();
+  const geo = bridges[0].children.find((c) => c.name === 'post').geometry.clone();
   return new THREE.Mesh(geo, new THREE.MeshStandardMaterial());
 }
 document.getElementById('exportPlank').addEventListener('click', () => exportGLB(plankExportMesh(), 'plank-placeholder.glb'));
