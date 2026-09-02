@@ -1,0 +1,194 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Alien abduction tuner</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #9fc4dd; overflow: hidden; }
+      #ui {
+        position: absolute; top: 10px; left: 10px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 246px;
+        max-height: calc(100vh - 40px); overflow-y: auto;
+      }
+      #ui h3 {
+        margin: 10px 0 6px; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #8fb8d4; font-weight: 700;
+      }
+      #ui h3:first-child { margin-top: 0; }
+      #ui label { display: block; margin-bottom: 5px; }
+      #ui .row { display: flex; justify-content: space-between; align-items: baseline; }
+      #ui .row span { font-variant-numeric: tabular-nums; color: #9cf; font-weight: 600; }
+      #ui input[type=range] { width: 100%; }
+      #ui button {
+        border: 0; border-radius: 6px; padding: 6px 8px;
+        font: 700 11px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+      #ui .btnRow { display: flex; gap: 5px; margin-bottom: 4px; }
+      #ui .btnRow button { flex: 1; }
+      #ui .chk { display: flex; align-items: center; gap: 6px; margin: 7px 0 3px; cursor: pointer; }
+      #ui .chk input { margin: 0; cursor: pointer; }
+      #report {
+        margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.15);
+        font-size: 11px; line-height: 1.6; color: #c8dced;
+      }
+      #report b { color: #fff; }
+      #log { margin-top: 6px; font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; color: #9cf; white-space: pre; }
+
+      /* The phase read-out doubles as the scrubber's legend — which beat you
+         are parked on matters more than the raw seconds when tuning timing. */
+      #phase {
+        margin: 2px 0 8px; font: 700 11px system-ui, sans-serif;
+        letter-spacing: 0.06em; text-transform: uppercase; color: #ffd479;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    ==========================================================================
+    OPTIONAL ABDUCTION PARAMETERS: DO NOT REINSTATE WITHOUT CLEAR INSTRUCTIONS
+    ==========================================================================
+    Follows the same rule as bridge-tuner.html. Once the numbers are settled
+    they get baked into ABDUCTION_DEFAULTS in src/skypath/alienAbduction.js and
+    this panel is hidden, leaving the page as a plain preview of the finished
+    sequence.
+
+        To re-tune deliberately:  alien-tuner.html?tune=1
+
+    The `value="..."` attributes below are DOCUMENTATION ONLY — src/
+    alienProto.js overwrites every slider from ABDUCTION_DEFAULTS at load, so
+    that module stays the single source of truth. Editing a value here changes
+    nothing; change it in alienAbduction.js.
+
+    Playback controls (scrub/play/loop/speed) are NOT tuning controls and stay
+    visible either way — without them the page cannot show the animation at all.
+    ==========================================================================
+    -->
+
+    <div id="ui">
+      <h3>Playback</h3>
+      <div id="phase">—</div>
+      <label class="row">scrub <span id="scrubV">0.00s</span></label>
+      <input id="scrub" type="range" min="0" max="1" step="0.001" value="0" />
+      <div class="btnRow">
+        <button id="playBtn">play</button>
+        <button id="replayBtn">replay</button>
+      </div>
+      <label class="chk"><input type="checkbox" id="loop" checked /> loop</label>
+      <label class="row">speed <span id="speedV">1.00</span></label>
+      <input id="speed" type="range" min="0.1" max="2" step="0.05" value="1" />
+
+      <div class="btnRow" style="margin-top:8px;">
+        <button id="viewGame">game cam</button>
+        <button id="viewOrbit">orbit</button>
+        <button id="viewSide">side</button>
+      </div>
+
+      <h3>Ship</h3>
+      <label class="row">ship width <span id="shipWidthV"></span></label>
+      <input id="shipWidth" type="range" min="2" max="14" step="0.1" value="4.9" />
+      <label class="row">hover height <span id="hoverHeightV"></span></label>
+      <input id="hoverHeight" type="range" min="1.5" max="10" step="0.05" value="4.75" />
+      <!-- One range for BOTH slants; each is rolled fresh and independently on
+           every replay (see ABDUCTION_DEFAULTS.angleRange). The two values
+           actually rolled for the current run are shown in the read-out at the
+           bottom — hit replay a few times to judge the range rather than any
+           one roll. 0 = always dead vertical. -->
+      <label class="row">angle range ± <span id="angleRangeV"></span></label>
+      <input id="angleRange" type="range" min="0" max="45" step="1" value="40" />
+      <label class="row">entry distance <span id="entryDistanceV"></span></label>
+      <input id="entryDistance" type="range" min="4" max="40" step="0.5" value="12" />
+      <label class="row">descend time <span id="descendDurV"></span></label>
+      <input id="descendDur" type="range" min="0.3" max="8" step="0.1" value="2.6" />
+      <label class="row">hover time <span id="hoverDurV"></span></label>
+      <input id="hoverDur" type="range" min="0" max="4" step="0.05" value="2.25" />
+      <label class="row">bob amount <span id="bobAmpV"></span></label>
+      <input id="bobAmp" type="range" min="0" max="0.4" step="0.005" value="0.03" />
+      <label class="row">bob speed <span id="bobFreqV"></span></label>
+      <input id="bobFreq" type="range" min="0.05" max="2.5" step="0.05" value="0.45" />
+
+      <h3>Beam</h3>
+      <label class="row">beam width <span id="beamWidthV"></span></label>
+      <input id="beamWidth" type="range" min="0.5" max="8" step="0.05" value="1.95" />
+      <!-- No `beamTravel` slider on purpose: whenever there is a card to reach
+           (always, here and in game) the travel is DERIVED so the cone's mouth
+           stops `gap to card` above their head. A slider for it would sit there
+           doing nothing. The derived value is shown in the read-out below
+           instead; `beamTravel` in ABDUCTION_DEFAULTS is only the fallback for
+           the no-card case. -->
+      <label class="row">gap to card <span id="beamGapV"></span></label>
+      <input id="beamGap" type="range" min="0" max="1.5" step="0.01" value="0.18" />
+      <label class="row">extend time <span id="beamDurV"></span></label>
+      <input id="beamDur" type="range" min="0.1" max="5" step="0.05" value="1.6" />
+      <label class="row">hold time <span id="beamHoldDurV"></span></label>
+      <input id="beamHoldDur" type="range" min="0" max="3" step="0.05" value="0.45" />
+      <label class="row">opacity <span id="beamOpacityV"></span></label>
+      <input id="beamOpacity" type="range" min="0.2" max="1" step="0.01" value="1" />
+      <label class="row">hide-line nudge <span id="beamClipNudgeV"></span></label>
+      <input id="beamClipNudge" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+
+      <h3>Card</h3>
+      <label class="row">lift time <span id="liftDurV"></span></label>
+      <input id="liftDur" type="range" min="0.2" max="6" step="0.05" value="1.4" />
+      <label class="row">capture rise <span id="captureRiseV"></span></label>
+      <input id="captureRise" type="range" min="0" max="2.5" step="0.05" value="1.1" />
+      <label class="row">sway amount <span id="swayAmpV"></span></label>
+      <input id="swayAmp" type="range" min="0" max="35" step="0.5" value="7" />
+      <label class="row">sway speed <span id="swayFreqV"></span></label>
+      <input id="swayFreq" type="range" min="0.1" max="4" step="0.05" value="1.15" />
+
+      <h3>String</h3>
+      <label class="row">thickness <span id="stringThicknessV"></span></label>
+      <input id="stringThickness" type="range" min="0.4" max="2.5" step="0.05" value="1" />
+      <label class="row">knot drop <span id="stringDropV"></span></label>
+      <input id="stringDrop" type="range" min="-0.2" max="0.4" step="0.005" value="0.06" />
+
+      <h3>Exit</h3>
+      <label class="row">ascend time <span id="ascendDurV"></span></label>
+      <input id="ascendDur" type="range" min="0.3" max="8" step="0.1" value="2.8" />
+      <label class="row">exit distance <span id="exitDistanceV"></span></label>
+      <input id="exitDistance" type="range" min="4" max="40" step="0.5" value="16" />
+
+      <!-- The camera pull-back/tilt is the one thing Luke asked to keep tuning
+           live (2026-09-02, after seeing it in-game), so unlike every other
+           section this stays visible without ?tune=1 — see alienProto.js's
+           slider-hiding pass, which special-cases the header text "Camera" the
+           same way it already does "Playback". Its finer-grained siblings
+           (whether the tilt/dolly happens at all, and the tilt's own timing)
+           still live in "Camera (advanced)" below, behind the usual gate. -->
+      <h3>Camera</h3>
+      <label class="row">tilt up <span id="camPitchV"></span></label>
+      <input id="camPitch" type="range" min="0" max="60" step="1" value="21" />
+      <label class="row">zoom back <span id="camPullbackV"></span></label>
+      <input id="camPullback" type="range" min="1" max="3.5" step="0.05" value="1.45" />
+      <label class="row">zoom speed <span id="camPullbackDurV"></span></label>
+      <input id="camPullbackDur" type="range" min="0.1" max="5" step="0.05" value="4.0" />
+      <!-- ABSOLUTE seconds from the very start of the sequence (t=0 = the ship
+           begins descending). Below descendDur (2.6 by default) starts the
+           zoom mid-descent, before the ship has settled — the default (0.5)
+           already does this. Range runs well past descendDur too, in case a
+           later start is ever wanted. See ABDUCTION_DEFAULTS.camPullbackStart. -->
+      <label class="row">zoom start <span id="camPullbackStartV"></span></label>
+      <input id="camPullbackStart" type="range" min="0" max="8" step="0.05" value="0.5" />
+
+      <h3>Camera (advanced)</h3>
+      <label class="chk"><input type="checkbox" id="camFollow" checked /> tilt up to follow</label>
+      <!-- Fraction of the WHOLE sequence, matching the scrubber's axis — see
+           ABDUCTION_DEFAULTS.camFollowStart for why it must be able to begin
+           during the descent rather than at the lift. -->
+      <label class="row">follow start <span id="camFollowStartV"></span></label>
+      <input id="camFollowStart" type="range" min="0" max="1" step="0.01" value="0.2" />
+      <label class="row">follow time <span id="camFollowDurV"></span></label>
+      <input id="camFollowDur" type="range" min="0.2" max="12" step="0.05" value="6.5" />
+
+      <div id="report"></div>
+      <div class="btnRow" style="margin-top:8px;">
+        <button id="logBtn">log values</button>
+        <button id="resetBtn">reset</button>
+      </div>
+      <div id="log"></div>
+    </div>
+    <script type="module" src="/src/alienProto.js"></script>
+  </body>
+</html>

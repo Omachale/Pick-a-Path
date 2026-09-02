@@ -33,6 +33,13 @@ export const SKY_PATH_CHROME = `
 <button id="role" data-role="guide">Guide view</button>
 
 <p id="hint">Drag to look around</p>
+<!-- Temporary manual trigger for the alien abduction event (Luke, 2026-09-02:
+     "the alien abduction will be triggered by a certain action I haven't told
+     you about yet. For the moment, just have it activated by a button push").
+     Deliberately tucked into the bottom-left corner and kept small — it is a
+     test control, not part of the game's own UI, and it goes away entirely
+     once the real trigger is known. -->
+<button id="abduct" title="Trigger alien abduction">👽</button>
 <div id="controls">
   <button id="left" class="hidden">◀ Left</button>
   <button id="right" class="hidden">Right ▶</button>
@@ -108,6 +115,32 @@ export const SKY_PATH_CSS = `
 }
 .skypath-surface #role[data-role="player"] { background: #cddbe8; }
 
+/* See the markup note: a temporary test trigger, parked in the bottom-left
+   where it can't be mistaken for a game control or fouled by the centred
+   choice buttons. Semi-transparent until hovered so it stays unobtrusive in
+   screenshots. */
+.skypath-surface #abduct {
+  position: absolute;
+  left: calc(env(safe-area-inset-left, 0px) + 8px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  z-index: 10;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  color: #12212f;
+  background: rgba(244, 247, 250, 0.45);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition: background 0.15s;
+}
+.skypath-surface #abduct:hover { background: rgba(244, 247, 250, 0.9); }
+.skypath-surface #abduct:active { transform: translateY(1px); }
+.skypath-surface #abduct:disabled { opacity: 0.25; cursor: default; }
+
 .skypath-surface #controls {
   position: absolute;
   left: 0;
@@ -118,7 +151,15 @@ export const SKY_PATH_CSS = `
   gap: 10px;
   justify-content: center;
   padding: 0 12px;
+  /* The container is a full-width invisible bar across the bottom of the
+     surface, and without this it swallows every pointer event in that strip —
+     not just its own buttons. That hid the abduction trigger in the corner
+     (it was receiving nothing at all), and it also quietly ate drag-to-look
+     gestures started anywhere along the bottom edge. The buttons take their
+     own events back below. */
+  pointer-events: none;
 }
+.skypath-surface #controls button { pointer-events: auto; }
 .skypath-surface #controls button {
   flex: 1 1 0;
   max-width: 200px;

@@ -33,6 +33,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
 import { attachCrowdHarness } from './crowdHarness.js';
+import { buildAbduction } from './alienAbduction.js';
 import { attachBgTuner } from './bgTuner.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildIsland } from './islandGen.js';
@@ -443,6 +444,12 @@ export function mountSkyPath(container, options = {}) {
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.setClearColor(0x1d3f66, 1);
+  // The abduction beam's top is hidden with a material clipping plane (see the
+  // hide-line note in alienAbduction.js). Without this flag THREE silently
+  // ignores those planes and the beam pokes out above the saucer — no error,
+  // just a wrong picture, which is exactly the kind of thing to state here
+  // rather than leave as a mystery.
+  renderer.localClippingEnabled = true;
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
@@ -606,6 +613,13 @@ export function mountSkyPath(container, options = {}) {
     gull1: tex('gull-1', { ext: 'webp' }),
     gull2: tex('gull-2', { ext: 'webp' }),
     islandDeck1: tex('island-circle'),
+    // Alien abduction event (see alienAbduction.js). Registered with `manager`
+    // like everything else, so character select doesn't appear until they're
+    // ready — the event can fire at any moment once play starts, and a half-
+    // loaded saucer is worse than a slightly later Start button.
+    spaceship: tex('spaceship'),
+    spaceshipBeams: tex('spaceship-beams'),
+    string: tex('string'),
   };
 
   // ---------------------------------------------------------------- island models
@@ -2092,7 +2106,10 @@ export function mountSkyPath(container, options = {}) {
   let birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
 
   function maybeSpawnBird(dt) {
-    if (bird || finished || falling) return;
+    // `abduction` for the same reason as `falling` (see cancelBirdsForFall):
+    // a gull drifting casually past while a flying saucer lifts the player
+    // away undercuts the one moment the scene is asking to be looked at.
+    if (bird || finished || falling || abduction) return;
     birdTimer -= dt;
     if (birdTimer > 0) return;
     birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
@@ -2652,10 +2669,12 @@ export function mountSkyPath(container, options = {}) {
 
   // Run every frame regardless of state (see tick()) — visibility itself is
   // state-dependent, so the check has to happen every frame, not just while
-  // walking. `moving` covers falling too: a mid-fall tag would be exactly
-  // as nonsensical as a mid-walk one.
+  // walking. `moving` covers falling and being abducted too: a tag riding a
+  // card up into a flying saucer is exactly as nonsensical as a mid-walk one,
+  // and unlike a fall it would sail off the top of the screen still attached
+  // (tags only self-hide when they go *behind* the camera, not above it).
   function updateNameTags() {
-    const moving = !!leg || falling;
+    const moving = !!leg || falling || !!abduction;
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
     for (const t of nameTags) {
       if (moving && !t.alwaysVisible) {
@@ -2978,6 +2997,65 @@ export function mountSkyPath(container, options = {}) {
     });
   }
 
+  // ---------------------------------------------------------------- alien abduction
+  //
+  // A flying saucer drops in, beams the player up and carries them off (see
+  // alienAbduction.js for the event itself, and app/alien-tuner.html for where
+  // its numbers were found).
+  //
+  // TEMPORARY TRIGGER. Luke, 2026-09-02: "the alien abduction will be
+  // triggered by a certain action I haven't told you about yet. For the
+  // moment, just have it activated by a button push." So the only thing that
+  // fires this today is the 👽 button in the corner (see chrome.js) — when the
+  // real trigger arrives it calls startAbduction() and that button goes away.
+  // Nothing else here should need to change for that.
+  //
+  // The event OWNS the figure while it runs: it writes figure.position and
+  // figure.rotation.z directly, which is why tick()'s step-bob block has to
+  // stand down for the duration (see the `abduction` branch there). It also
+  // asks for a camera pitch rather than moving the camera itself, so the
+  // game's own trailing camera stays the single thing positioning the view.
+  let abduction = null;
+  // Kept separate from `abduction` because the rig outlives the sequence: once
+  // the saucer has gone it is parked far above the camera doing nothing, and
+  // is only torn down on restart. This flag is what the end-of-round message
+  // reads to say "taken by aliens" rather than the fall's "the path ran out".
+  let abductedThisRound = false;
+
+  /** Frees the rig and hands the figure back to the normal bob code. */
+  function clearAbduction() {
+    if (!abduction) return;
+    abduction.dispose();
+    abduction = null;
+  }
+
+  /**
+   * Starts the event on the local player, where they stand.
+   *
+   * Only while they are STOPPED — standing on an island between forks, not
+   * part-way across a bridge (Luke, 2026-09-02). Refusing rather than
+   * cancelling the walk is the whole point: the beam has to hang over a
+   * stationary target for its two-and-a-bit seconds, and a card that was
+   * mid-stride would either have to teleport to a standstill or be lifted
+   * while still sliding along its waypoints. It also keeps the saucer off
+   * the bridges, where it would foul the ropes and posts.
+   */
+  function startAbduction() {
+    if (abduction || falling || finished || leg) return;
+    abductedThisRound = true;
+    abduction = buildAbduction({
+      scene,
+      textures: { ship: TEX.spaceship, beams: TEX.spaceshipBeams, string: TEX.string },
+    });
+    abduction.start({
+      at: { x: walker.x, y: walker.y, z: walker.z },
+      targetCard: figure,
+      cardHeight: FIGURE_H,
+      cardWidth: FIGURE_H * FIGURE_ASPECT,
+    });
+    refreshUI();
+  }
+
   // figure.position/rotation are the *visual* transform, redrawn from these
   // every frame (see the step-bob block in tick()) — walker is the actual
   // logical path position everything else (movement, camera, fork/curtain
@@ -3212,6 +3290,7 @@ export function mountSkyPath(container, options = {}) {
     nameInput: $('nameInput'),
     charStart: $('charStart'),
     nameTagLayer: $('nameTagLayer'),
+    abduct: $('abduct'), // temporary test trigger — see startAbduction()
   };
 
   // The role button always shows the current role. In a round it is assigned
@@ -3339,14 +3418,27 @@ export function mountSkyPath(container, options = {}) {
     // role. The agreed model is the inverse of the first prototype: the guide
     // speaks the cue aloud and a *player* acts on it — see TODO.md.
     const cannotAct = !canAct;
-    els.left.classList.toggle('hidden', walking || finished || falling || cannotAct);
-    els.right.classList.toggle('hidden', walking || finished || falling || cannotAct);
+    const busy = walking || finished || falling || !!abduction;
+    els.left.classList.toggle('hidden', busy || cannotAct);
+    els.right.classList.toggle('hidden', busy || cannotAct);
     els.reset.classList.toggle('hidden', !finished);
+    // Temporary test control (see startAbduction) — inert once the round is
+    // over, while something else already owns the figure, or mid-walk, since
+    // the event only runs on a player standing still.
+    if (els.abduct) els.abduct.disabled = !!abduction || falling || finished || walking;
 
     if (finished) {
       els.hint.textContent = finishedSuccess
         ? `You reached the temple — all ${N_FORKS} crossings were safe.`
-        : `The path ran out — you fell at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`;
+        : abductedThisRound
+          ? `Taken by aliens at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`
+          : `The path ran out — you fell at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`;
+    } else if (abduction) {
+      // No message during the sequence itself (Luke, 2026-09-04) — just
+      // blanked, not left to fall through to the fork prompt below, which
+      // would otherwise show a stale "you can see which way is safe" over
+      // the abduction.
+      els.hint.textContent = '';
     } else if (falling) {
       els.hint.textContent = 'Falling…';
     } else if (walking) {
@@ -3448,10 +3540,17 @@ export function mountSkyPath(container, options = {}) {
     // fall's tilt into the new walk. Clear the whole rotation explicitly.
     figure.rotation.set(0, 0, 0);
     figure.visible = true; // undo the FALL_DISAPPEAR hide, if the card vanished before this click
+    // The saucer is parked far above the camera once its sequence ends (see
+    // abductedThisRound) — tear it down here, or a second abduction would add
+    // a second rig and leak the first.
+    clearAbduction();
+    abductedThisRound = false;
     startJourney();
     refreshUI();
   }
   els.reset.addEventListener('click', () => restart());
+  // Temporary manual trigger — see startAbduction()'s header.
+  els.abduct?.addEventListener('click', () => startAbduction());
 
   els.role.addEventListener('click', () => {
     if (!soloRoleToggle) return; // assigned by the session layer; button is inert
@@ -3668,6 +3767,26 @@ export function mountSkyPath(container, options = {}) {
       if (fallElapsed >= FALL_UI_DELAY + FALL_EXTRA_DURATION) {
         falling = false;
       }
+    } else if (abduction) {
+      // The event writes figure.position/rotation.z itself, so this branch
+      // deliberately runs INSTEAD of the step-bob below rather than alongside
+      // it — the bob would otherwise snap the card back to standing height on
+      // the very same frame the beam is lifting it.
+      abduction.update(dt);
+      // Billboard the rig at the live camera. Yaw only, which is what keeps
+      // the beam's horizontal hide-line valid — see alienAbduction.js.
+      abduction.facePoint(camera.position);
+
+      // Carried off = round over, and lost. Resolved the moment the sequence
+      // ends rather than on a separate timer: unlike a fall (where the card
+      // keeps tumbling behind the result for FALL_EXTRA_DURATION), there is
+      // nothing left on screen to watch once the saucer has gone.
+      if (!abduction.state.playing && !finished) {
+        finished = true;
+        finishedSuccess = false;
+        emitRoundEnd(false);
+        refreshUI();
+      }
     } else if (!(finished && !finishedSuccess)) {
       if (walking) {
         walkPhase += dt * WALK_BOB_RATE;
@@ -3822,17 +3941,38 @@ export function mountSkyPath(container, options = {}) {
       look.x += (look.tx - look.x) * Math.min(1, dt * 4);
       look.y += (look.ty - look.y) * Math.min(1, dt * 4);
 
-      const behind = forward(facing, CAM_BACK * camPull);
+      // An abduction dollies the camera back on top of whatever pull is
+      // already set (the crowd harness owns the base value) — multiplied, not
+      // assigned, so the two compose instead of one clobbering the other.
+      const pull = camPull * (abduction ? abduction.state.cameraPull : 1);
+      const behind = forward(facing, CAM_BACK * pull);
       const ahead = forward(facing, 4.6);
       camera.position.set(
         walker.x - behind.x + look.x,
-        CAM_HEIGHT * (1 + (camPull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
+        CAM_HEIGHT * (1 + (pull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
         walker.z - behind.z
       );
-      camera.lookAt(walker.x + ahead.x, CAM_LOOK_Y, walker.z + ahead.z);
+      // During an abduction the camera tilts up to follow the saucer away.
+      // Done as a rotation of the LOOK-AT point about the camera, not a move
+      // of the camera itself — that's what a tripod head does, and it keeps
+      // the trailing position above as the one thing placing the view. The
+      // event only supplies the angle; it never touches the camera.
+      const pitch = abduction ? abduction.state.cameraPitch : 0;
+      if (pitch > 0) {
+        const reach = CAM_BACK * pull + 4.6;
+        camera.lookAt(
+          walker.x + ahead.x,
+          CAM_LOOK_Y + Math.sin(pitch) * reach,
+          walker.z + ahead.z * Math.cos(pitch)
+        );
+      } else {
+        camera.lookAt(walker.x + ahead.x, CAM_LOOK_Y, walker.z + ahead.z);
+      }
     }
-    // else: just fell — camera stays exactly where the fall left it, frozen
-    // alongside the figure, until "Again" resets everything at once.
+    // else: the round ended badly — camera stays exactly where the fall (or
+    // the departing saucer) left it, frozen, until "Again" resets everything
+    // at once. For an abduction that means holding the final tilted-up framing
+    // on the empty sky, which is the right last image for it.
 
     // The land/sea/sky rig rides with the camera on the ground plane only —
     // no y, no rotation — so the horizon holds its height and the composition
@@ -3884,6 +4024,18 @@ export function mountSkyPath(container, options = {}) {
       correctCount,
       facing,
       fork: sections[forkIndex - 1] ? sections[forkIndex - 1].fork : null,
+      abduction: abduction
+        ? {
+            time: +abduction.state.time.toFixed(2),
+            duration: +abduction.duration.toFixed(2),
+            playing: abduction.state.playing,
+            entryAngle: +abduction.state.entryAngle.toFixed(1),
+            exitAngle: +abduction.state.exitAngle.toFixed(1),
+            camPitch: +THREE.MathUtils.radToDeg(abduction.state.cameraPitch).toFixed(1),
+            camPull: +abduction.state.cameraPull.toFixed(2),
+            rigY: +abduction.rig.position.y.toFixed(2),
+          }
+        : null,
     });
     window.__curtains = () =>
       curtains.map((c) => ({
