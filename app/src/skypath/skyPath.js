@@ -14,7 +14,7 @@
  * will let a second game mode slot in beside it without touching this file.
  *
  * Boundary note: this module owns its canvas *and* its own in-game HUD
- * (the fork buttons, hint line, character select), injecting that markup
+ * (the word signs, character select), injecting that markup
  * into the container itself rather than exposing it to React. React owns
  * everything outside the game surface — join, lobby, grouping, results.
  * Keeping the in-game chrome here keeps the game module self-contained and
@@ -40,6 +40,7 @@ import { buildIsland } from './islandGen.js';
 import { buildNameTagCanvas, normalizePlayerName } from './nameTag.js';
 import { buildBridge, disposeBridge, breakPlank, BRIDGE_DEFAULTS, BRIDGE_ANCHORS } from './bridgeGen.js';
 import { createBridgeWind } from './bridgeWind.js';
+import { loadWordPairs, assignForkWords } from './wordPairs.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
 // be used. Module-scope so it happens once per page load, not once per mount.
@@ -212,14 +213,6 @@ export function mountSkyPath(container, options = {}) {
   function timeOfDay(forkIdx1) {
     return N_FORKS <= 1 ? 0.5 : (forkIdx1 - 1) / (N_FORKS - 1);
   }
-  function timeLabel(p) {
-    if (p < 0.15) return 'Dawn';
-    if (p < 0.4) return 'Morning';
-    if (p < 0.6) return 'Midday';
-    if (p < 0.85) return 'Afternoon';
-    return 'Dusk';
-  }
-
   function dist(a, b) {
     return Math.hypot(a.x - b.x, a.z - b.z);
   }
@@ -428,6 +421,13 @@ export function mountSkyPath(container, options = {}) {
   const loader = new THREE.TextureLoader(manager);
   const bar = container.querySelector('#bar > i');
 
+  // Kicked off immediately, alongside every texture/model load below, so it
+  // resolves in parallel rather than adding its own wait after everything
+  // else is already ready. Not registered with `manager` (it's not a
+  // THREE.Loader) — awaited directly in manager.onLoad instead, since that's
+  // the one place that already knows every OTHER asset is in.
+  const wordPairsPromise = loadWordPairs();
+
   // Texture loads are in flight for a second or so after mount, and a round
   // can be unmounted inside that window (a teacher ending it early, React
   // StrictMode's mount/unmount/mount in dev). The callbacks then fire against
@@ -469,11 +469,15 @@ export function mountSkyPath(container, options = {}) {
     stoneC: tex('stone-c'),
     stoneD: tex('stone-d'),
     pillar: tex('pillar'),
-    safe: tex('marker-safe'),
-    hazard: tex('marker-hazard'),
     fogNoise: tex('fog-noise', { linear: true, tile: true }),
     fogPuff: tex('fog-puff'),
     temple: tex('temple', { ext: 'webp' }),
+    // The temple doors: laid over the temple photo's own baked-in doors as
+    // separate overlay art (Luke, 2026-09-10) rather than patching the
+    // temple texture itself — see doorTune below.
+    doorFrame: tex('door-frame', { ext: 'jpg' }),
+    doorLeft: tex('door-left'),
+    doorRight: tex('door-right'),
     gull1: tex('gull-1', { ext: 'webp' }),
     gull2: tex('gull-2', { ext: 'webp' }),
     islandDeck1: tex('island-circle'),
@@ -1190,6 +1194,138 @@ export function mountSkyPath(container, options = {}) {
   // paints straight over it. Explicit renderOrder (higher than every backdrop
   // layer above, 0-4) forces it to always draw after them regardless of distance.
   temple.renderOrder = 4.5;
+
+  // Temple doors: real overlay art laid on top of the temple photo's own
+  // baked-in doors, rather than patching the temple texture itself — Luke,
+  // 2026-09-10, after the texture-surgery route (crop the doors out, patch
+  // in a dark archway, upscale losslessly, etc.) turned out to be more
+  // process than the payoff justified: "this is getting too messy and
+  // complicated... let's try just sticking the door image in front of the
+  // temple png." Three separate pieces (frame + two independently-hinged
+  // leaves, for the swing-open animation this is all in service of), each a
+  // plain unit-quad plane sized/positioned from doorTuneState below — same
+  // "unit geometry, size via mesh.scale" pattern as the word signs.
+  //
+  // Position/size are only rough guesses until tuned live — see the
+  // `?doorTune=1` panel wiring further down (doorTuner.dispose() territory),
+  // which is temporary and comes out once Luke bakes in final numbers, same
+  // as every other in-game tuner in this file.
+  const DOOR_FRAME_ASPECT = 309 / 270; // height / width, from the source art
+  const DOOR_LEFT_ASPECT = 821 / 301;
+  const DOOR_RIGHT_ASPECT = 804 / 312;
+  // Just in front of the temple plane (which sits at exactly -TEMPLE_DISTANCE)
+  // rather than coplanar with it, and — critically — NOT all three at the
+  // same z as each other either. The frame image and the two leaves overlap
+  // over most of their area (the leaves sit inside the frame's own opening),
+  // and three coplanar alphaTest planes fighting over the same z produced
+  // exactly the shimmering, semi-transparent flicker Luke reported once this
+  // was actually visible in-scene: the depth test has no clear winner per
+  // pixel, so it dithers between whichever two surfaces are closest at that
+  // point, frame to frame. Giving the leaves a small, fixed step in front of
+  // the frame (0.15 world units — imperceptible as a depth gap at this
+  // distance, plenty to resolve the z-test) removes the ambiguity outright.
+  // The two leaves are then split by a further hair from each other for the
+  // same reason: their closed positions overlap by ~0.1 world units down the
+  // middle of the doorway, which at a shared z is another coplanar fight —
+  // see DOOR_RIGHT_LEAF_Z.
+  const DOOR_FRAME_Z = -TEMPLE_DISTANCE + 0.3;
+  const DOOR_LEAF_Z = DOOR_FRAME_Z + 0.15;
+  const DOOR_RIGHT_LEAF_Z = DOOR_LEAF_Z + 0.02;
+
+  function makeDoorMesh(map, parent) {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map, transparent: true, alphaTest: 0.45, side: THREE.DoubleSide, fog: false })
+    );
+    m.renderOrder = 5; // after the temple (4.5) — see its own comment above
+    parent.add(m);
+    return m;
+  }
+  const doorFrameMesh = makeDoorMesh(TEX.doorFrame, scene);
+
+  // The frame stops WRITING depth (it still tests against it, so anything
+  // genuinely nearer still hides it). Half of why the doors never looked
+  // like they opened — Luke, 2026-09-12: "the doors aren't 'opening' at all:
+  // they're just disappearing from the middle."
+  //
+  // The leaves really were hinged and rotating the whole time; the problem
+  // was what they were rotating INTO. A leaf is ~1.95 world units wide, so
+  // swinging it back by the full DOOR_OPEN_ANGLE sweeps its free edge about
+  // 1.7 units behind the hinge — but the frame plane sits only 0.15 behind
+  // the leaves and the temple billboard only 0.45 behind. Both are opaque
+  // rectangles with the doorway *painted on* rather than actually cut out of
+  // them, so past a few degrees of a 62 degree swing the depth buffer was
+  // erasing each leaf against the wall it was swinging into, free edge
+  // first. What survived on screen was the one thing not occluded: the
+  // widening gap — i.e. exactly "disappearing from the middle".
+  //
+  // The frame is dealt with here; the temple is NOT. Clearing the temple's
+  // depthWrite fixes the doors too, and was the first thing tried, but it
+  // lets the horizon backdrop layers that draw after it (fog puffs, decks)
+  // paint straight through the building — a bright band across the temple,
+  // visible immediately. The temple keeps its depth, and the leaves are
+  // given real room to swing in instead: see the pivot-z slide in
+  // updateTempleEntry().
+  doorFrameMesh.material.depthWrite = false;
+
+  // Each leaf hangs off its own pivot rather than sitting straight in the
+  // scene, so the opening animation (see startTempleEntry/updateTempleEntry
+  // further down) can just rotate the pivot — the mesh itself never moves in
+  // its own local space. Luke marked the hinge points on the reference image
+  // as the OUTER edge of each door (by the frame), which is also just how
+  // real double doors hinge, so each pivot sits at that leaf's outer edge —
+  // world X = the leaf's centre X minus/plus half its own width — with the
+  // mesh offset back out to its usual centre in the pivot's local space.
+  // applyDoorTune() below recomputes both from doorTuneState every time, so
+  // this holds even while the tuner sliders are still live.
+  const doorLeftPivot = new THREE.Object3D();
+  const doorRightPivot = new THREE.Object3D();
+  scene.add(doorLeftPivot, doorRightPivot);
+  const doorLeftMesh = makeDoorMesh(TEX.doorLeft, doorLeftPivot);
+  const doorRightMesh = makeDoorMesh(TEX.doorRight, doorRightPivot);
+  // Drawn after the frame (5), which no longer writes depth — so a leaf can
+  // never be painted over by the very opening it sits in, at any angle.
+  doorLeftMesh.renderOrder = 6;
+  doorRightMesh.renderOrder = 6;
+
+  // x/y are world-space offsets from the temple's own centre/ground line; y
+  // is the piece's BOTTOM edge (matches cutout()'s convention elsewhere in
+  // this file), not its centre, so the sliders read as "how far off the
+  // ground" rather than requiring mental half-height math. `scale` is the
+  // piece's own height in world units — width follows from it via the
+  // fixed aspect ratios above, so resizing can never distort the art.
+  // Baked in from Luke's tuning pass, 2026-09-11 — see the panel behind
+  // `?doorTune=1` if these need revisiting (still wired, on Luke's request,
+  // while the opening animation this feeds gets tuned too).
+  const doorTuneState = {
+    frame: { x: 0.65, y: 3.25, scale: 6.45 },
+    left: { x: -0.2, y: 3.95, scale: 5.25 },
+    right: { x: 1.65, y: 4.05, scale: 5.1 },
+  };
+  function applyDoorTune() {
+    // Frame: a plain static plane, no pivot.
+    const frameH = doorTuneState.frame.scale;
+    const frameW = frameH / DOOR_FRAME_ASPECT;
+    doorFrameMesh.scale.set(frameW, frameH, 1);
+    doorFrameMesh.position.set(doorTuneState.frame.x, doorTuneState.frame.y + frameH / 2, DOOR_FRAME_Z);
+
+    // Leaves: hinge (pivot) at the outer edge, mesh offset back to centre.
+    // `hingeSign` is which side of the leaf's own centre its outer edge is
+    // on: left's outer edge is to ITS left (-1), right's is to ITS right
+    // (+1) — same sign convention startTempleEntry/updateTempleEntry use to
+    // rotate them as a mirrored pair.
+    const placeLeaf = (pivot, mesh, aspect, state, hingeSign, z) => {
+      const h = state.scale;
+      const w = h / aspect;
+      const hingeX = state.x + hingeSign * (w / 2);
+      pivot.position.set(hingeX, state.y + h / 2, z);
+      mesh.scale.set(w, h, 1);
+      mesh.position.set(state.x - hingeX, 0, 0);
+    };
+    placeLeaf(doorLeftPivot, doorLeftMesh, DOOR_LEFT_ASPECT, doorTuneState.left, -1, DOOR_LEAF_Z);
+    placeLeaf(doorRightPivot, doorRightMesh, DOOR_RIGHT_ASPECT, doorTuneState.right, 1, DOOR_RIGHT_LEAF_Z);
+  }
+  applyDoorTune();
 
   // Temple island: a hand-modelled 3D island (Blender) sitting under the
   // temple — Luke, 2026-09-05: "put this island mesh into the game under the
@@ -2217,7 +2353,16 @@ export function mountSkyPath(container, options = {}) {
   // rope bridges, one with a breakable plank invisible until walked onto (see
   // BRIDGE_WRONG_GAP_T) — the fog/curtains hide *distance*, not the answer.
 
-  const sections = []; // one per fork: { fork, correct, branch:{left,right}, approach, curtain, nextCursor, endPhase }
+  const sections = []; // one per fork: { fork, correct, branch:{left,right}, words:{left,right}, approach, curtain, nextCursor, endPhase }
+
+  // The validated word-pairs.json data (see wordPairs.js) — set once, in
+  // manager.onLoad, before startJourney() can possibly need it. `roundWords`
+  // is the per-round draw from it: one `{left, right}` per fork, redrawn
+  // fresh every buildJourney() call (so "Again" gets new words, not the same
+  // ones repeated) — unlike CORRECT_BY_FORK just below, which is still only
+  // decided once per page load. See buildJourney().
+  let wordPairs = [];
+  let roundWords = [];
 
   // Where the *next* fork will be planted, and the stone-row phase carried
   // along the route to it. Advanced directly by buildJourney()'s own loop now
@@ -2449,6 +2594,7 @@ export function mountSkyPath(container, options = {}) {
       fork: { ...cursor },
       correct,
       branch,
+      words: roundWords[k - 1],
       approach: null,
       nextCursor,
       endPhase,
@@ -2489,6 +2635,12 @@ export function mountSkyPath(container, options = {}) {
    */
   function buildJourney() {
     clearJourney();
+    // Redrawn every call, not just once at page load — so "Again" (restart())
+    // deals a fresh round of pairs/order rather than repeating the last run's
+    // words. See assignForkWords() in wordPairs.js for the actual selection
+    // rules (no repeats within a round while pairs allow it; left/right order
+    // independent of CORRECT_BY_FORK below).
+    roundWords = assignForkWords(wordPairs, N_FORKS);
     const origin = { x: 0, z: 0, heading: 0 };
     registerIsland(origin);
     journeyCursor = origin;
@@ -2622,7 +2774,7 @@ export function mountSkyPath(container, options = {}) {
   // and unlike a fall it would sail off the top of the screen still attached
   // (tags only self-hide when they go *behind* the camera, not above it).
   function updateNameTags() {
-    const moving = !!leg || falling || !!abduction;
+    const moving = !!leg || falling || !!abduction || !!templeEntry;
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
     for (const t of nameTags) {
       if (moving && !t.alwaysVisible) {
@@ -3012,41 +3164,135 @@ export function mountSkyPath(container, options = {}) {
   // feeding back into "how far has the avatar actually walked".
   const walker = new THREE.Vector3(0, 0, 0);
 
-  // Guide-only overlay: which branch is safe, which is not, for the fork
-  // currently being decided. Just one pair, repositioned onto whichever fork
-  // that is, so old forks don't stay flagged behind the player.
-  function makeMarker() {
+  // In-world word signs, cardboard-lettering cutouts (same art/build path as
+  // player name tags — see nameTag.js) planted at the fork currently being
+  // decided. Luke, 2026-09-06/07: the two words move off the flat HUD
+  // buttons and onto real signs "above and to the left/right of the bridge
+  // that the player is choosing" — sized 50% bigger than a name tag. Real
+  // THREE.Mesh planes rather than nameTags.js's screen-projected <div>s: a
+  // fixed world anchor (unlike a name tag's moving rig) needs no per-frame
+  // projection math at all — the ordinary WebGL camera already draws these
+  // in correct perspective, same as markerPair used to.
+  //
+  // Which signs are actually visible is a role split, not a per-sign
+  // property: the player sees both `left`/`right` (which word is on which
+  // side, not which is correct) while the guide sees only `correct` (which
+  // word is correct, not which side it's on) — floated centred above the
+  // fork, deliberately not aligned with either bridge, so reading it can't
+  // leak the side. Luke, 2026-09-07: "the guide doesn't actually know if the
+  // correct answer is left or right; it requires the guide and the player
+  // working together." See updateWordSigns() for how the two are told apart.
+  // Fixed world HEIGHT, not width. buildNameTagCanvas always draws letters
+  // at the same pixel size regardless of the word — only the canvas WIDTH
+  // grows with more letters (see its own totalW/totalH), so sizing every
+  // sign to the same world WIDTH (the first version of this, sized off
+  // NAME_TAG_WIDTH_FACTOR) stretched short words like "Hit" to fill the same
+  // board as long ones like "World", shrinking World's letters and blowing
+  // Hit's up to match — the exact "one word noticeably bigger than the
+  // other" Luke flagged 2026-09-08. Fixing the HEIGHT instead makes every
+  // sign's letters the same world size no matter the word; only the board's
+  // width (how much a longer word needs) varies, same as real signage.
+  // Value picked to land close to where the old width-based sizing put a
+  // typical pair (e.g. "Sheep"/"Ship", already reviewed and approved) —
+  // derived from name-tag letter height (FIGURE_H * FIGURE_ASPECT *
+  // NAME_TAG_WIDTH_FACTOR, scaled by a representative aspect) times 1.5.
+  const WORD_SIGN_HEIGHT = 0.9;
+
+  function makeWordSignMesh() {
     const m = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.15, 1.15),
+      new THREE.PlaneGeometry(1, 1),
       new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, fog: false })
     );
-    m.renderOrder = 10; // above the fog puffs (9), so a guide's markers are never veiled
+    m.renderOrder = 10; // above the fog puffs (9), so a sign is never veiled
     m.visible = false;
     scene.add(m);
     return m;
   }
-  const markerPair = { left: makeMarker(), right: makeMarker() };
+  const wordSigns = { left: makeWordSignMesh(), right: makeWordSignMesh(), correct: makeWordSignMesh() };
 
-  function updateMarkers() {
-    const sec = sections[forkIndex - 1];
-    const showCurrent = !leg && !finished && !falling && role === 'guide' && sec;
-    if (!showCurrent) {
-      markerPair.left.visible = false;
-      markerPair.right.visible = false;
+  // word text -> THREE.CanvasTexture, keyed by the word itself: word pairs
+  // repeat across forks and across replays, and rebuilding the same cardboard
+  // canvas from scratch (loading every letter glyph, redrawing the glow) each
+  // time would be wasted work and a visible pop when a sign wants to change
+  // this same frame. buildNameTagCanvas has its own glyph-image cache
+  // underneath this one, but caching the finished, already-composited canvas
+  // here skips redoing the drawing/glow/postFX work too.
+  const wordTextureCache = new Map(); // word -> Promise<{ texture, aspect }>
+  function getWordTexture(word) {
+    let entry = wordTextureCache.get(word);
+    if (!entry) {
+      // Explicit glowColor, not buildNameTagCanvas's own default: that
+      // default is presently a dangling reference to a constant nameTag.js
+      // never defines (GLOW_COLOR_DEFAULT), and every existing caller
+      // (attachNameTag) already always passes its own colour instead of
+      // relying on it — this call would otherwise be the first to actually
+      // hit that bug. `#ffe9b8` is this game's existing "guide/signage"
+      // colour (already used on the guide-view button and loading bar), used
+      // here rather than any one player's palette colour since a word sign
+      // isn't tied to a player.
+      entry = buildNameTagCanvas(word, { glowColor: '#ffe9b8' }).then(({ canvas, aspect }) => {
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        return { texture, aspect };
+      });
+      wordTextureCache.set(word, entry);
+    }
+    return entry;
+  }
+
+  // Applies `word` to one sign mesh at world position (x, y, z), sizing the
+  // plane from the texture's own aspect so the sign is never stretched.
+  // Async (texture build is), so it guards against the sign having moved on
+  // to a different word — or the round having moved past this fork entirely
+  // — by the time the promise resolves, same pattern as attachNameTag.
+  function setWordSign(mesh, word, x, y, z) {
+    if (mesh.userData.word === word) {
+      mesh.position.set(x, y, z);
+      mesh.visible = true;
       return;
     }
-    const correct = sec.correct;
+    mesh.userData.word = word;
+    getWordTexture(word).then(({ texture, aspect }) => {
+      if (disposed || mesh.userData.word !== word) return;
+      // aspect is height/width (see buildNameTagCanvas) — height is fixed,
+      // so width is derived from it, not the other way around (see
+      // WORD_SIGN_HEIGHT above for why that direction matters).
+      const h = WORD_SIGN_HEIGHT;
+      const w = h / aspect;
+      mesh.material.map = texture;
+      mesh.material.needsUpdate = true;
+      mesh.scale.set(w, h, 1);
+      mesh.position.set(x, y, z);
+      mesh.visible = true;
+    });
+  }
+
+  function updateWordSigns() {
+    const sec = sections[forkIndex - 1];
+    const showCurrent = !leg && !finished && !falling && !abduction && !templeEntry && sec?.words;
+    if (!showCurrent) {
+      wordSigns.left.visible = false;
+      wordSigns.right.visible = false;
+      wordSigns.correct.visible = false;
+      wordSigns.left.userData.word = null;
+      wordSigns.right.userData.word = null;
+      wordSigns.correct.userData.word = null;
+      return;
+    }
     const step = BRANCH_LEN / BRANCH_SEGMENTS;
-    const leftAt = advance(sec.fork, sec.fork.heading - FORK_HALF_ANGLE, step);
-    const rightAt = advance(sec.fork, sec.fork.heading + FORK_HALF_ANGLE, step);
-    markerPair.left.position.set(leftAt.x, 1.5, leftAt.z);
-    markerPair.right.position.set(rightAt.x, 1.5, rightAt.z);
-    markerPair.left.material.map = correct === 'left' ? TEX.safe : TEX.hazard;
-    markerPair.right.material.map = correct === 'right' ? TEX.safe : TEX.hazard;
-    markerPair.left.material.needsUpdate = true;
-    markerPair.right.material.needsUpdate = true;
-    markerPair.left.visible = true;
-    markerPair.right.visible = true;
+    if (role === 'guide') {
+      wordSigns.left.visible = false;
+      wordSigns.right.visible = false;
+      const correctWord = sec.words[sec.correct];
+      const mid = advance(sec.fork, sec.fork.heading, step);
+      setWordSign(wordSigns.correct, correctWord, mid.x, 3.1, mid.z);
+    } else {
+      wordSigns.correct.visible = false;
+      const leftAt = advance(sec.fork, sec.fork.heading - FORK_HALF_ANGLE, step);
+      const rightAt = advance(sec.fork, sec.fork.heading + FORK_HALF_ANGLE, step);
+      setWordSign(wordSigns.left, sec.words.left, leftAt.x, 2.6, leftAt.z);
+      setWordSign(wordSigns.right, sec.words.right, rightAt.x, 2.6, rightAt.z);
+    }
   }
 
   // ---------------------------------------------------------------- state
@@ -3081,6 +3327,132 @@ export function mountSkyPath(container, options = {}) {
   // leg: the walk currently in progress, or null while awaiting a decision.
   let leg = null;
   let choiceSide = null; // 'left' or 'right' — tracks which path was chosen, used for camera angle during fall
+
+  // True only while the player is actively pressing/holding the #advance
+  // button — see its pointerdown/up wiring below. A leg can be committed
+  // (choiceSide set, leg built) well before this is true: clicking a word
+  // locks in the path but does NOT start walking on its own (Luke,
+  // 2026-09-06: "they will also have to move their card forward by holding
+  // a small forward arrow"). tick()'s walk step reads this directly instead
+  // of inferring "walking" from `leg` alone.
+  let holdingForward = false;
+
+  // Non-null while the "step through the temple doors" ending cutscene is
+  // playing — see startTempleEntry/updateTempleEntry. Just an elapsed timer;
+  // door rotation, the walker's final approach, and the fade-to-black are
+  // all pure functions of it, computed fresh each frame rather than tweened
+  // independently, so nothing here can drift out of sync with anything else.
+  let templeEntry = null; // { t, startX } | null
+  // Doors and fade run as two independent timers, both starting the instant
+  // the sequence does (Luke, 2026-09-11: "as soon as the animation starts,
+  // have both the fade and the doors opening start") — not staged one after
+  // another the way the first version had it. The sequence as a whole lasts
+  // as long as the slower of the two, so nothing gets cut off early.
+  //
+  // Doubled from 1.0/1.2s, 2026-09-11 — Luke: "still too fast." Also swapped
+  // the door's easing from ease-out-cubic to smoothstep at the same time:
+  // ease-out-cubic front-loads almost all of its visible motion into roughly
+  // the first third of its duration (at 30% elapsed it's already ~66% open,
+  // at 50% elapsed ~88% open) and barely creeps for the rest — which reads
+  // as "finished" long before the timer actually says so, and is almost
+  // certainly what Luke was seeing as "closing faster than 1s, more like
+  // 0.2-0.3s" even before this slowdown (the DURATION was 1s the whole time;
+  // the CURVE just spent it somewhere other than where the eye was looking).
+  // Smoothstep (3pΒ²-2pΒ³) is still eased — slow-fast-slow, not linear/robotic
+  // — but symmetric, so the motion reads as spread across the whole
+  // duration instead of front-loaded into it.
+  const DOOR_OPEN_DURATION = 2.0; // seconds
+  const FADE_DURATION = 2.4; // seconds
+  const TEMPLE_ENTRY_DURATION = Math.max(DOOR_OPEN_DURATION, FADE_DURATION);
+  const DOOR_OPEN_ANGLE = THREE.MathUtils.degToRad(62); // partial — "don't have to open all the way... edges can still be slightly visible"
+  const TEMPLE_ENTRY_WALK_SPEED = WALK_SPEED * 1.8; // brisker than the normal walk — reads as a final, determined approach
+
+  function startTempleEntry() {
+    templeEntry = { t: 0, startX: walker.x };
+  }
+
+  /**
+   * Drives the whole ending in one pass, called from tick() while
+   * `templeEntry` is set (see its own declaration above for why timing is
+   * centralised here rather than three separate tweens). The walker keeps
+   * moving forward the entire time using the SAME trailing camera as every
+   * other stretch of the walk (no scripted camera path needed — it already
+   * dollies toward whatever `walker` is doing); it just never actually
+   * reaches the doors, because the fade covers the remaining gap on purpose
+   * (Luke: "the image will fade to black before they reach it").
+   *
+   * `finished`/`finishedSuccess`/emitRoundEnd() only fire once this reaches
+   * the end of TEMPLE_ENTRY_DURATION — see the doc comment where this
+   * replaced the old immediate version, at the leg-completion site in
+   * tick()'s walk step.
+   */
+  function updateTempleEntry(dt) {
+    templeEntry.t += dt;
+    const t = templeEntry.t;
+
+    const eased = smoothstep(0, DOOR_OPEN_DURATION, t);
+    const angle = DOOR_OPEN_ANGLE * eased;
+    doorLeftPivot.rotation.y = angle;
+    doorRightPivot.rotation.y = -angle;
+
+    // Slide each hinge forward by exactly the depth its own free edge sinks
+    // (width * sin(angle)), so the far edge of a swinging leaf lands back on
+    // the plane it started from instead of ploughing through the temple
+    // billboard 0.45 behind it. Without this the outer part of each leaf is
+    // depth-culled by the temple the moment it swings past — see the door
+    // depth note where doorFrameMesh's depthWrite is cleared.
+    //
+    // The alternative (clearing the temple's depthWrite too) breaks the
+    // backdrop, and simply moving the doors forward permanently would undo
+    // the placement Luke tuned by eye. This costs nothing at rest — at angle
+    // 0 the offset is 0, so the closed doors sit exactly where they were
+    // tuned — and what it adds while opening is a hinge drifting a world
+    // unit or so toward the camera, which at this distance is a few pixels,
+    // under a swing, under a fade.
+    const leftW = doorTuneState.left.scale / DOOR_LEFT_ASPECT;
+    const rightW = doorTuneState.right.scale / DOOR_RIGHT_ASPECT;
+    const sink = Math.sin(angle);
+    doorLeftPivot.position.z = DOOR_LEAF_Z + leftW * sink;
+    doorRightPivot.position.z = DOOR_RIGHT_LEAF_Z + rightW * sink;
+    // Fake the shading the rest of this scene deliberately doesn't have.
+    // Everything here is unlit MeshBasicMaterial (see CLAUDE.md), so a plane
+    // turning away from the camera has no light falloff to give the rotation
+    // away — it just gets narrower, which reads as shrinking rather than
+    // swinging. Dimming each leaf as it turns supplies that missing cue, and
+    // doubles as the obvious physical one: these doors are swinging back
+    // into an unlit interior. `color` multiplies the texture on a
+    // MeshBasicMaterial, so this needs no extra material or light.
+    const leafShade = 1 - 0.5 * eased;
+    doorLeftMesh.material.color.setScalar(leafShade);
+    doorRightMesh.material.color.setScalar(leafShade);
+
+    walker.z -= TEMPLE_ENTRY_WALK_SPEED * dt;
+    // Eases sideways onto the doorway's own centre (the frame's tuned X, not
+    // necessarily 0) over the whole sequence — Luke, 2026-09-11: "the player
+    // isn't quite moving to the centre of the doors. They're a little to the
+    // left." Wherever the walker's X happened to be the instant this
+    // started (real gameplay's final approach, or the tuner's "Play temple
+    // entry" button) drifts toward doorTuneState.frame.x, rather than
+    // assuming it was already 0.
+    const xP = smoothstep(0, TEMPLE_ENTRY_DURATION, t);
+    walker.x = THREE.MathUtils.lerp(templeEntry.startX, doorTuneState.frame.x, xP);
+
+    const fadeP = Math.min(1, t / FADE_DURATION);
+    if (els.templeFade) els.templeFade.style.opacity = String(fadeP);
+
+    if (t >= TEMPLE_ENTRY_DURATION) {
+      // No results screen exists yet to hand off to — Luke, 2026-09-11:
+      // "After fade to black, for now just reset." emitRoundEnd(true) still
+      // fires first, so whatever DOES eventually sit above this component
+      // still hears that the round was won; restart() then immediately
+      // takes the local game back to fork 1 (screen is fully black at this
+      // point, so the cut is invisible — restart() puts the fade back to 0
+      // as part of its own reset, same moment fork 1 reappears).
+      templeEntry = null;
+      emitRoundEnd(true);
+      restart();
+    }
+  }
 
   function makeLeg(queue, realPoints, fromP, toP, arriveFork) {
     // `lastPoint` is where the walker stands *right now*, snapshotted as the
@@ -3212,6 +3584,70 @@ export function mountSkyPath(container, options = {}) {
       })
     : null;
 
+  // Temple-door tuner (left side, `?doorTune=1`) — Luke, 2026-09-10/11: a
+  // toggle to hide the leaves so the frame/temple behind them is visible, a
+  // button that snaps the camera to a close framing of the door for tuning
+  // (the normal trailing camera is otherwise too far from the temple to
+  // judge this by most of the run — see doorFocus below, read directly in
+  // tick()'s camera block), and a button to preview the opening animation
+  // directly. The position/size sliders that used to live here (frame/left/
+  // right X, Y, size) are gone — Luke, 2026-09-11, once doorTuneState's
+  // values were finalised: "go ahead and remove the sliders for the doors
+  // and door frame." Still reuses attachBgTuner's generic toggle/action
+  // machinery (see that module's own updated doc comment) for what's left.
+  let doorFocus = false;
+  const doorTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('doorTune')
+    ? attachBgTuner({
+        container,
+        id: 'doorTuner',
+        title: 'temple door',
+        position: 'left',
+        panels: {},
+        // One checkbox driving both leaves at once — a plain object with a
+        // visible accessor stands in for "the mesh" as far as attachBgTuner's
+        // toggle code is concerned (it only ever reads/writes `.visible`).
+        toggles: {
+          'show doors': {
+            get visible() {
+              return doorLeftMesh.visible;
+            },
+            set visible(v) {
+              doorLeftMesh.visible = v;
+              doorRightMesh.visible = v;
+            },
+          },
+        },
+        actions: [
+          {
+            label: 'Focus door view',
+            onClick: (btn) => {
+              doorFocus = !doorFocus;
+              btn.textContent = doorFocus ? 'Focus door view (on)' : 'Focus door view';
+            },
+          },
+          {
+            // Luke, 2026-09-11: "add a button to take us to this animation
+            // immediately" — skips straight to the ending without playing
+            // through all N_FORKS forks first, for tuning the sequence
+            // itself. Snaps the walker to the same spot the normal approach
+            // ends at (rather than wherever it happens to be right now) so
+            // the preview is the real thing, not a rush from wherever the
+            // camera was left.
+            label: 'Play temple entry',
+            onClick: () => {
+              if (templeEntry || falling || !!abduction) return;
+              doorFocus = false;
+              leg = null;
+              walker.set(0, 0, -STOP_FRACTION * TEMPLE_DISTANCE);
+              facing = 0;
+              startTempleEntry();
+              refreshUI();
+            },
+          },
+        ],
+      })
+    : null;
+
   // The name-tag glow/gamma/contrast/saturation tuner (bottom-right,
   // ?tune=1) was removed 2026-08-31 once Luke settled on final numbers —
   // see TODO.md for the values and history. Unlike the backdrop tuner above
@@ -3224,11 +3660,9 @@ export function mountSkyPath(container, options = {}) {
   // ---------------------------------------------------------------- controls
 
   const els = {
-    left: $('left'),
-    right: $('right'),
+    advance: $('advance'),
     reset: $('reset'),
     role: $('role'),
-    hint: $('hint'),
     hud: $('hud'),
     charSelect: $('charSelect'),
     charList: $('charList'),
@@ -3237,6 +3671,7 @@ export function mountSkyPath(container, options = {}) {
     charStart: $('charStart'),
     nameTagLayer: $('nameTagLayer'),
     abduct: $('abduct'), // temporary test trigger — see startAbduction()
+    templeFade: $('templeFade'), // opacity driven by updateTempleEntry()
   };
 
   // The role button always shows the current role. In a round it is assigned
@@ -3356,7 +3791,7 @@ export function mountSkyPath(container, options = {}) {
   });
 
   function refreshUI() {
-    updateMarkers();
+    updateWordSigns();
     const walking = !!leg;
     // In a networked game only the guide's client acts on a fork — see
     // multiplayer.js's doc comment for why this is deliberately one-sided.
@@ -3364,38 +3799,29 @@ export function mountSkyPath(container, options = {}) {
     // role. The agreed model is the inverse of the first prototype: the guide
     // speaks the cue aloud and a *player* acts on it — see TODO.md.
     const cannotAct = !canAct;
-    const busy = walking || finished || falling || !!abduction;
-    els.left.classList.toggle('hidden', busy || cannotAct);
-    els.right.classList.toggle('hidden', busy || cannotAct);
+    // No on-screen left/right buttons any more — Luke, 2026-09-08: "I want
+    // students to click on these cardboard words themselves to make their
+    // decision, rather than have extra words in white at the bottom." The
+    // word signs placed by updateWordSigns() above are the tap targets now
+    // (see the pointerup handler near the drag-to-look code, which raycasts
+    // against wordSigns.left/right); this function no longer has a button
+    // pair to show, hide, or label.
+    // Shown exactly opposite the (now-3D) word signs: once a word is picked
+    // but the round isn't over, the player's job switches from choosing to
+    // holding this to actually move — see the tick() gate on holdingForward.
+    if (els.advance) {
+      els.advance.classList.toggle('hidden', !walking || finished || falling || !!abduction || cannotAct);
+    }
     els.reset.classList.toggle('hidden', !finished);
     // Temporary test control (see startAbduction) — inert once the round is
     // over, while something else already owns the figure, or mid-walk, since
     // the event only runs on a player standing still.
-    if (els.abduct) els.abduct.disabled = !!abduction || falling || finished || walking;
-
-    if (finished) {
-      els.hint.textContent = finishedSuccess
-        ? `You reached the temple — all ${N_FORKS} crossings were safe.`
-        : abductedThisRound
-          ? `Taken by aliens at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`
-          : `The path ran out — you fell at fork ${forkIndex} of ${N_FORKS}, after ${correctCount} safe crossing${correctCount === 1 ? '' : 's'}.`;
-    } else if (abduction) {
-      // No message during the sequence itself (Luke, 2026-09-04) — just
-      // blanked, not left to fall through to the fork prompt below, which
-      // would otherwise show a stale "you can see which way is safe" over
-      // the abduction.
-      els.hint.textContent = '';
-    } else if (falling) {
-      els.hint.textContent = 'Falling…';
-    } else if (walking) {
-      els.hint.textContent = 'Walking to the next fork…';
-    } else {
-      const label = timeLabel(timeOfDay(forkIndex));
-      els.hint.textContent =
-        role === 'guide'
-          ? `Fork ${forkIndex} of ${N_FORKS} (${label}) — you can see which way is safe.`
-          : `Fork ${forkIndex} of ${N_FORKS} (${label}) — a junction. You cannot see which way is safe.`;
-    }
+    if (els.abduct) els.abduct.disabled = !!abduction || falling || finished || walking || !!templeEntry;
+    // No more status line at the bottom of the screen — Luke, 2026-09-09:
+    // "remove the small text at the bottom... I don't want any of those
+    // messages." (fork progress, "Falling…", the hold-to-walk prompt, etc.)
+    // The signs/buttons still visible are the only cues left: whether the
+    // word signs are up, whether #advance is showing, whether #reset is.
   }
 
   /**
@@ -3413,12 +3839,16 @@ export function mountSkyPath(container, options = {}) {
     if (onRoundEnd) onRoundEnd({ success, forkIndex, correctCount, totalForks: N_FORKS });
   }
 
-  // Only the current fork's own two branches exist when this runs (see the
-  // journey section header). A correct pick therefore has to *build* what
-  // follows — the next fork itself, already reachable directly since the
-  // branch runs all the way to it — before it can queue the walk through it;
-  // a wrong pick builds nothing, and walks the truncated branch until it
-  // runs out of stones in mid-air, which ends the journey.
+  // The whole journey — every fork's islands and both its bridges — is
+  // already built by buildJourney() before any choice is possible (see "the
+  // journey" section header for why eager generation is safe now). This just
+  // picks which of the two already-built branches to queue as the walk: a
+  // correct pick queues the branch plus whatever continues past it (the next
+  // fork's own approach, already filled in); a wrong pick queues only the
+  // truncated branch, which runs out of stones in mid-air and ends the
+  // journey. Note that queuing the leg here does not itself start walking —
+  // that only happens while holdingForward is true, so the choice is locked
+  // in immediately but travel waits on the player (see tick()'s walk step).
   function applyChoice(side) {
     if (leg || finished) return;
     const sec = sections[forkIndex - 1];
@@ -3464,8 +3894,10 @@ export function mountSkyPath(container, options = {}) {
     if (onForkChoice) onForkChoice(forkIndex, side);
     else applyChoice(side); // no owner listening: solo play, decide it here
   }
-  els.left.addEventListener('click', () => requestChoice('left'));
-  els.right.addEventListener('click', () => requestChoice('right'));
+  // Tapped/clicked directly on the world-space word signs now, not on a
+  // flat button — see the pointerup handler near the drag-to-look code
+  // below, which raycasts against wordSigns.left/right and calls this same
+  // requestChoice().
 
   /**
    * Back to the start of a fresh journey. Exposed on the handle as well as
@@ -3481,6 +3913,15 @@ export function mountSkyPath(container, options = {}) {
     falling = false;
     correctCount = 0;
     choiceSide = null;
+    holdingForward = false;
+    templeEntry = null;
+    doorLeftPivot.rotation.y = 0;
+    doorRightPivot.rotation.y = 0;
+    doorLeftPivot.position.z = DOOR_LEAF_Z; // undo the swing's forward hinge slide
+    doorRightPivot.position.z = DOOR_RIGHT_LEAF_Z;
+    doorLeftMesh.material.color.setScalar(1); // undo updateTempleEntry's swing shading
+    doorRightMesh.material.color.setScalar(1);
+    if (els.templeFade) els.templeFade.style.opacity = '0';
     walker.set(0, 0, 0);
     facing = 0;
     walkPhase = 0;
@@ -3500,6 +3941,31 @@ export function mountSkyPath(container, options = {}) {
   els.reset.addEventListener('click', () => restart());
   // Temporary manual trigger — see startAbduction()'s header.
   els.abduct?.addEventListener('click', () => startAbduction());
+
+  // Hold-to-advance: hold #advance to walk, release to freeze in place —
+  // Luke, 2026-09-06: "they will also have to move their card forward by
+  // holding a small forward arrow at the base of the screen." Mirrors the
+  // pointerdown/setPointerCapture/pointerup pattern used for drag-to-look
+  // below, so a finger or mouse that slides off the button while held still
+  // releases cleanly via pointercancel rather than getting stuck "on".
+  els.advance?.addEventListener('pointerdown', (e) => {
+    holdingForward = true;
+    // Guarded: nothing else here depends on capture actually succeeding —
+    // it's just what makes a finger sliding off the button while held still
+    // deliver the pointerup/cancel that ends the hold, rather than losing it
+    // to whatever element it slid onto.
+    try {
+      els.advance.setPointerCapture(e.pointerId);
+    } catch {}
+    refreshUI();
+  });
+  const endAdvance = () => {
+    if (!holdingForward) return;
+    holdingForward = false;
+    refreshUI();
+  };
+  els.advance?.addEventListener('pointerup', endAdvance);
+  els.advance?.addEventListener('pointercancel', endAdvance);
 
   els.role.addEventListener('click', () => {
     if (!soloRoleToggle) return; // assigned by the session layer; button is inert
@@ -3531,9 +3997,44 @@ export function mountSkyPath(container, options = {}) {
     look.tx = THREE.MathUtils.clamp(dragging.ox + (e.clientX - dragging.x) * s, -LOOK_X_LIMIT, LOOK_X_LIMIT);
     look.ty = THREE.MathUtils.clamp(dragging.oy - (e.clientY - dragging.y) * s, -0.7, 1.3);
   });
-  const endDrag = () => { dragging = null; };
-  renderer.domElement.addEventListener('pointerup', endDrag);
-  renderer.domElement.addEventListener('pointercancel', endDrag);
+
+  // Tap-to-choose: clicking/tapping directly on a word sign (see
+  // updateWordSigns) IS the choice now — Luke, 2026-09-08: "I want students
+  // to click on these cardboard words themselves to make their decision,
+  // rather than have extra words in white at the bottom." Reuses the same
+  // pointerdown/pointerup pair as drag-to-look above rather than a separate
+  // 'click' listener, since a real click event doesn't exist on every touch
+  // browser the same way; distinguishing a tap from a drag is just "did the
+  // pointer move much between down and up" — same threshold-by-distance
+  // approach as everywhere else pointer gestures are told apart in this file.
+  const TAP_MOVE_THRESHOLD = 8; // px
+  const wordRaycaster = new THREE.Raycaster();
+  function pointerToNDC(e) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      y: -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    };
+  }
+  function tryWordSignTap(e) {
+    // Only ever the two side-by-side signs — the guide's centred `correct`
+    // sign is intentionally not a tap target: the guide isn't the one
+    // choosing (see requestChoice's doc comment), and it wouldn't have a
+    // side to choose even if tapped.
+    const targets = [wordSigns.left, wordSigns.right].filter((m) => m.visible);
+    if (targets.length === 0) return;
+    wordRaycaster.setFromCamera(pointerToNDC(e), camera);
+    const hit = wordRaycaster.intersectObjects(targets, false)[0];
+    if (hit) requestChoice(hit.object === wordSigns.left ? 'left' : 'right');
+  }
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (dragging && dragging.id === e.pointerId) {
+      const moved = Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y);
+      if (moved < TAP_MOVE_THRESHOLD) tryWordSignTap(e);
+    }
+    dragging = null;
+  });
+  renderer.domElement.addEventListener('pointercancel', () => { dragging = null; });
 
   // ---------------------------------------------------------------- loop
 
@@ -3542,12 +4043,35 @@ export function mountSkyPath(container, options = {}) {
   let fpsClock = performance.now();
   let loadMs = null;
 
-  manager.onLoad = () => {
+  manager.onLoad = async () => {
     if (disposed) return; // see manager.onProgress above
+    // word-pairs.json isn't registered with `manager` (it's not a THREE
+    // texture/model load), so it's not otherwise covered by "every asset has
+    // finished loading" below — awaited explicitly here instead, before
+    // buildJourney() can possibly need it. A malformed file throws a specific
+    // error (see wordPairs.js) rather than crashing somewhere less obvious
+    // later; caught here the same way an unusable WebGL context is above —
+    // a clear message in place of the spinner, not an infinite "Loading…".
+    try {
+      wordPairs = await wordPairsPromise;
+    } catch (err) {
+      const loaderEl = $('loader');
+      if (loaderEl) {
+        loaderEl.innerHTML =
+          '<div style="max-width: 320px; text-align: center; line-height: 1.5;">' +
+          "This game's word list couldn't be loaded, so it can't start.<br><br>" +
+          'See the browser console for exactly what\'s wrong with word-pairs.json.' +
+          '</div>';
+      }
+      console.error(err);
+      return;
+    }
+    if (disposed) return; // could have been unmounted during the await above
     // Built here, not at mount — see the comment above startJourney()'s
     // definition. Every asset buildFork()/spawnIsland() can reach for
-    // (island model, plank models, textures) has finished loading by the
-    // time this callback fires, by construction of what manager.onLoad means.
+    // (island model, plank models, textures, and now the word list above)
+    // has finished loading by the time this callback fires, by construction
+    // of what manager.onLoad means.
     startJourney();
     loadMs = Math.round(performance.now() - T_START);
     $('loader').classList.add('done');
@@ -3604,7 +4128,13 @@ export function mountSkyPath(container, options = {}) {
         const dx = head.x - walker.x;
         const dz = head.z - walker.z;
         const distToHead = Math.hypot(dx, dz);
-        const moveAmount = Math.min(distToHead, WALK_SPEED * dt);
+        // The choice is locked in the moment leg is built (applyChoice), but
+        // actually covering ground waits on the player holding #advance —
+        // Luke, 2026-09-06. Releasing simply stops advancing wherever the
+        // walker currently stands, mid-bridge included; nothing else in this
+        // block (bridge height, arrival checks) needs to change, since they
+        // all key off distToHead/moveAmount, which is just 0 while released.
+        const moveAmount = holdingForward ? Math.min(distToHead, WALK_SPEED * dt) : 0;
         if (distToHead > 1e-4) {
           walker.x += (dx / distToHead) * moveAmount;
           walker.z += (dz / distToHead) * moveAmount;
@@ -3649,9 +4179,16 @@ export function mountSkyPath(container, options = {}) {
         if (leg.arriveFork) {
           forkIndex = leg.arriveFork;
         } else if (leg.success) {
-          finished = true;
-          finishedSuccess = true;
-          emitRoundEnd(true);
+          // `finished`/`finishedSuccess`/emitRoundEnd() are deliberately NOT
+          // set here any more — that used to end the round the instant the
+          // last stone was reached. Now it hands off to the door-opening
+          // sequence instead (see startTempleEntry/updateTempleEntry), and
+          // those three only fire once THAT finishes, right before the
+          // screen goes black. Firing emitRoundEnd early would tell the
+          // session layer the round is over while the animation is still
+          // playing, which risks it unmounting this component (or showing
+          // results) out from under the cutscene.
+          startTempleEntry();
         } else {
           // The fall fires here, at the moment the stones run out (or, on a
           // bridge, the breakable plank is reached), rather than back when
@@ -3666,6 +4203,11 @@ export function mountSkyPath(container, options = {}) {
         refreshUI();
       }
     }
+
+    // Drives the door-opening ending on its own timer, independent of the
+    // (now-null) `leg` — see its own doc comment. Runs before the step-bob/
+    // camera code below so both see this frame's already-updated walker.z.
+    if (templeEntry) updateTempleEntry(dt);
 
     // Step bob: only while walking, and it always finishes the lobe (one
     // up-then-down) it's in the middle of before settling flat — walkPhase is
@@ -3737,7 +4279,10 @@ export function mountSkyPath(container, options = {}) {
         refreshUI();
       }
     } else if (!(finished && !finishedSuccess)) {
-      if (walking) {
+      // `templeEntry` keeps the card visibly walking (bob animating) even
+      // though `leg` is null and nothing is holding #advance any more — the
+      // final approach to the doors is scripted, not player-held.
+      if ((walking && holdingForward) || templeEntry) {
         walkPhase += dt * WALK_BOB_RATE;
       } else if (walkPhase > 0) {
         const nextBoundary = Math.ceil(walkPhase / Math.PI - 1e-6) * Math.PI;
@@ -3879,7 +4424,21 @@ export function mountSkyPath(container, options = {}) {
     // this exact frame), and the camera needs to see the up-to-date state,
     // not whatever was true at the top of tick().
     const justFell = finished && !finishedSuccess;
-    if (falling) {
+    if (doorFocus) {
+      // Temporary, `?doorTune=1`-only: the normal trailing camera never gets
+      // close enough to the temple to judge door placement for most of the
+      // run, so this just parks the camera at a fixed close framing instead
+      // — a plain override that skips the trailing/falling logic below
+      // entirely while active, same as `falling`/`justFell` already do for
+      // their own states. Centred on the frame's own vertical MIDDLE (its
+      // bottom, `frame.y`, plus half its height) rather than a fraction of
+      // its height alone — Luke, 2026-09-11: the previous version framed too
+      // low to see the top of the door at all.
+      const midY = doorTuneState.frame.y + doorTuneState.frame.scale * 0.5;
+      const midX = doorTuneState.frame.x; // the doorway's centre, which isn't x=0
+      camera.position.set(midX, midY, DOOR_FRAME_Z + 9);
+      camera.lookAt(midX, midY, DOOR_FRAME_Z);
+    } else if (falling) {
       // Eases to the fixed anchor beside the edge (see startFall) and pans
       // the look-at down to track the figure as it drops — a held position
       // with a moving gaze, not a scripted camera path.
@@ -3972,6 +4531,8 @@ export function mountSkyPath(container, options = {}) {
       sunP,
       correctCount,
       facing,
+      walkerZ: walker.z,
+      templeEntry: templeEntry ? { t: +templeEntry.t.toFixed(3) } : null,
       fork: sections[forkIndex - 1] ? sections[forkIndex - 1].fork : null,
       abduction: abduction
         ? {
@@ -4055,7 +4616,22 @@ export function mountSkyPath(container, options = {}) {
       tagVisible: c.rig.nameTag ? c.rig.nameTag.el.style.display !== 'none' : null,
     }));
     window.__cloudRows = () => cloudRows.map((r) => +r.position.z.toFixed(2));
-    window.__markers = () => ({ leftVisible: markerPair.left.visible, rightVisible: markerPair.right.visible });
+    window.__forceChoice = (side) => requestChoice(side);
+    window.__wordSigns = () => ({
+      leftVisible: wordSigns.left.visible,
+      rightVisible: wordSigns.right.visible,
+      correctVisible: wordSigns.correct.visible,
+      leftWord: wordSigns.left.userData.word,
+      rightWord: wordSigns.right.userData.word,
+      correctWord: wordSigns.correct.userData.word,
+    });
+    window.__doorTune = () => ({
+      state: doorTuneState,
+      focus: doorFocus,
+      frame: { pos: doorFrameMesh.position.toArray(), scale: doorFrameMesh.scale.toArray() },
+      left: { pos: doorLeftMesh.position.toArray(), scale: doorLeftMesh.scale.toArray(), visible: doorLeftMesh.visible },
+      right: { pos: doorRightMesh.position.toArray(), scale: doorRightMesh.scale.toArray(), visible: doorRightMesh.visible },
+    });
     window.__stoneCounts = () => stoneMeshes.map((m) => m.count);
     window.__stoneMeshes = stoneMeshes;
     window.__islands = () => islands.map((g) => g.position.toArray().map((v) => +v.toFixed(2)));
@@ -4133,6 +4709,7 @@ export function mountSkyPath(container, options = {}) {
       if (rafId !== null) cancelAnimationFrame(rafId);
       harness?.dispose();
       bgTuner?.dispose();
+      doorTuner?.dispose();
       resizeObserver.disconnect();
       renderer.dispose();
       renderer.forceContextLoss();

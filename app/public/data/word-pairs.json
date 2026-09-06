@@ -1,0 +1,15 @@
+{
+  "pairs": [
+    { "id": "sheep-ship", "words": ["Sheep", "Ship"] },
+    { "id": "cheap-chip", "words": ["Cheap", "Chip"] },
+    { "id": "work-walk", "words": ["Work", "Walk"] },
+    { "id": "beer-bear", "words": ["Beer", "Bear"] },
+    { "id": "leaf-reef", "words": ["Leaf", "Reef"] },
+    { "id": "file-fire", "words": ["File", "Fire"] },
+    { "id": "heat-hit", "words": ["Heat", "Hit"] },
+    { "id": "beat-bit", "words": ["Beat", "Bit"] },
+    { "id": "word-world", "words": ["Word", "World"] },
+    { "id": "will-while", "words": ["Will", "While"] },
+    { "id": "here-hair", "words": ["Here", "Hair"] }
+  ]
+}

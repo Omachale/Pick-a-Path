@@ -45,6 +45,7 @@ const LETTER_SCALE = {
   h: 1.24,
   i: 1.19,
   j: 1.15,
+  k: 1.2, // Luke, 2026-09-09: read a bit small next to the other lowercase letters — 20% bigger
   l: 1.15,
   p: 1.12,
   q: 1.05,

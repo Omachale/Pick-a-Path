@@ -1,6 +1,13 @@
 /**
  * A live tuning panel for the world-floor backdrop and the wind clouds.
  *
+ * Generalised 2026-09-10 (id/title/position/extrasTitle/actions params, all
+ * defaulting to this module's own original hardcoded values) so the temple
+ * door overlay could reuse the same slider/toggle machinery for a completely
+ * different set of layers, rather than duplicating ~150 lines of DOM-building
+ * code for what's structurally the same panel. See doorTune in skyPath.js for
+ * that second caller.
+ *
  * NOT MOUNTED BY DEFAULT. Every value it was built to find is baked into
  * skyPath.js as of 2026-08-26; run with `?solo=1&tune=1` (dev builds only) to
  * bring the sliders back. It is kept rather than deleted because the next
@@ -50,7 +57,22 @@ const rowsFor = (state, isShell) => {
 
 const isShellMesh = (mesh) => !!mesh.userData?.shell;
 
-export function attachBgTuner({ container, panels, toggles = {}, extras = {} }) {
+export function attachBgTuner({
+  container,
+  panels,
+  toggles = {},
+  extras = {},
+  // Added for the temple-door tuner (2026-09-10), which reuses this same
+  // panel machinery for a completely different set of layers — these four
+  // let a second caller not collide with or misdescribe the first's UI,
+  // without touching what the backdrop tuner above already relies on
+  // (every default reproduces its exact previous, hardcoded behaviour).
+  id = 'bgTuner',
+  title = 'backdrop',
+  position = 'right', // 'left' | 'right'
+  extrasTitle = 'WIND',
+  actions = [], // [{ label, onClick(button) }] — rendered as buttons after the toggles
+}) {
   // Flat panels are PlaneGeometry at a fixed size, so "height" is applied as a
   // scale against whatever they were built at rather than by rebuilding the
   // geometry on every slider tick. The ground deck is a plane too — rotated
@@ -98,10 +120,10 @@ export function attachBgTuner({ container, panels, toggles = {}, extras = {} }) 
 
   // ------------------------------------------------------------------ panel
   const panel = document.createElement('div');
-  panel.id = 'bgTuner';
+  panel.id = id;
   panel.style.cssText = [
     'position:absolute',
-    'right:8px',
+    `${position === 'left' ? 'left' : 'right'}:8px`,
     'top:calc(env(safe-area-inset-top, 0px) + 8px)',
     'z-index:31',
     'width:210px',
@@ -118,13 +140,13 @@ export function attachBgTuner({ container, panels, toggles = {}, extras = {} }) 
   const body = document.createElement('div');
 
   const head = document.createElement('button');
-  head.textContent = 'backdrop ▾';
+  head.textContent = `${title} ▾`;
   head.style.cssText =
     'display:block;width:100%;border:0;border-radius:6px;padding:5px;margin-bottom:6px;font:700 11px/1 system-ui,sans-serif;color:#12212f;background:#f4f7fa;';
   head.addEventListener('click', () => {
     const open = body.style.display !== 'none';
     body.style.display = open ? 'none' : '';
-    head.textContent = open ? 'backdrop ▸' : 'backdrop ▾';
+    head.textContent = open ? `${title} ▸` : `${title} ▾`;
   });
   panel.appendChild(head);
   panel.appendChild(body);
@@ -172,10 +194,10 @@ export function attachBgTuner({ container, panels, toggles = {}, extras = {} }) 
   const extraValues = {};
   const extraNames = Object.keys(extras);
   if (extraNames.length) {
-    const title = document.createElement('div');
-    title.textContent = 'WIND';
-    title.style.cssText = 'margin:8px 0 2px;opacity:0.7;letter-spacing:0.08em;';
-    body.appendChild(title);
+    const extrasHeading = document.createElement('div');
+    extrasHeading.textContent = extrasTitle;
+    extrasHeading.style.cssText = 'margin:8px 0 2px;opacity:0.7;letter-spacing:0.08em;';
+    body.appendChild(extrasHeading);
 
     for (const name of extraNames) {
       const { value, min, max, step = 0.1, set, format } = extras[name];
@@ -234,6 +256,18 @@ export function attachBgTuner({ container, panels, toggles = {}, extras = {} }) 
       row.append(box, Object.assign(document.createElement('span'), { textContent: name }));
       body.appendChild(row);
     }
+  }
+
+  // Arbitrary one-off buttons a caller wants below the sliders/toggles — the
+  // door tuner's "Focus door view" camera-snap uses this; the backdrop tuner
+  // passes none, so nothing changes for it.
+  for (const action of actions) {
+    const btn = document.createElement('button');
+    btn.textContent = action.label;
+    btn.style.cssText =
+      'width:100%;margin-top:6px;border:0;border-radius:6px;padding:6px;font:600 11px/1 system-ui,sans-serif;color:#12212f;background:#ffe9b8;';
+    btn.addEventListener('click', () => action.onClick(btn));
+    body.appendChild(btn);
   }
 
   const dump = document.createElement('button');

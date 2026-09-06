@@ -32,7 +32,6 @@ export const SKY_PATH_CHROME = `
 <div id="hud">—</div>
 <button id="role" data-role="guide">Guide view</button>
 
-<p id="hint">Drag to look around</p>
 <!-- Temporary manual trigger for the alien abduction event (Luke, 2026-09-02:
      "the alien abduction will be triggered by a certain action I haven't told
      you about yet. For the moment, just have it activated by a button push").
@@ -41,10 +40,15 @@ export const SKY_PATH_CHROME = `
      once the real trigger is known. -->
 <button id="abduct" title="Trigger alien abduction">👽</button>
 <div id="controls">
-  <button id="left" class="hidden">◀ Left</button>
-  <button id="right" class="hidden">Right ▶</button>
+  <button id="advance" class="hidden" title="Hold to walk">▲</button>
   <button id="reset" class="hidden">Again</button>
 </div>
+<!-- The temple-doors ending: opacity driven directly by updateTempleEntry()
+     in skyPath.js, frame by frame — no CSS transition here, since the fade's
+     own timing is already computed there alongside the door rotation and the
+     walker's approach, and a second, independent CSS-driven fade would just
+     fight it. Sits above everything (z-index 60) including the loader. -->
+<div id="templeFade"></div>
 `;
 
 export const SKY_PATH_CSS = `
@@ -175,19 +179,27 @@ export const SKY_PATH_CSS = `
 .skypath-surface #controls button:disabled { opacity: 0.35; }
 .skypath-surface #controls button.hidden { display: none; }
 
-.skypath-surface #hint {
+/* Hold-to-advance: deliberately smaller and off to the side of the two word
+   buttons, not another full-width choice — it's a "keep going" hold, not a
+   decision. */
+.skypath-surface #controls #advance {
+  flex: 0 0 64px;
+  max-width: 64px;
+  font-size: 28px;
+}
+
+
+.skypath-surface #templeFade {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(env(safe-area-inset-bottom, 0px) + 82px);
-  z-index: 10;
-  text-align: center;
-  font: 500 12px/1.4 system-ui, sans-serif;
-  color: rgba(244, 247, 250, 0.82);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+  inset: 0;
+  /* Above the 3D canvas and name-tag layer (unlayered/9) so it actually
+     covers the scene, but below the HUD/controls (10) — otherwise "Again"
+     would be sitting invisibly *behind* solid black once fully faded, with
+     no visible way back to it. */
+  z-index: 9.5;
+  background: #000;
+  opacity: 0;
   pointer-events: none;
-  padding: 0 20px;
-  margin: 0;
 }
 
 .skypath-surface #loader {
