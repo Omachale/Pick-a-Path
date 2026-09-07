@@ -481,6 +481,15 @@ export function mountSkyPath(container, options = {}) {
     gull1: tex('gull-1', { ext: 'webp' }),
     gull2: tex('gull-2', { ext: 'webp' }),
     islandDeck1: tex('island-circle'),
+    // Power-up cards (see equipPowerUp/ENGINE_FRAMES below) — jetpack is the
+    // first; later ones are just another entry (or set of entries) here.
+    // Loaded straight from the standalone flame-tuner's own asset folder
+    // (app/public/textures/engine-frames/) rather than duplicated — that
+    // tool and the game now read the exact same files.
+    engine1: tex('engine-frames/engine1'),
+    engine2: tex('engine-frames/engine2'),
+    engine3: tex('engine-frames/engine3'),
+    engine4: tex('engine-frames/engine4'),
     // Alien abduction event (see alienAbduction.js). Registered with `manager`
     // like everything else, so character select doesn't appear until they're
     // ready — the event can fire at any moment once play starts, and a half-
@@ -1206,10 +1215,8 @@ export function mountSkyPath(container, options = {}) {
   // plain unit-quad plane sized/positioned from doorTuneState below — same
   // "unit geometry, size via mesh.scale" pattern as the word signs.
   //
-  // Position/size are only rough guesses until tuned live — see the
-  // `?doorTune=1` panel wiring further down (doorTuner.dispose() territory),
-  // which is temporary and comes out once Luke bakes in final numbers, same
-  // as every other in-game tuner in this file.
+  // Position/size baked into doorTuneState below from Luke's tuning pass —
+  // the `?doorTune=1` panel that found them has since been removed.
   const DOOR_FRAME_ASPECT = 309 / 270; // height / width, from the source art
   const DOOR_LEFT_ASPECT = 821 / 301;
   const DOOR_RIGHT_ASPECT = 804 / 312;
@@ -2707,6 +2714,16 @@ export function mountSkyPath(container, options = {}) {
     r.frontMesh.geometry.dispose();
     r.frontMesh.material.dispose();
     removeNameTag(r);
+    // r.group already removed above, which takes the power-up group with it
+    // — only the card's own uniquely-created geometry/material need explicit
+    // disposal. The clip is a clone sharing the template's geometry/material
+    // (see equipPowerUp), so it's never disposed here — doing so would break
+    // every future equip, not just this rig's.
+    if (r.powerup) {
+      r.powerup.cardMesh.geometry.dispose();
+      r.powerup.cardMesh.material.dispose();
+      disposeEngineSmoke(r.powerup);
+    }
   }
 
   let characterKey = ROSTER[0].key;
@@ -2721,6 +2738,309 @@ export function mountSkyPath(container, options = {}) {
       figure = rig.group;
       disposeRig(old);
     }
+  }
+
+  // ---------------------------------------------------------------- power-ups
+  //
+  // A power-up is a second card — same "image on a cardboard backing"
+  // construction as the player's own — clipped to the side of the player's
+  // card with a small plastic connector, per the reference photos Luke
+  // provided 2026-09-12. Every power-up shares the exact same clip and the
+  // exact same card position/size; only the card's own texture and aspect
+  // ratio change from one power-up to the next ("for later ones we'll just
+  // swap out the card") — so POWERUP_TUNE/equipPowerUp below are written
+  // generic over the texture, never jetpack-specific.
+  //
+  // Loaded once, up front, registered with `manager` like every other model
+  // — so it's guaranteed ready by the time any button that could equip it is
+  // even clickable (see manager.onLoad's own comment on why that ordering
+  // is safe to rely on).
+  let plasticClipTemplate = null;
+  gltfLoader.load('models/plastic-clip.glb', (gltf) => {
+    const clip = gltf.scene;
+    // Converted to unlit, same reasoning as templeIsland's own conversion
+    // above: an untouched glTF import carries PBR materials that read as
+    // near-black with none of this scene's real-time lights on them.
+    clip.traverse((o) => {
+      if (!o.isMesh) return;
+      const src = o.material;
+      o.material = new THREE.MeshBasicMaterial({
+        map: src.map ?? null,
+        color: src.color ? src.color.clone() : undefined,
+        vertexColors: src.vertexColors,
+        side: src.side,
+      });
+    });
+    plasticClipTemplate = clip;
+  });
+
+  // Card height is fixed and shared by every power-up ("they will all be the
+  // same size" — POWERUP_TUNE.card.scale below). Unlike a one-image
+  // power-up, though, the jetpack's own art is four differently-cropped
+  // animation frames rather than one clean render (see ENGINE_FRAMES below)
+  // — so width/height per frame come from that frame's own natural pixel
+  // size, not one shared aspect ratio.
+
+  // The jetpack's animation frames, and the per-frame correction found for
+  // each one in engine-flame-tuner.html (2026-09-12) — that standalone tool
+  // exists because Engine1–4.png were each cropped to a different canvas
+  // size, so playing them back as-is made the cardboard card jump around
+  // under a fixed flame. `x`/`y`/`scale` are in that tool's own working
+  // pixel space (every frame normalised to a 480px-tall stage —
+  // ENGINE_FRAME_TUNER_H below must match that tool's GHOST_H);
+  // applyPowerUpTune converts them into this game's world units, scaled by
+  // the card's OWN current size, so the correction stays correct even if
+  // POWERUP_TUNE.card.scale is retuned later. `w`/`h` are each frame's raw
+  // pixel dimensions (Engine1.png is 202x313, etc.) — needed here because
+  // there's no <img> to read naturalWidth/Height off, the way the tuner has.
+  //
+  // Only frame 1 is used for now — Luke, 2026-09-12: "Engine1 can be the
+  // default image for when the engine isn't activated" — frames 2-4 are the
+  // firing animation, to be wired in once there's an actual trigger to play
+  // them on. Engine5/Engine6 are dropped entirely: "1-4 will be enough."
+  const ENGINE_FRAME_TUNER_H = 480;
+  const ENGINE_FRAMES = [
+    { tex: 'engine1', w: 202, h: 313, x: 2, y: -16, scale: 1.6409 },
+    { tex: 'engine2', w: 208, h: 343, x: 0, y: 4, scale: 1.6513 },
+    { tex: 'engine3', w: 214, h: 354, x: -3, y: 8, scale: 1.6407 },
+    { tex: 'engine4', w: 201, h: 346, x: -1, y: 0, scale: 1.6647 },
+  ];
+
+  // Position/scale, all in the rig group's own local space — the same space
+  // the player's own frontMesh lives in (x/y/z around its centre, z=0 being
+  // the card's own flat plane, matching the frontMesh's own depth). Baked in
+  // from Luke's tuning pass, 2026-09-12 — see the panel behind
+  // `?powerupTune=1` if these need revisiting.
+  //
+  // The clip's rotation is fixed rather than a slider — Luke only asked for
+  // position (x/y/z) and size on both the card and the clip this time. 90
+  // degrees around Y is what points the clip's long axis sideways to bridge
+  // the gap between the two cards (checked against its measured world
+  // bounding box when this was first built, not guessed).
+  const CLIP_ROTATION_DEG = { x: 0, y: 90, z: 0 };
+  const POWERUP_TUNE = {
+    card: { x: -0.64, y: 0, z: 0, scale: 0.7 },
+    clip: { x: -0.4, y: 0, z: 0.14, scale: 0.5 },
+  };
+
+  /**
+   * Attaches one power-up (a card + the shared clip) to `rig`, as children
+   * of a group parented directly under `rig.group` — so they move with the
+   * rig for free every frame, unlike the screen-projected name tags, which
+   * need their own per-frame projection because they're NOT real scene
+   * children of anything. `rig.powerup` guards against equipping a second
+   * one on top of the first; there's no stacking/replacing behaviour
+   * designed yet (Luke: "don't worry about how they earn it for now").
+   */
+  function equipPowerUp(rig) {
+    if (rig.powerup || !plasticClipTemplate) return;
+    const group = new THREE.Group();
+
+    // Unit geometry, sized via mesh.scale — same pattern as the word signs
+    // and the temple doors, so applyPowerUpTune can resize live without
+    // rebuilding geometry. No map yet — applyPowerUpTune sets it from
+    // whichever ENGINE_FRAMES entry is active.
+    const cardMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
+    );
+    group.add(cardMesh);
+
+    // A clone, not the template itself — the template is the one loaded
+    // instance every equip reuses; cloning is what lets a future multi-
+    // player build equip several without them fighting over one Object3D's
+    // transform. clone() shares geometry/material by reference (see
+    // disposeRig, which is careful never to dispose those).
+    const clip = plasticClipTemplate.clone();
+    clip.rotation.set(
+      THREE.MathUtils.degToRad(CLIP_ROTATION_DEG.x),
+      THREE.MathUtils.degToRad(CLIP_ROTATION_DEG.y),
+      THREE.MathUtils.degToRad(CLIP_ROTATION_DEG.z)
+    );
+    group.add(clip);
+
+    rig.group.add(group);
+    rig.powerup = { group, cardMesh, clip, frameIndex: 0 };
+    applyPowerUpTune(rig);
+  }
+
+  function applyPowerUpTune(rig) {
+    if (!rig.powerup) return;
+    const { cardMesh, clip, frameIndex } = rig.powerup;
+    const frame = ENGINE_FRAMES[frameIndex];
+    cardMesh.material.map = TEX[frame.tex];
+    cardMesh.material.needsUpdate = true;
+
+    // worldPerTunerPx converts ENGINE_FRAMES' tuner-space x/y/scale into
+    // this scene's world units — see ENGINE_FRAMES' own comment. Derived
+    // from the card's own current size rather than a fixed constant, so a
+    // future retune of POWERUP_TUNE.card.scale can't silently throw this
+    // per-frame correction out of proportion with it.
+    const worldPerTunerPx = POWERUP_TUNE.card.scale / ENGINE_FRAME_TUNER_H;
+    const h = frame.h * frame.scale * worldPerTunerPx;
+    const w = frame.w * frame.scale * worldPerTunerPx;
+    cardMesh.scale.set(w, h, 1);
+    cardMesh.position.set(
+      POWERUP_TUNE.card.x + frame.x * worldPerTunerPx,
+      POWERUP_TUNE.card.y - frame.y * worldPerTunerPx, // tuner Y is CSS (down-positive); world Y is up-positive
+      POWERUP_TUNE.card.z
+    );
+
+    clip.position.set(POWERUP_TUNE.clip.x, POWERUP_TUNE.clip.y, POWERUP_TUNE.clip.z);
+    clip.scale.setScalar(POWERUP_TUNE.clip.scale);
+  }
+
+  // The jetpack firing animation: loops ENGINE_FRAMES[1..3] (Engine2-4 —
+  // index 0/Engine1 is the idle default, never part of the loop) for as
+  // long as `rig.powerup.flame` is set. No real trigger for this exists yet
+  // ("don't worry about how they earn it for now" applies here too) — for
+  // now it's wired to the `?powerupTune=1` panel's test button, since
+  // there's already a real button for equipping the jetpack itself and this
+  // one no longer needs to (Luke, 2026-09-12).
+  const ENGINE_FLAME_FRAME_DURATION = 0.12; // seconds per frame (~8fps)
+  const ENGINE_FLAME_LOOP = [1, 2, 3]; // ENGINE_FRAMES indices — Engine2, Engine3, Engine4
+
+  function startEngineFlame(rig) {
+    if (!rig.powerup) return;
+    rig.powerup.flame = { t: 0 };
+    if (!rig.powerup.smoke) {
+      rig.powerup.smoke = makeEngineSmoke(rig);
+      // Stagger every puff to a random point in its own lifecycle up front,
+      // so the very first frame already reads as an established trail
+      // instead of one puff appearing at a time.
+      for (const p of rig.powerup.smoke.puffs) {
+        respawnSmokePuff(rig, p);
+        p.life = Math.random() * p.maxLife;
+      }
+    }
+  }
+
+  function stopEngineFlame(rig) {
+    if (!rig.powerup) return;
+    rig.powerup.flame = null;
+    rig.powerup.frameIndex = 0; // back to Engine1, the idle default
+    applyPowerUpTune(rig);
+  }
+
+  function updateEngineFlame(rig, dt) {
+    if (!rig.powerup?.flame) return;
+    rig.powerup.flame.t += dt;
+    const step = Math.floor(rig.powerup.flame.t / ENGINE_FLAME_FRAME_DURATION) % ENGINE_FLAME_LOOP.length;
+    const nextIndex = ENGINE_FLAME_LOOP[step];
+    if (rig.powerup.frameIndex !== nextIndex) {
+      rig.powerup.frameIndex = nextIndex;
+      applyPowerUpTune(rig);
+    }
+  }
+
+  // ---------------------------------------------------------------- engine smoke
+  //
+  // Luke, 2026-09-07: "add a slight smoke effect. When the engine turns on, I
+  // want to see generated smoke coming out the bottom. This can actually be
+  // quite similar to the fog effect that is already in the game, but a lot
+  // smaller, moving in a 'downward' direction relative to the engine, and
+  // darker, with flecks of black."
+  //
+  // Reuses the fog curtains' own soft round puff sprite (TEX.fogPuff) rather
+  // than a new texture — just far fewer of them, much smaller, tinted dark,
+  // and travelling straight down instead of drifting outward. "Relative to
+  // the engine" falls out for free from the scene graph: each puff is
+  // parented under rig.powerup.group, which rides the same quaternion as the
+  // card itself (and, once detached mid-rescue, whatever fixed orientation it
+  // had at that instant) — so local -Y always means "down" as drawn on the
+  // card, through every twist the rescue's flight puts the player through.
+  // Luke, 2026-09-07, second pass: "make the smoke more diffuse, over a
+  // larger downward area, say 70% more, and move more slowly. And a little
+  // less black." Size and spread are literally *1.7; the downward area a
+  // puff covers (speed * life) is also *1.7, split between a slower speed
+  // and a longer life rather than either alone, so it reads as "drifting",
+  // not "fired further" — and the puff count is bumped up a little so that
+  // bigger area doesn't come out looking sparse.
+  const SMOKE_PUFF_COUNT = 14;
+  const SMOKE_PUFF_SIZE = [0.238, 0.51]; // was [0.14, 0.3]
+  const SMOKE_LIFE = [0.85, 1.5]; // was [0.5, 0.9] — seconds from spawn to fully faded
+  const SMOKE_SPEED = [0.3, 0.55]; // was [0.5, 0.9] — local units/sec straight down
+  const SMOKE_SPREAD = 0.085; // was 0.05 — sideways/depth jitter, so it isn't one thin string
+  const SMOKE_GROWTH = 2.2; // size multiplier reached by the time a puff fades out
+  const SMOKE_ALPHA = 0.35; // was 0.55 — Luke, third pass: "more cloud-like: less dense"
+  // Shared unit geometry, same trick as the card mesh's own (see
+  // makeCharacterRig/equipPowerUp) — every puff scales it individually via
+  // mesh.scale, so this one geometry is never disposed per-rig, only the
+  // puffs' own materials are (see disposeRig/resolveRescue/restart).
+  const smokePuffGeometry = new THREE.PlaneGeometry(1, 1);
+
+  function makeEngineSmoke(rig) {
+    const puffs = [];
+    for (let i = 0; i < SMOKE_PUFF_COUNT; i++) {
+      // A small minority near-black — Luke: "only a little black" — the rest
+      // a light, cloud-like grey-white, so the cluster reads as smoke/cloud
+      // rather than soot. Was 0.2 near-black at 0.06-0.12, grey at 0.2-0.32.
+      const dark = Math.random() < 0.08;
+      const shade = dark ? 0.05 + Math.random() * 0.06 : 0.62 + Math.random() * 0.22;
+      const mesh = new THREE.Mesh(
+        smokePuffGeometry,
+        new THREE.MeshBasicMaterial({
+          map: TEX.fogPuff,
+          color: new THREE.Color(shade, shade, shade),
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          opacity: 0,
+          fog: false,
+        })
+      );
+      mesh.visible = false;
+      mesh.renderOrder = 11; // after the card/clip/flame
+      rig.powerup.group.add(mesh);
+      puffs.push({ mesh, life: 0, maxLife: 1, size: 0, speed: 0, jx: 0, jz: 0, originX: 0, originY: 0, originZ: 0 });
+    }
+    return { puffs };
+  }
+
+  function respawnSmokePuff(rig, p) {
+    const { cardMesh } = rig.powerup;
+    p.life = 0;
+    p.maxLife = SMOKE_LIFE[0] + Math.random() * (SMOKE_LIFE[1] - SMOKE_LIFE[0]);
+    p.size = SMOKE_PUFF_SIZE[0] + Math.random() * (SMOKE_PUFF_SIZE[1] - SMOKE_PUFF_SIZE[0]);
+    p.speed = SMOKE_SPEED[0] + Math.random() * (SMOKE_SPEED[1] - SMOKE_SPEED[0]);
+    p.jx = (Math.random() * 2 - 1) * SMOKE_SPREAD;
+    p.jz = (Math.random() * 2 - 1) * SMOKE_SPREAD;
+    // Bottom-centre of whatever engine frame is currently showing, read live
+    // off the card mesh rather than baked in — a future retune of
+    // POWERUP_TUNE/ENGINE_FRAMES can't quietly leave this spawning from the
+    // wrong spot.
+    p.originX = cardMesh.position.x;
+    p.originY = cardMesh.position.y - cardMesh.scale.y / 2;
+    p.originZ = cardMesh.position.z;
+  }
+
+  function updateEngineSmoke(rig, dt) {
+    if (!rig.powerup?.smoke) return;
+    const firing = !!rig.powerup.flame;
+    for (const p of rig.powerup.smoke.puffs) {
+      if (!firing) {
+        p.mesh.visible = false;
+        continue;
+      }
+      p.life += dt;
+      if (p.life >= p.maxLife) respawnSmokePuff(rig, p);
+      const u = p.life / p.maxLife;
+      p.mesh.visible = true;
+      p.mesh.position.set(p.originX + p.jx * u, p.originY - p.speed * p.life, p.originZ + p.jz * u);
+      const scale = p.size * (1 + (SMOKE_GROWTH - 1) * u);
+      p.mesh.scale.set(scale, scale, 1);
+      // Fades in over the first fifth of its life, then out for the rest —
+      // avoids a hard pop-in right at the exhaust.
+      p.mesh.material.opacity = SMOKE_ALPHA * Math.min(1, u * 5) * (1 - u);
+    }
+  }
+
+  /** Disposes only the smoke puffs' own per-puff materials — smokePuffGeometry
+   * is shared across every rig's smoke and never disposed (see its own
+   * comment). Safe to call whether or not the engine ever actually fired. */
+  function disposeEngineSmoke(powerup) {
+    if (!powerup?.smoke) return;
+    for (const p of powerup.smoke.puffs) p.mesh.material.dispose();
   }
 
   /**
@@ -2774,7 +3094,7 @@ export function mountSkyPath(container, options = {}) {
   // and unlike a fall it would sail off the top of the screen still attached
   // (tags only self-hide when they go *behind* the camera, not above it).
   function updateNameTags() {
-    const moving = !!leg || falling || !!abduction || !!templeEntry;
+    const moving = !!leg || falling || !!abduction || !!templeEntry || !!rescue;
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
     for (const t of nameTags) {
       if (moving && !t.alwaysVisible) {
@@ -3097,6 +3417,442 @@ export function mountSkyPath(container, options = {}) {
     });
   }
 
+  // ---------------------------------------------------------------- jetpack rescue
+  //
+  // A wrong pick still breaks the bridge and drops the player exactly as
+  // before (see triggerPlankBreak/startFall above) — but if a jetpack is
+  // equipped (see equipPowerUp/rig.powerup), the fall is intercepted a
+  // moment later and turns into a rescue instead: the engine ignites, flies
+  // the player up and over to exactly the spot they'd have landed at with
+  // the correct pick, sets them down, then detaches and flies off. Luke,
+  // 2026-09-13: "the engine will be a one-off spare life when the player
+  // falls."
+  //
+  // Deliberately NOT built on the same Rapier physics as a real fall — this
+  // was Luke's own suggestion once the "how do you smoothly take over from
+  // an unpredictable mid-tumble physics orientation" problem came up. A
+  // physics tumble ends wherever it ends; this whole sequence needs to
+  // instead behave in an exact, repeatable, tunable way throughout. So the
+  // "fall" here is its own small scripted tumble (a fixed random axis/speed
+  // chosen once, integrated by hand, standing in for what Rapier would have
+  // done) — everything from here on is a pure function of elapsed time,
+  // same philosophy as updateTempleEntry.
+  let rescue = null; // { t, sec, isLastFork, landing, startPos, startQuat, sideVec, ignited, detached, departBaseY, camPos, camLookAt } | null
+
+  // Luke's own tuned values (2026-09-07), found via the `?rescueTune=1`
+  // panel further down and baked in here as the new defaults.
+  const RESCUE_TUNE = {
+    fallDuration: 2, // Luke: "they should fall for 1s, before the engine turns on" — retuned to 2s
+    flyOutDuration: 1.9,
+    arcDuration: 2.8,
+    descendDuration: 3.05,
+    // How long before touchdown the body has already finished rolling
+    // upright, so the last stretch comes straight down with no more turning
+    // — Luke, 2026-09-07, after the "finished turning too late" pass: "I'd
+    // prefer they complete their orientation earlier/higher, and come down
+    // straight for the last second." Clamped against descendDuration itself
+    // in updateRescue, so this can never ask for more upright-time than the
+    // descend actually has.
+    uprightHoldDuration: 1.0,
+    holdDuration: 0.8, // Luke: "the engine will remain firing and attached for 0.5s" — retuned to 0.8s
+    departDuration: 1.7, // Luke: "leaving the screen in perhaps 1.5s" — retuned to 1.7s
+    flyOutDistance: 10.75,
+    flyOutRise: 4.45,
+    apexHeight: 20,
+    loopRadius: 2.9,
+    departDistance: 30,
+    cameraTravelDuration: 1.2,
+    cameraZoomDuration: 2.95,
+    cameraPullback: 8.4,
+  };
+  const RESCUE_GRAVITY = 9.82; // matches fallWorld's own gravity, for the scripted phase-A drop
+  // "Ground" for the figure's CARD (its centre, which is what figure.position
+  // actually is) is not world-Y 0 — the normal step-bob code stands it at
+  // walker.y + FIGURE_H/2 (see tick()'s own bob block), so its bottom edge,
+  // not its centre, is what sits on the deck. Landing at plain Y 0 put the
+  // card's centre at ground level, i.e. buried to the waist — Luke,
+  // 2026-09-13: "the player is landing much too low, inside the island."
+  const RESCUE_GROUND_Y = FIGURE_H / 2;
+  const RESCUE_IDENTITY_QUAT = new THREE.Quaternion();
+  // A tiny forward look, used to sample the flight path's own instantaneous
+  // direction of travel (see rescuePosAt/computeRescueQuat below) rather than
+  // hand-picking an orientation per phase.
+  const RESCUE_VEL_EPS = 0.02;
+  // The one baked-in lean during the pre-ignition fall — see its own use in
+  // updateRescue for why this is fixed rather than random.
+  const FALL_TUMBLE_ANGLE = THREE.MathUtils.degToRad(35);
+
+  /**
+   * Luke, 2026-09-07, after seeing the first pass: "the card is often at an
+   * angle that make them thin to the camera. I want to have the card always
+   * flat to camera, and the engine facing away from the centre and the
+   * camera... fly 'up' relative to the camera's view... before curving
+   * vertically upward and towards the next island. Again, it may be easiest
+   * to make this a standard procedure, mirrored for left/right, rather than
+   * try to figure out how to make it work with random falling physics."
+   *
+   * So the card's orientation while flying is no longer picked per phase —
+   * it's rebuilt every frame from two things that are already known exactly:
+   * where the card actually is (from rescuePosAt) and which way it's
+   * actually moving (the finite-difference velocity below). The card's local
+   * +Z (its front, and the side the jetpack's flame is NOT on — see
+   * makeCharacterRig) is pointed straight at the camera, so it can never go
+   * edge-on; the card's local +Y (head-to-feet) is pointed along whatever's
+   * left of the travel direction once the camera-facing component is
+   * removed, which is exactly "flat to camera, but leaning the way it's
+   * actually flying" — lying near-horizontal during the sideways flyout,
+   * tipping upright again as the arc curves back up toward the island. This
+   * also mirrors left/right for free: sideVec (below) already flips sign
+   * with choiceSide, and everything here is just derived from position, so
+   * there's nothing left to mirror by hand.
+   */
+  function computeRescueQuat(pos, velocityDir, camPos) {
+    const toCam = camPos.clone().sub(pos);
+    if (toCam.lengthSq() < 1e-6) toCam.set(0, 0, 1);
+    toCam.normalize();
+
+    let up = velocityDir.clone().sub(toCam.clone().multiplyScalar(velocityDir.dot(toCam)));
+    if (up.lengthSq() < 1e-6) {
+      // Travelling straight along the camera axis (or not moving at all) —
+      // no usable direction to lean toward, so fall back to world-up
+      // flattened the same way.
+      up = new THREE.Vector3(0, 1, 0).sub(toCam.clone().multiplyScalar(toCam.y));
+    }
+    up.normalize();
+
+    const right = new THREE.Vector3().crossVectors(up, toCam).normalize();
+    up.crossVectors(toCam, right).normalize(); // re-orthogonalize, cheap insurance
+
+    return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, toCam));
+  }
+
+  /** Same trailing-camera formula tick()'s normal camera branch uses (see
+   * `else if (!justFell)` there), factored out here so the rescue's own
+   * camera phases (in updateRescue below) can aim at a fork/landing spot
+   * that isn't `walker`/`facing` yet — those don't update until the very
+   * end (see resolveRescue). */
+  function trailingCamPos(x, z, heading, back) {
+    const behind = forward(heading, back);
+    return new THREE.Vector3(x - behind.x, CAM_HEIGHT, z - behind.z);
+  }
+  function trailingCamLookAt(x, z, heading) {
+    const ahead = forward(heading, 4.6);
+    return new THREE.Vector3(x + ahead.x, CAM_LOOK_Y, z + ahead.z);
+  }
+
+  /**
+   * Starts the rescue in place of startFall() — called from the same
+   * walk-loop completion site, only when `rig.powerup` is equipped.
+   * `choiceSide`/`facing`/`walker` are all still whatever they were the
+   * instant the wrong branch ran out, exactly as startFall() also relies on.
+   */
+  function startRescue() {
+    figure.visible = true;
+    cancelBirdsForFall();
+
+    const sec = sections[forkIndex - 1];
+    const angleOffset = choiceSide === 'left' ? -Math.PI / 2 : Math.PI / 2;
+    const sideVec = forward(facing + angleOffset, 1);
+
+    rescue = {
+      t: 0,
+      sec,
+      isLastFork: forkIndex === N_FORKS,
+      // The exact spot (and heading) the correct branch's own last waypoint
+      // would have landed them at — genBridgeRoute's centreHop for a normal
+      // fork, or the temple island's own edge for the last one (see
+      // buildFork's isLastFork branch) — either way, sec.nextCursor already
+      // *is* that point, so there's nothing to re-derive here.
+      landing: { x: sec.nextCursor.x, z: sec.nextCursor.z, heading: sec.nextCursor.heading },
+      startPos: figure.position.clone(),
+      startQuat: figure.quaternion.clone(),
+      sideVec,
+      ignited: false,
+      detached: false,
+      departBaseY: 0,
+      camPos: null,
+      camLookAt: null,
+    };
+
+    // Same anchor a normal fall uses (see startFall) — the first second of a
+    // rescue looks exactly like a real fall on purpose, camera included, so
+    // nobody watching can tell it's a rescue until the engine actually fires.
+    const side = forward(facing + angleOffset, FALL_CAM_SIDE);
+    const ahead = forward(facing, FALL_CAM_FORWARD);
+    fallCamAnchor.set(walker.x + side.x + ahead.x, FALL_CAM_HEIGHT, walker.z + side.z + ahead.z);
+  }
+
+  /** The point sideways flight aims for before climbing — factored out of
+   * rescuePosAt so the camera section below (which needs it as a look-at
+   * target too) never has to re-derive it differently. */
+  function rescueFlyOutEnd(rescue) {
+    const R = RESCUE_TUNE;
+    const fallEndY = rescue.startPos.y - 0.5 * RESCUE_GRAVITY * R.fallDuration * R.fallDuration;
+    return new THREE.Vector3(
+      rescue.startPos.x + rescue.sideVec.x * R.flyOutDistance,
+      fallEndY + R.flyOutRise,
+      rescue.startPos.z + rescue.sideVec.z * R.flyOutDistance
+    );
+  }
+
+  /**
+   * Position only, as a pure function of an arbitrary t — called twice per
+   * frame from updateRescue (once at rescue.t, once RESCUE_VEL_EPS later) so
+   * the card's actual instantaneous direction of travel can be read straight
+   * off the path instead of guessed at per phase — see computeRescueQuat's
+   * own header for why that matters now.
+   */
+  function rescuePosAt(rescue, t) {
+    const R = RESCUE_TUNE;
+    const t1 = R.fallDuration;
+    const t2 = t1 + R.flyOutDuration;
+    const t3 = t2 + R.arcDuration;
+    const t4 = t3 + R.descendDuration;
+    const { startPos, landing } = rescue;
+    const fallEndY = startPos.y - 0.5 * RESCUE_GRAVITY * t1 * t1;
+    const flyOutEnd = rescueFlyOutEnd(rescue);
+    const above = new THREE.Vector3(landing.x, R.apexHeight, landing.z);
+    const pos = new THREE.Vector3();
+
+    if (t < t1) {
+      // Phase A: straight fall — Luke, 2026-09-07: "if it turns out it would
+      // be easier to have one single pre-made procedure... go ahead and do
+      // that" — no more random tumble here at all, just a drop, so there's
+      // nothing left to blend out of once the engine ignites.
+      pos.set(startPos.x, startPos.y - 0.5 * RESCUE_GRAVITY * t * t, startPos.z);
+    } else if (t < t2) {
+      // Phase B: ignition — accelerates sideways off-screen (ease-in: a
+      // burst, not a drift).
+      const eased = smoothstep(t1, t2, t) ** 2;
+      pos.lerpVectors(new THREE.Vector3(startPos.x, fallEndY, startPos.z), flyOutEnd, eased);
+    } else if (t < t3) {
+      // Phase C: climbs and crosses to directly above the landing spot,
+      // threading one vertical loop onto the middle of the trip — a
+      // circular offset that's zero at both ends of its own window, so it
+      // never throws off the net destination, just bulges the path through
+      // it.
+      const u = smoothstep(t2, t3, t);
+      pos.lerpVectors(flyOutEnd, above, u);
+
+      const travelX = above.x - flyOutEnd.x;
+      const travelZ = above.z - flyOutEnd.z;
+      const travelLen = Math.hypot(travelX, travelZ) || 1;
+      const dirX = travelX / travelLen;
+      const dirZ = travelZ / travelLen;
+
+      const LOOP_START = 0.3;
+      const LOOP_END = 0.7;
+      const theta = u <= LOOP_START || u >= LOOP_END ? 0 : ((u - LOOP_START) / (LOOP_END - LOOP_START)) * Math.PI * 2;
+      pos.x += dirX * Math.sin(theta) * R.loopRadius;
+      pos.y += (1 - Math.cos(theta)) * R.loopRadius;
+      pos.z += dirZ * Math.sin(theta) * R.loopRadius;
+    } else if (t < t4) {
+      // Phase D: straight down onto the exact spot the correct branch would
+      // have landed them at, easing out into a controlled touchdown rather
+      // than free-falling into it.
+      const u = smoothstep(t3, t4, t);
+      const eased = 1 - (1 - u) * (1 - u);
+      pos.set(landing.x, THREE.MathUtils.lerp(R.apexHeight, RESCUE_GROUND_Y, eased), landing.z);
+    } else {
+      // Phases E/F: landed — the card itself just sits at the landing spot;
+      // only the engine moves, once detached (handled in updateRescue, not
+      // here, since that's a one-off side effect, not a pure function of t).
+      pos.set(landing.x, RESCUE_GROUND_Y, landing.z);
+    }
+    return pos;
+  }
+
+  /**
+   * Pure function of `rescue.t` for everything except the one-off ignite/
+   * detach side effects (each flagged so it fires exactly once) and the
+   * final resolveRescue() call once the whole sequence has played out.
+   * Called from tick()'s step-bob section, ahead of the camera section
+   * further down — this sets rescue.camPos/camLookAt, already fully eased,
+   * for that section to apply directly (no further lerping needed there).
+   */
+  function updateRescue(dt) {
+    rescue.t += dt;
+    const t = rescue.t;
+    const R = RESCUE_TUNE;
+    const t1 = R.fallDuration;
+    const t2 = t1 + R.flyOutDuration;
+    const t3 = t2 + R.arcDuration;
+    const t4 = t3 + R.descendDuration;
+    const t5 = t4 + R.holdDuration;
+    const t6 = t5 + R.departDuration;
+    // Clamped so a small descendDuration can never push this before t3 —
+    // see uprightHoldDuration's own comment.
+    const orientEnd = t4 - Math.min(R.uprightHoldDuration, R.descendDuration);
+
+    if (!rescue.ignited && t >= t1) {
+      rescue.ignited = true;
+      startEngineFlame(rig);
+    }
+
+    const { landing } = rescue;
+    const flyOutEnd = rescueFlyOutEnd(rescue);
+    const pos = rescuePosAt(rescue, t);
+
+    // Velocity-aligned orientation only covers t1..t3 (ignition through the
+    // top of the arc) — see computeRescueQuat's header. Phase D (t3..t4) is
+    // deliberately NOT more of the same: the actual velocity there points
+    // straight down onto the landing spot, and aligning the body's up-axis
+    // with "straight down" is exactly what put the player in head-first —
+    // Luke, 2026-09-07: "the player is landing upside-down, head first."
+    // A standing figure doesn't orient itself to match its fall speed on the
+    // way down, so instead this eases from whatever it was flying at the top
+    // of the arc back to upright, landing right-side-up by construction.
+    function flightQuatAt(sampleT) {
+      const p = rescuePosAt(rescue, sampleT);
+      const velocityDir = rescuePosAt(rescue, sampleT + RESCUE_VEL_EPS).sub(p);
+      if (velocityDir.lengthSq() < 1e-6) velocityDir.set(0, 1, 0);
+      velocityDir.normalize();
+      return computeRescueQuat(p, velocityDir, camera.position);
+    }
+
+    // Small fixed lean while falling, before the engine catches them — Luke,
+    // 2026-09-07: "it still needs to have at least a small turn before the
+    // jetpack kicks in... it's fine to bake in one set rotation." Deliberately
+    // NOT a random axis (that's exactly what made the card go edge-on before
+    // — see computeRescueQuat's header) — rotating around sideVec's own
+    // direction (the same axis the flyout itself travels along, and already
+    // mirrored by choiceSide) keeps the tumble happening *in* the
+    // camera-facing plane instead of tipping the card away from it. Scoped
+    // tightly to phase A only, and phase B blends out of this instead of out
+    // of the bare startQuat — everything from ignition on is untouched.
+    //
+    // sideVec itself is the plain {x, z} shape forward() returns everywhere
+    // else in this file (no y) — fine for the position math above, but
+    // setFromAxisAngle needs a real 3D vector. Passing sideVec straight in
+    // silently read its missing y as undefined, which turned the whole
+    // rotation (and everything slerped from it) into NaN — the card wasn't
+    // "falling out of view", it was being handed an invalid transform and
+    // never drawn at all, only recovering once the ignition blend reached
+    // its endpoint exactly and could just copy the (valid) target quaternion
+    // instead of interpolating through the broken one.
+    const fallTiltAxis = new THREE.Vector3(rescue.sideVec.x, 0, rescue.sideVec.z);
+    const fallTiltQuat = rescue.startQuat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(fallTiltAxis, FALL_TUMBLE_ANGLE));
+
+    let quat;
+    if (t < t1) {
+      quat = rescue.startQuat.clone().slerp(fallTiltQuat, smoothstep(0, t1, t));
+    } else if (t < t2) {
+      // Ignition: blends from the fall's own ending lean into the flight
+      // orientation on the same ease the position itself uses, so the two
+      // are always in step with each other.
+      quat = fallTiltQuat.slerp(flightQuatAt(t), smoothstep(t1, t2, t));
+    } else if (t < t3) {
+      quat = flightQuatAt(t);
+    } else if (t < orientEnd) {
+      // Descend, still turning: eases from the arc's own final orientation
+      // (sampled once, at t3, not re-derived from the downward fall
+      // velocity — see the header above) back to upright. Finishes at
+      // orientEnd, not t4 — see uprightHoldDuration's own comment.
+      quat = flightQuatAt(t3).slerp(RESCUE_IDENTITY_QUAT, smoothstep(t3, orientEnd, t));
+    } else if (t < t4) {
+      // Descend, done turning: already upright, comes down straight for
+      // whatever's left of the descent.
+      quat = RESCUE_IDENTITY_QUAT;
+    } else {
+      // Landed: back on its feet, same standing pose walking uses.
+      quat = RESCUE_IDENTITY_QUAT;
+    }
+
+    if (t >= t4) {
+      if (!rescue.detached && t >= t5) {
+        rescue.detached = true;
+        // scene.attach() (not scene.add()) preserves the group's current
+        // WORLD transform as its new local one — it keeps riding exactly
+        // where it was clipped on the card for this one frame, and only
+        // starts actually moving on its own from the next frame on.
+        if (rig.powerup) {
+          scene.attach(rig.powerup.group);
+          rescue.departBaseY = rig.powerup.group.position.y;
+        }
+      }
+      if (rescue.detached && rig.powerup) {
+        const ud = smoothstep(t5, t6, t);
+        rig.powerup.group.position.y = rescue.departBaseY + ud * ud * R.departDistance;
+      }
+    }
+
+    figure.position.copy(pos);
+    figure.quaternion.copy(quat);
+
+    // ---- camera --------------------------------------------------------
+    // Holds at the fall anchor (tracking the figure, exactly like a real
+    // fall) until the flyOut is done — Luke: "the camera will wait for the
+    // falling character to leave the screen" — then pans to a pulled-back
+    // shot of the landing spot, then eases in to the normal trailing framing
+    // as the player descends (Luke: "arrive at the island pulled back...
+    // slowly zooming in"). All computed here as an exact function of t (see
+    // this function's own header); the camera section in tick() just
+    // applies rescue.camPos/camLookAt directly.
+    const camTravelStart = t2;
+    const camTravelEnd = t2 + R.cameraTravelDuration;
+    const camZoomStart = t3;
+    const camZoomEnd = t3 + R.cameraZoomDuration;
+    const widePos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK + R.cameraPullback);
+    const normalPos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK);
+    const lookAtTarget = trailingCamLookAt(landing.x, landing.z, landing.heading);
+
+    if (t < camTravelStart) {
+      rescue.camPos = fallCamAnchor.clone();
+      rescue.camLookAt = pos.clone();
+    } else if (t < camTravelEnd) {
+      const u = smoothstep(camTravelStart, camTravelEnd, t);
+      rescue.camPos = fallCamAnchor.clone().lerp(widePos, u);
+      rescue.camLookAt = flyOutEnd.clone().lerp(lookAtTarget, u);
+    } else if (t < camZoomStart) {
+      rescue.camPos = widePos;
+      rescue.camLookAt = lookAtTarget;
+    } else if (t < camZoomEnd) {
+      const u = smoothstep(camZoomStart, camZoomEnd, t);
+      rescue.camPos = widePos.clone().lerp(normalPos, u);
+      rescue.camLookAt = lookAtTarget;
+    } else {
+      rescue.camPos = normalPos;
+      rescue.camLookAt = lookAtTarget;
+    }
+
+    if (t >= t6) resolveRescue();
+  }
+
+  /**
+   * Hands control back to normal play once the engine has fully departed —
+   * Luke: control doesn't return "until the engine is fully gone". Mirrors
+   * what a real arrival does (see the `leg.arriveFork`/`leg.success` cases
+   * in tick()'s own walk-loop completion), since as far as the rest of the
+   * game is concerned this IS an arrival, just one that skipped the walk.
+   * The jetpack itself is spent — Luke never described stacking/refuelling,
+   * so `rig.powerup` is simply gone after this, same as any other one-shot.
+   */
+  function resolveRescue() {
+    const { sec, isLastFork, landing } = rescue;
+    if (rig.powerup) {
+      scene.remove(rig.powerup.group);
+      rig.powerup.cardMesh.geometry.dispose();
+      rig.powerup.cardMesh.material.dispose();
+      disposeEngineSmoke(rig.powerup);
+      rig.powerup = null;
+    }
+    walker.set(landing.x, 0, landing.z);
+    facing = landing.heading;
+    if (isLastFork) {
+      // Same continuation a normal correct pick plays at the last fork (see
+      // applyChoice) — the walk from here to the temple's own stop point,
+      // already precomputed as sec.approach.
+      const continuation = sec.approach || [];
+      leg = makeLeg(continuation, [walker.clone(), ...continuation], sunP, timeOfDay(N_FORKS), null);
+      leg.success = true;
+    } else {
+      forkIndex += 1;
+      sunP = timeOfDay(forkIndex);
+    }
+    rescue = null;
+    refreshUI();
+  }
+
   // ---------------------------------------------------------------- alien abduction
   //
   // A flying saucer drops in, beams the player up and carries them off (see
@@ -3269,7 +4025,7 @@ export function mountSkyPath(container, options = {}) {
 
   function updateWordSigns() {
     const sec = sections[forkIndex - 1];
-    const showCurrent = !leg && !finished && !falling && !abduction && !templeEntry && sec?.words;
+    const showCurrent = !leg && !finished && !falling && !abduction && !templeEntry && !rescue && sec?.words;
     if (!showCurrent) {
       wordSigns.left.visible = false;
       wordSigns.right.visible = false;
@@ -3365,7 +4121,24 @@ export function mountSkyPath(container, options = {}) {
   const FADE_DURATION = 2.4; // seconds
   const TEMPLE_ENTRY_DURATION = Math.max(DOOR_OPEN_DURATION, FADE_DURATION);
   const DOOR_OPEN_ANGLE = THREE.MathUtils.degToRad(62); // partial — "don't have to open all the way... edges can still be slightly visible"
-  const TEMPLE_ENTRY_WALK_SPEED = WALK_SPEED * 1.8; // brisker than the normal walk — reads as a final, determined approach
+  // Luke, 2026-09-07, after watching the card visibly pass through the door
+  // image before the fade finished covering it: "make the player move a bit
+  // more slowly, so that the animation has a chance to fade to black before
+  // they reach the image." Read as: over the whole entry, cover this many
+  // fewer seconds' worth of ground at the old (flat *1.8) speed. First pass
+  // was 0.2s — Luke, 2026-09-07 again, after that still wasn't enough:
+  // "The same issue is still there... slower, so that we don't see that."
+  // Bumped to 0.6s total.
+  const TEMPLE_ENTRY_SLOWDOWN = 0.6; // was 0.2
+  const TEMPLE_ENTRY_WALK_SPEED = WALK_SPEED * 1.8 * ((TEMPLE_ENTRY_DURATION - TEMPLE_ENTRY_SLOWDOWN) / TEMPLE_ENTRY_DURATION);
+  // "Have the player card move a little bit upward as well as forward, so it
+  // looks like they're heading for the door" — the door image sits above
+  // ground level, so a purely flat approach was reading as walking *at* the
+  // base of it rather than *into* it. Eased over the same span as the
+  // sideways drift onto the doorway's centre (xP, below), so it arrives
+  // fully risen exactly when it arrives centred. First pass was 1.4 — Luke,
+  // 2026-09-07, after that still wasn't enough: "They need to be higher."
+  const TEMPLE_ENTRY_RISE = 3.0; // was 1.4
 
   function startTempleEntry() {
     templeEntry = { t: 0, startX: walker.x };
@@ -3436,6 +4209,7 @@ export function mountSkyPath(container, options = {}) {
     // assuming it was already 0.
     const xP = smoothstep(0, TEMPLE_ENTRY_DURATION, t);
     walker.x = THREE.MathUtils.lerp(templeEntry.startX, doorTuneState.frame.x, xP);
+    walker.y = TEMPLE_ENTRY_RISE * xP;
 
     const fadeP = Math.min(1, t / FADE_DURATION);
     if (els.templeFade) els.templeFade.style.opacity = String(fadeP);
@@ -3584,64 +4358,70 @@ export function mountSkyPath(container, options = {}) {
       })
     : null;
 
-  // Temple-door tuner (left side, `?doorTune=1`) — Luke, 2026-09-10/11: a
-  // toggle to hide the leaves so the frame/temple behind them is visible, a
-  // button that snaps the camera to a close framing of the door for tuning
-  // (the normal trailing camera is otherwise too far from the temple to
-  // judge this by most of the run — see doorFocus below, read directly in
-  // tick()'s camera block), and a button to preview the opening animation
-  // directly. The position/size sliders that used to live here (frame/left/
-  // right X, Y, size) are gone — Luke, 2026-09-11, once doorTuneState's
-  // values were finalised: "go ahead and remove the sliders for the doors
-  // and door frame." Still reuses attachBgTuner's generic toggle/action
-  // machinery (see that module's own updated doc comment) for what's left.
-  let doorFocus = false;
-  const doorTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('doorTune')
+  // The temple-door tuner (position/size sliders, the "show doors" toggle,
+  // "Focus door view", "Play temple entry") was removed 2026-09-12 once Luke
+  // confirmed the opening animation itself looked right — see git history
+  // (bgTuner.js's id/title/position/extrasTitle/actions generalisation) if a
+  // future door-art pass wants it back.
+
+  // The power-up card/clip placement tuner (`?powerupTune=1` — card/clip
+  // X/Y/Z/size, and the "Play flame (test)" button) was removed 2026-09-13
+  // once Luke baked in final numbers for both. See POWERUP_TUNE/
+  // CLIP_ROTATION_DEG for where those live now, and git history for the
+  // panel if a future power-up card ever needs it again.
+
+  // Jetpack-rescue tuner (left side, `?rescueTune=1`) — every duration and
+  // distance in RESCUE_TUNE, plus a "Test Reset" button (see its own comment
+  // below) that gets back to "standing on island 1 with a jetpack" in one
+  // click, so the actual sequence — triggered the real way, by failing a
+  // bridge — can be watched again and again without a page reload, which
+  // would otherwise throw away whatever had just been tuned above.
+  const rescueSlider = (key, min, max, step) => ({
+    value: RESCUE_TUNE[key],
+    min,
+    max,
+    step: step ?? 0.05,
+    set: (v) => {
+      RESCUE_TUNE[key] = v;
+    },
+  });
+  const rescueTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('rescueTune')
     ? attachBgTuner({
         container,
-        id: 'doorTuner',
-        title: 'temple door',
+        id: 'rescueTuner',
+        title: 'jetpack rescue',
         position: 'left',
         panels: {},
-        // One checkbox driving both leaves at once — a plain object with a
-        // visible accessor stands in for "the mesh" as far as attachBgTuner's
-        // toggle code is concerned (it only ever reads/writes `.visible`).
-        toggles: {
-          'show doors': {
-            get visible() {
-              return doorLeftMesh.visible;
-            },
-            set visible(v) {
-              doorLeftMesh.visible = v;
-              doorRightMesh.visible = v;
-            },
-          },
+        extrasTitle: 'TIMING',
+        extras: {
+          'fall s': rescueSlider('fallDuration', 0.1, 3),
+          'fly-out s': rescueSlider('flyOutDuration', 0.1, 3),
+          'arc s': rescueSlider('arcDuration', 0.2, 5),
+          'descend s': rescueSlider('descendDuration', 0.1, 4),
+          'upright hold s': rescueSlider('uprightHoldDuration', 0, 4),
+          'hold s': rescueSlider('holdDuration', 0, 3),
+          'depart s': rescueSlider('departDuration', 0.2, 4),
+          'cam travel s': rescueSlider('cameraTravelDuration', 0.1, 4),
+          'cam zoom s': rescueSlider('cameraZoomDuration', 0.1, 4),
+          'fly-out dist': rescueSlider('flyOutDistance', 0, 15),
+          'fly-out rise': rescueSlider('flyOutRise', 0, 6),
+          'apex height': rescueSlider('apexHeight', 1, 20),
+          'loop radius': rescueSlider('loopRadius', 0, 6),
+          'depart dist': rescueSlider('departDistance', 1, 30),
+          'cam pullback': rescueSlider('cameraPullback', 0, 20),
         },
         actions: [
           {
-            label: 'Focus door view',
-            onClick: (btn) => {
-              doorFocus = !doorFocus;
-              btn.textContent = doorFocus ? 'Focus door view (on)' : 'Focus door view';
-            },
-          },
-          {
-            // Luke, 2026-09-11: "add a button to take us to this animation
-            // immediately" — skips straight to the ending without playing
-            // through all N_FORKS forks first, for tuning the sequence
-            // itself. Snaps the walker to the same spot the normal approach
-            // ends at (rather than wherever it happens to be right now) so
-            // the preview is the real thing, not a rush from wherever the
-            // camera was left.
-            label: 'Play temple entry',
+            // Luke, 2026-09-13: watching the rescue play out once used to
+            // mean reloading the page — which also threw away whatever had
+            // just been tuned above. restart() + a fresh equip gets back to
+            // "standing on island 1 with a jetpack" without touching
+            // RESCUE_TUNE at all, so the same numbers are still live for the
+            // next attempt at failing a bridge.
+            label: 'Test Reset',
             onClick: () => {
-              if (templeEntry || falling || !!abduction) return;
-              doorFocus = false;
-              leg = null;
-              walker.set(0, 0, -STOP_FRACTION * TEMPLE_DISTANCE);
-              facing = 0;
-              startTempleEntry();
-              refreshUI();
+              restart();
+              equipPowerUp(rig);
             },
           },
         ],
@@ -3671,6 +4451,7 @@ export function mountSkyPath(container, options = {}) {
     charStart: $('charStart'),
     nameTagLayer: $('nameTagLayer'),
     abduct: $('abduct'), // temporary test trigger — see startAbduction()
+    addJetpack: $('addJetpack'), // temporary test trigger — see equipPowerUp()
     templeFade: $('templeFade'), // opacity driven by updateTempleEntry()
   };
 
@@ -3816,7 +4597,7 @@ export function mountSkyPath(container, options = {}) {
     // Temporary test control (see startAbduction) — inert once the round is
     // over, while something else already owns the figure, or mid-walk, since
     // the event only runs on a player standing still.
-    if (els.abduct) els.abduct.disabled = !!abduction || falling || finished || walking || !!templeEntry;
+    if (els.abduct) els.abduct.disabled = !!abduction || falling || finished || walking || !!templeEntry || !!rescue;
     // No more status line at the bottom of the screen — Luke, 2026-09-09:
     // "remove the small text at the bottom... I don't want any of those
     // messages." (fork progress, "Falling…", the hold-to-walk prompt, etc.)
@@ -3915,6 +4696,22 @@ export function mountSkyPath(container, options = {}) {
     choiceSide = null;
     holdingForward = false;
     templeEntry = null;
+    // Defensive only — the "Again" button that calls restart() is hidden
+    // for the whole rescue (see `moving`/showCurrent's own !!rescue guards),
+    // so this shouldn't normally fire mid-rescue. removeFromParent() rather
+    // than a specific scene.remove()/rig.group.remove() since the group
+    // could currently be under either, depending whether detach (see
+    // updateRescue) had already happened.
+    if (rescue) {
+      if (rig.powerup) {
+        rig.powerup.group.removeFromParent();
+        rig.powerup.cardMesh.geometry.dispose();
+        rig.powerup.cardMesh.material.dispose();
+        disposeEngineSmoke(rig.powerup);
+        rig.powerup = null;
+      }
+      rescue = null;
+    }
     doorLeftPivot.rotation.y = 0;
     doorRightPivot.rotation.y = 0;
     doorLeftPivot.position.z = DOOR_LEAF_Z; // undo the swing's forward hinge slide
@@ -3941,6 +4738,13 @@ export function mountSkyPath(container, options = {}) {
   els.reset.addEventListener('click', () => restart());
   // Temporary manual trigger — see startAbduction()'s header.
   els.abduct?.addEventListener('click', () => startAbduction());
+  // Temporary manual trigger — Luke, 2026-09-12: "don't worry about how they
+  // earn it for now, just add it as a button." Disabled once used since
+  // there's no stacking/replacing behaviour yet (see equipPowerUp).
+  els.addJetpack?.addEventListener('click', () => {
+    equipPowerUp(rig);
+    els.addJetpack.disabled = true;
+  });
 
   // Hold-to-advance: hold #advance to walk, release to freeze in place —
   // Luke, 2026-09-06: "they will also have to move their card forward by
@@ -4195,9 +4999,13 @@ export function mountSkyPath(container, options = {}) {
           // the button was pressed — the consequence should land when the
           // player walks off the edge. startFall() hands the figure off to
           // physics for the drop itself — `finished` doesn't flip true until
-          // the fall resolves, below.
+          // the fall resolves, below. A jetpack (see equipPowerUp) turns
+          // this same moment into a rescue instead — see startRescue's own
+          // header for why that's a separate, non-physics path rather than
+          // a branch inside startFall().
           if (leg.lastPoint.breakablePlanks?.length) triggerPlankBreak(leg.lastPoint.breakablePlanks);
-          startFall();
+          if (rig.powerup) startRescue();
+          else startFall();
         }
         leg = null;
         refreshUI();
@@ -4208,17 +5016,23 @@ export function mountSkyPath(container, options = {}) {
     // (now-null) `leg` — see its own doc comment. Runs before the step-bob/
     // camera code below so both see this frame's already-updated walker.z.
     if (templeEntry) updateTempleEntry(dt);
+    updateEngineFlame(rig, dt); // no-op unless a jetpack is equipped and firing
+    updateEngineSmoke(rig, dt); // no-op unless the engine has ever fired
 
     // Step bob: only while walking, and it always finishes the lobe (one
     // up-then-down) it's in the middle of before settling flat — walkPhase is
     // clamped to the next multiple of PI rather than just stopped, so motion
     // never cuts off mid-rise or mid-fall. Each PI-wide lobe lifts and tilts
     // the figure one way; consecutive lobes alternate right/left via `side`.
-    // Three states: falling (physics owns figure.position); just fell and
-    // waiting on "Again" (frozen exactly where the fall left it — the bob code
-    // would otherwise snap it back to standing the very next frame); or the
-    // normal walking/idle/reached-the-temple case (bob code, as before).
-    if (falling) {
+    // Four states now: a jetpack rescue (updateRescue owns figure.position/
+    // quaternion entirely, same reasoning as falling below); falling
+    // (physics owns figure.position); just fell and waiting on "Again"
+    // (frozen exactly where the fall left it — the bob code would otherwise
+    // snap it back to standing the very next frame); or the normal walking/
+    // idle/reached-the-temple case (bob code, as before).
+    if (rescue) {
+      updateRescue(dt);
+    } else if (falling) {
       fallAccumulator += dt;
       let steps = 0;
       while (fallAccumulator >= FALL_FIXED_DT && steps < 5) {
@@ -4387,7 +5201,7 @@ export function mountSkyPath(container, options = {}) {
         delta = ((delta + Math.PI) % (Math.PI * 2)) - Math.PI; // shortest angular distance
         facing += delta * Math.min(1, dt * 2.5);
       }
-    } else if (!falling && !finished) {
+    } else if (!falling && !finished && !rescue) {
       // Arrival: the block above only runs while a leg is in progress, so the
       // instant the queue empties it stops updating `facing` at all — it was
       // left pointing wherever the branch's final waypoint happened to aim
@@ -4424,20 +5238,13 @@ export function mountSkyPath(container, options = {}) {
     // this exact frame), and the camera needs to see the up-to-date state,
     // not whatever was true at the top of tick().
     const justFell = finished && !finishedSuccess;
-    if (doorFocus) {
-      // Temporary, `?doorTune=1`-only: the normal trailing camera never gets
-      // close enough to the temple to judge door placement for most of the
-      // run, so this just parks the camera at a fixed close framing instead
-      // — a plain override that skips the trailing/falling logic below
-      // entirely while active, same as `falling`/`justFell` already do for
-      // their own states. Centred on the frame's own vertical MIDDLE (its
-      // bottom, `frame.y`, plus half its height) rather than a fraction of
-      // its height alone — Luke, 2026-09-11: the previous version framed too
-      // low to see the top of the door at all.
-      const midY = doorTuneState.frame.y + doorTuneState.frame.scale * 0.5;
-      const midX = doorTuneState.frame.x; // the doorway's centre, which isn't x=0
-      camera.position.set(midX, midY, DOOR_FRAME_Z + 9);
-      camera.lookAt(midX, midY, DOOR_FRAME_Z);
+    if (rescue) {
+      // Already fully eased inside updateRescue (see its own "camera"
+      // section) — applied directly here, not lerped again, so the
+      // cameraTravelDuration/cameraZoomDuration sliders land exactly where
+      // tuned rather than approaching them asymptotically.
+      camera.position.copy(rescue.camPos);
+      camera.lookAt(rescue.camLookAt);
     } else if (falling) {
       // Eases to the fixed anchor beside the edge (see startFall) and pans
       // the look-at down to track the figure as it drops — a held position
@@ -4627,10 +5434,39 @@ export function mountSkyPath(container, options = {}) {
     });
     window.__doorTune = () => ({
       state: doorTuneState,
-      focus: doorFocus,
       frame: { pos: doorFrameMesh.position.toArray(), scale: doorFrameMesh.scale.toArray() },
       left: { pos: doorLeftMesh.position.toArray(), scale: doorLeftMesh.scale.toArray(), visible: doorLeftMesh.visible },
       right: { pos: doorRightMesh.position.toArray(), scale: doorRightMesh.scale.toArray(), visible: doorRightMesh.visible },
+    });
+    window.__powerup = () => ({
+      state: POWERUP_TUNE,
+      equipped: !!rig.powerup,
+      clipLoaded: !!plasticClipTemplate,
+      card: rig.powerup
+        ? {
+            pos: rig.powerup.cardMesh.position.toArray(),
+            scale: rig.powerup.cardMesh.scale.toArray(),
+            frameIndex: rig.powerup.frameIndex,
+            frameTex: ENGINE_FRAMES[rig.powerup.frameIndex].tex,
+          }
+        : null,
+      clip: rig.powerup
+        ? {
+            pos: rig.powerup.clip.position.toArray(),
+            rotDeg: rig.powerup.clip.rotation.toArray().slice(0, 3).map((r) => +THREE.MathUtils.radToDeg(r).toFixed(1)),
+            scale: rig.powerup.clip.scale.toArray(),
+          }
+        : null,
+    });
+    window.__rescue = () => ({
+      active: !!rescue,
+      t: rescue ? +rescue.t.toFixed(3) : null,
+      isLastFork: rescue?.isLastFork ?? null,
+      landing: rescue?.landing ?? null,
+      ignited: rescue?.ignited ?? null,
+      detached: rescue?.detached ?? null,
+      figurePos: figure.position.toArray().map((v) => +v.toFixed(3)),
+      camPos: rescue?.camPos ? rescue.camPos.toArray().map((v) => +v.toFixed(3)) : null,
     });
     window.__stoneCounts = () => stoneMeshes.map((m) => m.count);
     window.__stoneMeshes = stoneMeshes;
@@ -4709,7 +5545,7 @@ export function mountSkyPath(container, options = {}) {
       if (rafId !== null) cancelAnimationFrame(rafId);
       harness?.dispose();
       bgTuner?.dispose();
-      doorTuner?.dispose();
+      rescueTuner?.dispose();
       resizeObserver.disconnect();
       renderer.dispose();
       renderer.forceContextLoss();

@@ -39,6 +39,11 @@ export const SKY_PATH_CHROME = `
      test control, not part of the game's own UI, and it goes away entirely
      once the real trigger is known. -->
 <button id="abduct" title="Trigger alien abduction">👽</button>
+<!-- Temporary manual trigger for the jetpack power-up (Luke, 2026-09-12:
+     "don't worry about how they earn it for now, just add it as a button
+     above the alien abduction button"). Same treatment as #abduct: a small
+     test control, not part of the game's own UI, parked directly above it. -->
+<button id="addJetpack" title="Add jetpack power-up">🚀</button>
 <div id="controls">
   <button id="advance" class="hidden" title="Hold to walk">▲</button>
   <button id="reset" class="hidden">Again</button>
@@ -144,6 +149,29 @@ export const SKY_PATH_CSS = `
 .skypath-surface #abduct:hover { background: rgba(244, 247, 250, 0.9); }
 .skypath-surface #abduct:active { transform: translateY(1px); }
 .skypath-surface #abduct:disabled { opacity: 0.25; cursor: default; }
+
+/* Same treatment as #abduct, directly above it (34px + 8px gap + 12px base). */
+.skypath-surface #addJetpack {
+  position: absolute;
+  left: calc(env(safe-area-inset-left, 0px) + 8px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 54px);
+  z-index: 10;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  color: #12212f;
+  background: rgba(244, 247, 250, 0.45);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition: background 0.15s;
+}
+.skypath-surface #addJetpack:hover { background: rgba(244, 247, 250, 0.9); }
+.skypath-surface #addJetpack:active { transform: translateY(1px); }
+.skypath-surface #addJetpack:disabled { opacity: 0.25; cursor: default; }
 
 .skypath-surface #controls {
   position: absolute;
