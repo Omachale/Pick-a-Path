@@ -11,6 +11,11 @@
  * without needing Supabase or a second device — not part of the real app's
  * user-facing flow, and not gated behind import.meta.env.DEV because it's
  * harmless in production (an ordinary player has no reason to add it).
+ *
+ * `?cavern=1` does the same for the stage-2 Lava Cavern spike, with an
+ * optional `&spokes=1..4`. Separate from Sky Path on purpose for now — Luke,
+ * 2026-09-08: "Make it a separate thing for now and we'll stitch them
+ * together once they're ready."
  */
 import { useRef, useState, useEffect } from 'react';
 import { useLobby } from './lobby/useLobby.js';
@@ -18,6 +23,7 @@ import Lobby from './lobby/Lobby.jsx';
 import GameRoom from './lobby/GameRoom.jsx';
 import RoundResults from './lobby/RoundResults.jsx';
 import SkyPath from './skypath/SkyPath.jsx';
+import LavaCavern from './cavern/LavaCavern.jsx';
 import TeacherDashboard from './lobby/TeacherDashboard.jsx';
 import { supabase } from './supabase.js';
 import { createSupabaseIdentityStore } from './identity/supabaseIdentityStore.js';
@@ -35,6 +41,14 @@ function SoloSkyPath() {
         gameRef={gameRef}
         onRoundEnd={(result) => console.log('[round end]', result)}
       />
+    </div>
+  );
+}
+
+function SoloLavaCavern() {
+  return (
+    <div style={{ position: 'fixed', inset: 0 }}>
+      <LavaCavern spokes={Number(params.get('spokes')) || 4} />
     </div>
   );
 }
@@ -62,6 +76,7 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  if (params.get('cavern') === '1') return <SoloLavaCavern />;
   if (params.get('solo') === '1') return <SoloSkyPath />;
 
   if (teacherView) return <TeacherDashboard onExit={() => setTeacherView(false)} />;
