@@ -166,6 +166,16 @@ export function mountLavaCavern(container, options = {}) {
     lavaDarkAlpha: 0.4,
     lavaSpeed: 1, // multiplies both layers' drift speed together
     lavaScale: 1, // multiplies both layers' tile frequency together, same ratio preserved
+    // Cheap fake-3D via colour only (no geometry) — see heightField's own
+    // comment in the shader for the reasoning. 0 = flat as before.
+    lavaRelief: 0.35,
+    // Lava rocks — see the "lava rocks" section below for the mechanism.
+    // Base fraction of each rock's own height left poking above the surface;
+    // individual rocks vary ±0.15 around this and are hard-clamped to 0.5
+    // regardless, per Luke: "the amount showing above the image should never
+    // be more than 50%."
+    lavaRockHeight: 0.25,
+    lavaRockScale: 1, // base size multiplier; individuals vary 0.65–1.5x on top
   };
   let spokeCount = Math.max(1, Math.min(4, initialSpokes));
 
@@ -427,6 +437,7 @@ export function mountLavaCavern(container, options = {}) {
     uniform sampler2D uLavaDark;
     uniform float uTime;
     uniform float uDarkAlpha;
+    uniform float uRelief;
     uniform float uScale1;
     uniform float uScale2;
     uniform vec2 uSpeed1;
@@ -443,6 +454,20 @@ export function mountLavaCavern(container, options = {}) {
       return p + vec2(a, b);
     }
 
+    // Luke, 2026-09-11, on whether real geometry could make the lava look 3D:
+    // agreed to try the cheap version first — no vertices, no lighting, just
+    // reusing the same kind of sine field already driving the warp above to
+    // brighten "peaks" and darken "troughs" in the final colour. Deliberately
+    // its own separate field (not literally the warp offset) so the relief
+    // pattern isn't perfectly locked to the distortion pattern, which would
+    // read as one obviously-mechanical effect rather than two independent
+    // ones layering into something more organic.
+    float heightField(vec2 p, float t) {
+      float h = sin(p.x * 0.028 + t * 0.12) + sin(p.y * 0.021 - t * 0.09);
+      h += 0.6 * (cos(p.y * 0.04 + t * 0.15) + cos(p.x * 0.033 - t * 0.1));
+      return h / 3.2; // roughly [-1, 1]
+    }
+
     void main() {
       vec2 p1 = warp(vWorldXZ, uTime) * uScale1 + uSpeed1 * uTime;
       vec3 base = texture2D(uLava1, p1).rgb;
@@ -454,7 +479,25 @@ export function mountLavaCavern(container, options = {}) {
       vec2 p2 = rot * warp(vWorldXZ, uTime * 1.3) * uScale2 + uSpeed2 * uTime;
       vec3 dark = texture2D(uLavaDark, p2).rgb;
 
-      vec3 color = mix(base, dark, uDarkAlpha);
+      // LavaDark modulates BRIGHTNESS (its own luminance, multiplied in)
+      // rather than being straight colour-mixed on top — Luke: "the sheet
+      // under it is a bit too visibly exactly what it is: another image
+      // moving in a different direction." A colour mix shows two distinct
+      // crack networks in two distinct colours at once, which is exactly
+      // what gives it away as two photos. Multiplying by luminance only
+      // shows up as patchy darkening — it reads as shadow on the base layer,
+      // not as a second image peeking through.
+      float darkLum = dot(dark, vec3(0.299, 0.587, 0.114));
+      vec3 color = base * mix(1.0, darkLum, uDarkAlpha);
+
+      // Cheap fake relief: no geometry, no lighting, just brightening "peaks"
+      // and darkening "troughs" of an independent height-like field, plus a
+      // slight warm push at the highest points (hotter lava reads brighter
+      // AND more yellow, not just brighter).
+      float h = heightField(vWorldXZ, uTime);
+      color *= 1.0 + h * uRelief;
+      color += vec3(0.25, 0.12, 0.0) * smoothstep(0.5, 1.0, h) * uRelief;
+
       gl_FragColor = vec4(color, 1.0);
       #include <colorspace_fragment>
     }
@@ -464,7 +507,10 @@ export function mountLavaCavern(container, options = {}) {
   // units) and drift in different directions — see the long comment above.
   const LAVA_SCALE_1 = 1 / 50;
   const LAVA_SCALE_2 = 1 / 33;
-  const LAVA_SPEED_1 = new THREE.Vector2(0.6, 0.35);
+  // LAVA_SPEED_1 was (0.6, 0.35) — Luke, 2026-09-11: "the main lava (lava1)
+  // is moving a bit too fast and needs to slow down to maybe 30% what it is
+  // now." Only the base layer was too fast; LavaDark's own speed is untouched.
+  const LAVA_SPEED_1 = new THREE.Vector2(0.6, 0.35).multiplyScalar(0.3);
   const LAVA_SPEED_2 = new THREE.Vector2(-0.4, 0.5);
 
   const lavaMat = new THREE.ShaderMaterial({
@@ -473,6 +519,7 @@ export function mountLavaCavern(container, options = {}) {
       uLavaDark: { value: null },
       uTime: { value: 0 },
       uDarkAlpha: { value: TUNE.lavaDarkAlpha },
+      uRelief: { value: TUNE.lavaRelief },
       uScale1: { value: LAVA_SCALE_1 },
       uScale2: { value: LAVA_SCALE_2 },
       uSpeed1: { value: LAVA_SPEED_1.clone() },
@@ -499,6 +546,363 @@ export function mountLavaCavern(container, options = {}) {
   lavaDisc.rotation.x = -Math.PI / 2;
   lavaDisc.position.y = 0.5;
   scene.add(lavaDisc);
+
+  // ---------------------------------------------------------------- lava rocks
+  //
+  // Luke, 2026-09-11: chunky rocks drifting in the current, mostly submerged,
+  // to break up the lava's flat repetition — two Blender meshes, randomized
+  // per instance (rotation, scale, how much pokes above the surface) so the
+  // same two source rocks don't read as obviously repeated. Unlit first, per
+  // house style.
+  //
+  // "Moving with the lava" means literally drifting in the same world-space
+  // direction the visible texture crawl uses (LAVA_SPEED_1's own direction,
+  // before its 0.3 slowdown) — that's the current a viewer's eye is actually
+  // tracking, so matching it is what sells "carried along" even though the
+  // lava itself is UV-scrolling, not a real fluid sim.
+  //
+  // Submersion is free, not a shader trick: the lava disc is a flat, opaque
+  // surface at a fixed Y, so anything placed with part of its geometry below
+  // that Y is simply occluded by the disc's own depth — no intersection
+  // shader, no stencil. Luke's "never more than 50% above" cap is enforced
+  // by clamping how far above LAVA_SURFACE_Y a rock's centre is allowed to
+  // sit, in terms of its own height.
+  //
+  // Spawn point is chosen just past the camera's current field of view, on
+  // whichever edge the current flows FROM relative to however the camera
+  // happens to be facing right now (a dot product of the flow direction
+  // against the camera's own right vector) — so a rock reliably drifts INTO
+  // view rather than a coin flip's worth of them drifting straight back
+  // offscreen the moment they appear. Recycled once far enough past the
+  // camera to be forgotten (ROCK_DESPAWN_RADIUS); visibility is never
+  // tracked frame-to-frame, only distance.
+  //
+  // Distances below are NOT fixed world units — the camera sits on the ring,
+  // roughly ringHeightFrac × domeHeight (plus camHeight) ABOVE the lava, i.e.
+  // ~150 units up in the default layout. A rock 16-32 units from the
+  // camera's XZ position at that height is essentially underfoot: no amount
+  // of the ±20° look-down range brings underfoot into the frustum, since
+  // that would need looking closer to straight down. So every spawn/despawn
+  // distance is instead a MULTIPLE of the camera's actual current height
+  // above the lava — geometrically, ground distance to a point at the
+  // bottom edge of view is roughly (camera height) / tan(angle below
+  // level), so a distance of a few times that height reliably lands within
+  // the lower portion of the frustum, matching Luke's own observation that
+  // the lava is "easily seen... even without looking down, in the default
+  // forward view" (the bottom half of the 52° vertical FOV already looks
+  // ~26° below level without any drag at all).
+  // Apparent size, not position, turned out to be the real blocker: at the
+  // ~150-500-unit distances this camera actually sees the lava from, a
+  // human-scale "chunk of rock" (2-3 units, comparable to the player figure)
+  // subtends only ~10-25px even at max lavaRockScale — invisible in
+  // practice, confirmed directly (cranking the scale slider to its 2.5 max
+  // produced no visible change; a cluster of 14 default-size rocks bunched
+  // into a ~13-unit-wide mass WAS clearly visible). So the base size is
+  // deliberately much larger than "a rock beside the player" would suggest —
+  // it's sized to read at the distance it's actually seen from, the same
+  // reasoning the whole cavern's own scale already follows (islands, dome).
+  const ROCK_BASE_HEIGHT = 24; // total height at lavaRockScale = 1, before individual variance — see note above: only the ~25-50% poking above the surface is ever actually visible, so this needs to be big enough that even that exposed sliver registers from ~150-300 units out
+  const ROCK_ROT_SPEED = 0.1; // rad/s, locked in by Luke — was a slider, now a constant
+  const LAVA_SURFACE_Y = 0.5; // matches lavaDisc.position.y above
+
+  // Luke, reviewing the first pass, caught what tying spawn/despawn to the
+  // CAMERA's own instantaneous view direction actually did: every rock
+  // spawned relative to wherever the camera happened to be looking at that
+  // moment, so all 14 landed in one tight bunch, in a narrow band, moving
+  // against the visible flow, and popping in already inside the frustum
+  // instead of drifting in from outside it. Every one of those is a
+  // symptom of the same mistake — the fix is to stop referencing the camera
+  // at all and use a flow field fixed to the WORLD instead, per his own
+  // diagram: a generation line spanning the cavern's full width, sitting
+  // just outside the dome on the upstream side, with rocks drifting
+  // straight across to a matching exit line on the downstream side.
+  //
+  // Direction was ALSO backwards: uSpeed1 in the lava shader is a texture
+  // SAMPLE offset, not a world-motion vector — increasing it moves which
+  // part of the image gets sampled, which makes the visible pattern crawl
+  // the OPPOSITE way (the classic UV-scroll sign flip). The rocks were
+  // using that raw vector unnegated, so they visibly fought the current
+  // instead of riding it.
+  const ROCK_FLOW_LEN = Math.hypot(0.6, 0.35);
+  const ROCK_FLOW_DIR = { x: -0.6 / ROCK_FLOW_LEN, z: -0.35 / ROCK_FLOW_LEN }; // negated — see note above
+  const ROCK_PERP_DIR = { x: -ROCK_FLOW_DIR.z, z: ROCK_FLOW_DIR.x }; // 90° from the flow, spans the generation/exit lines
+  // Matches the lava texture's own apparent world-space crawl speed at
+  // lavaSpeed = 1 (|LAVA_SPEED_1| is a UV-space rate; dividing by the tile
+  // frequency LAVA_SCALE_1 converts it back to world units/sec), so the
+  // rocks visibly ride the same current the shader is already drawing.
+  const ROCK_SPEED = ROCK_FLOW_LEN * 0.3 / LAVA_SCALE_1;
+  // Luke: "Genuine variation in speed and heading would also be good."
+  // Fixed per rock at spawn (not re-rolled), so a given rock holds its own
+  // course rather than wobbling. This is also what makes the collision
+  // response below meaningful — two rocks on the exact same heading at the
+  // exact same speed can never converge no matter how they bounce, since
+  // there's nothing to converge WITH; real variance is what lets rocks
+  // actually approach, and occasionally need to be pushed apart.
+  const ROCK_HEADING_JITTER = THREE.MathUtils.degToRad(15); // ± this much
+  const ROCK_SPEED_JITTER = 0.2; // ± this fraction of ROCK_SPEED
+  const ROCK_BOUNCE_RESTITUTION = 0.5; // 1 = perfectly elastic; lower = a softer, more damped "lightly bounce away"
+
+  // Luke, after seeing this live: "there are no rocks, then there are a
+  // bunch of rocks, and no new ones form until the old ones are gone."
+  // Cause: the original 14 rocks were ALL created together in one
+  // synchronous loop at spawn (initRocks), all moving at the exact same
+  // fixed velocity — meaning their downstream position was identical at
+  // every instant thereafter, so they crossed the despawn line in the same
+  // single frame, forever, every ~60s cycle (2.1Γ—domeRadius Γ· ROCK_SPEED).
+  // A permanently synchronized wave, not a bug that fades with time.
+  //
+  // Fixed per Luke's own suggestion: instead of one bloc that respawns as a
+  // bloc, split the generation line into fixed ZONE_COUNT slices; each one
+  // independently rolls a SPAWN_CHANCE die every SPAWN_TICK_SECONDS. Spawns
+  // land at a random real time, spread across zones, so the population
+  // never resynchronizes — new rocks trickle in continuously instead of
+  // arriving in a wave. Pool is sized a bit above the expected steady-state
+  // concurrent count (zones Γ— chance Γ· tick Γ— lifetime Χ‰ 12) for headroom;
+  // idle slots cost nothing (Object3D.visible = false skips them entirely
+  // at render time).
+  const ZONE_COUNT = 10;
+  const SPAWN_TICK_SECONDS = 5;
+  const SPAWN_CHANCE = 0.1;
+  const POOL_SIZE = 24;
+  // Luke also asked about collision/repulsion so rocks don't sit inside one
+  // another. Full physics (checking every rock against every other every
+  // frame, applying a bounce impulse, tumbling on impact) is unnecessary
+  // FOR THIS DESIGN specifically: every active rock shares the exact same
+  // velocity (one uniform current, no per-rock speed/direction variance),
+  // so two rocks that don't already overlap can never converge — their
+  // separation is constant for the rest of their lifetime. That reduces
+  // "no overlaps, ever" to "no overlaps AT SPAWN", which this distance
+  // check against every currently-active rock handles for a few hundred
+  // bytes of cost (rocks.length comparisons, at most POOL_SIZE Χ‰ 24 β€” not a
+  // performance concern at this scale). If per-rock speed/direction
+  // variance is ever wanted, that reasoning stops holding and real ongoing
+  // collision response would be worth doing properly at that point — noted
+  // here rather than half-built now.
+  const ROCK_MIN_SEPARATION = 40;
+
+  const rockTemplates = [];
+  const rocksGroup = new THREE.Group();
+  scene.add(rocksGroup);
+  const rocks = [];
+  const zoneSpan = domeRadius * 1.9; // 2 Γ— 0.95Γ—domeRadius, the valid "along" range from the original design
+  const zoneWidth = zoneSpan / ZONE_COUNT;
+  const zones = Array.from({ length: ZONE_COUNT }, (_, i) => ({
+    center: -domeRadius * 0.95 + zoneWidth * (i + 0.5),
+    // Staggered random start so the zones' own ticks don't sync with each
+    // other either — otherwise this would just move the "wave" problem
+    // from the rock pool to the zone timers.
+    timer: Math.random() * SPAWN_TICK_SECONDS,
+  }));
+
+  for (const n of [1, 2]) {
+    gltfLoader.load(`models/rock-${n}.glb`, (gltf) => {
+      gltf.scene.traverse((o) => {
+        if (!o.isMesh) return;
+        const old = o.material;
+        o.material = new THREE.MeshBasicMaterial({
+          map: old.map || null,
+          vertexColors: old.vertexColors,
+          color: old.color ? old.color.clone() : undefined,
+          fog: false,
+        });
+        old.dispose();
+      });
+      gltf.scene.updateWorldMatrix(true, true);
+      const box = new THREE.Box3().setFromObject(gltf.scene);
+      const naturalHeight = Math.max(0.001, box.max.y - box.min.y);
+      // Horizontal (footprint) radius, for the collision check below — a
+      // plain bounding-box half-extent, not the vertex-scanned measurement
+      // island loading uses (that precision matters for a flat disc butting
+      // up against a bridge anchor; a "very basic" collision radius for an
+      // irregular rock doesn't need it, and the larger of the two box
+      // dimensions errs toward too much separation rather than too little).
+      const naturalRadiusXZ = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2;
+      rockTemplates.push({
+        scene: gltf.scene,
+        scale: ROCK_BASE_HEIGHT / naturalHeight,
+        centerYLocal: (box.max.y + box.min.y) / 2,
+        radiusXZ: naturalRadiusXZ,
+      });
+    });
+  }
+
+  /**
+   * Activates one currently-idle pool slot at a given cross-flow position
+   * (`along`) on the upstream generation line — a straight line
+   * perpendicular to the flow, spanning the dome's full width, sitting just
+   * outside the dome's radius so nothing ever pops into existence inside
+   * the visible cavern. `along` stays fixed for the rock's whole crossing;
+   * only the downstream coordinate advances, in updateRocks.
+   */
+  function spawnRockAt(r, along) {
+    const tpl = rockTemplates[Math.floor(Math.random() * rockTemplates.length)];
+    if (r.inner) r.obj.remove(r.inner);
+    r.inner = tpl.scene.clone(true);
+    r.obj.add(r.inner);
+    r.tpl = tpl;
+    r.individualScaleFactor = 0.65 + Math.random() * 0.85;
+    r.individualAboveJitter = (Math.random() - 0.5) * 0.3;
+    r.rotates = Math.random() < 0.5; // "only for those rocks that DO rotate"
+    r.rotSign = Math.random() < 0.5 ? -1 : 1;
+    r.rotJitter = 0.6 + Math.random() * 0.8;
+    r.obj.rotation.y = Math.random() * Math.PI * 2;
+
+    // Own heading (± ROCK_HEADING_JITTER off the base current) and own
+    // speed (± ROCK_SPEED_JITTER), fixed for this crossing — stored as an
+    // actual velocity (not regenerated from TUNE.lavaSpeed each frame)
+    // because the collision response below needs a real, mutable velocity
+    // to push on. Practical effect: dragging the lava-speed slider changes
+    // the speed of rocks spawned FROM THEN ON, not ones already in flight —
+    // a fair trade for velocity that collisions can actually act on.
+    const heading = (Math.random() * 2 - 1) * ROCK_HEADING_JITTER;
+    const cosH = Math.cos(heading);
+    const sinH = Math.sin(heading);
+    const dirX = ROCK_FLOW_DIR.x * cosH - ROCK_FLOW_DIR.z * sinH;
+    const dirZ = ROCK_FLOW_DIR.x * sinH + ROCK_FLOW_DIR.z * cosH;
+    const speed = ROCK_SPEED * TUNE.lavaSpeed * (1 + (Math.random() * 2 - 1) * ROCK_SPEED_JITTER);
+    r.vx = dirX * speed;
+    r.vz = dirZ * speed;
+
+    const upstream = -domeRadius * 1.05;
+    r.obj.position.x = ROCK_FLOW_DIR.x * upstream + ROCK_PERP_DIR.x * along;
+    r.obj.position.z = ROCK_FLOW_DIR.z * upstream + ROCK_PERP_DIR.z * along;
+    r.active = true;
+    r.obj.visible = true;
+  }
+
+  function despawnRock(r) {
+    r.active = false;
+    r.obj.visible = false;
+  }
+
+  /** True if (x, z) is close enough to any currently-active rock to overlap it — the spawn-time half of "don't collide"; see the ROCK_MIN_SEPARATION comment above for why that's sufficient here. */
+  function tooCloseToActiveRock(x, z) {
+    for (const r of rocks) {
+      if (!r.active) continue;
+      const dx = r.obj.position.x - x;
+      const dz = r.obj.position.z - z;
+      if (dx * dx + dz * dz < ROCK_MIN_SEPARATION * ROCK_MIN_SEPARATION) return true;
+    }
+    return false;
+  }
+
+  function initRocks() {
+    if (!rockTemplates.length || rocks.length) return;
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const r = {
+        obj: new THREE.Group(),
+        inner: null,
+        tpl: null,
+        active: false,
+        individualScaleFactor: 1,
+        individualAboveJitter: 0,
+        rotates: false,
+        rotSign: 1,
+        rotJitter: 1,
+        vx: 0,
+        vz: 0,
+      };
+      r.obj.visible = false;
+      rocksGroup.add(r.obj);
+      rocks.push(r);
+    }
+  }
+
+  /** Global sliders (height %, scale) are read live here, not baked in at spawn — dragging one moves every rock already in view, not just the next batch. */
+  function updateRocks(dt) {
+    // Independent per-zone dice roll, spread over real time — see the long
+    // comment above ROCK_MIN_SEPARATION for why this replaced one big pool
+    // that all spawned (and later all despawned) in the same instant.
+    for (const zone of zones) {
+      zone.timer -= dt;
+      if (zone.timer > 0) continue;
+      zone.timer += SPAWN_TICK_SECONDS;
+      if (Math.random() >= SPAWN_CHANCE) continue;
+      const along = zone.center + (Math.random() - 0.5) * zoneWidth * 0.8;
+      const upstream = -domeRadius * 1.05;
+      const x = ROCK_FLOW_DIR.x * upstream + ROCK_PERP_DIR.x * along;
+      const z = ROCK_FLOW_DIR.z * upstream + ROCK_PERP_DIR.z * along;
+      if (tooCloseToActiveRock(x, z)) continue; // try again next tick rather than overlap
+      const slot = rocks.find((r) => !r.active);
+      if (slot) spawnRockAt(slot, along);
+    }
+
+    for (const r of rocks) {
+      if (!r.active) continue;
+      r.obj.position.x += r.vx * dt;
+      r.obj.position.z += r.vz * dt;
+
+      // Downstream coordinate along the BASE flow axis (not this rock's own
+      // slightly-off heading) — recycled once past the exit line on the far
+      // side, symmetric with the entry line above. ±15° off true doesn't
+      // meaningfully change when a rock has "obviously crossed".
+      const downstream = r.obj.position.x * ROCK_FLOW_DIR.x + r.obj.position.z * ROCK_FLOW_DIR.z;
+      if (downstream > domeRadius * 1.05) {
+        despawnRock(r);
+        continue;
+      }
+
+      if (r.rotates) r.obj.rotation.y += r.rotSign * ROCK_ROT_SPEED * r.rotJitter * dt;
+
+      const scaleFactor = r.tpl.scale * TUNE.lavaRockScale * r.individualScaleFactor;
+      r.inner.scale.setScalar(scaleFactor);
+      r.inner.position.y = -r.tpl.centerYLocal * scaleFactor;
+      const height = ROCK_BASE_HEIGHT * TUNE.lavaRockScale * r.individualScaleFactor;
+      // Clamp is the actual enforcement of "never more than 50% above" — the
+      // slider and per-rock jitter can each push toward it, but never past.
+      const aboveFrac = THREE.MathUtils.clamp(TUNE.lavaRockHeight + r.individualAboveJitter, 0.04, 0.5);
+      r.obj.position.y = LAVA_SURFACE_Y + height * (aboveFrac - 0.5);
+      // Live-tunable footprint radius, used by the collision pass just
+      // below — recomputed every frame (not cached from spawn time) so it
+      // tracks the same lavaRockScale slider the visual scale above does.
+      r.footprint = r.tpl.radiusXZ * scaleFactor;
+    }
+
+    // Luke: "how difficult would it be to implement some very basic
+    // collision/repulsion... if the rocks 'hit' each other, they lightly
+    // bounce away?" Plain circle-circle collision, checked against every
+    // OTHER active rock — O(nΒ²), but n is at most POOL_SIZE (24), so a few
+    // hundred distance checks a frame at absolute worst. Not a real cost at
+    // this scale, which is exactly why the general answer to "is collision
+    // detection expensive" doesn't apply here: it only gets expensive with
+    // hundreds+ of bodies, and this cavern will never have that many rocks
+    // on screen without a much bigger design change elsewhere first.
+    const active = rocks.filter((r) => r.active);
+    for (let i = 0; i < active.length; i++) {
+      for (let j = i + 1; j < active.length; j++) {
+        const a = active[i];
+        const b = active[j];
+        const dx = b.obj.position.x - a.obj.position.x;
+        const dz = b.obj.position.z - a.obj.position.z;
+        const dist = Math.hypot(dx, dz);
+        const minDist = a.footprint + b.footprint;
+        if (dist >= minDist || dist < 1e-4) continue;
+        const nx = dx / dist;
+        const nz = dz / dist;
+        // Push the overlap out first — without this, a slow-closing pair
+        // can sit interpenetrating for several frames before the velocity
+        // response alone separates them.
+        const overlap = minDist - dist;
+        a.obj.position.x -= nx * overlap * 0.5;
+        a.obj.position.z -= nz * overlap * 0.5;
+        b.obj.position.x += nx * overlap * 0.5;
+        b.obj.position.z += nz * overlap * 0.5;
+        // Then a damped bounce — only if they're actually closing (skips
+        // pairs already separating from an earlier hit this same frame).
+        // Restitution < 1 means each collision only ever removes kinetic
+        // energy from the pair, so there's no risk of it compounding into
+        // runaway speed over repeated hits.
+        const closingSpeed = -((b.vx - a.vx) * nx + (b.vz - a.vz) * nz);
+        if (closingSpeed > 0) {
+          const bounce = closingSpeed * ROCK_BOUNCE_RESTITUTION * 0.5;
+          a.vx -= nx * bounce;
+          a.vz -= nz * bounce;
+          b.vx += nx * bounce;
+          b.vz += nz * bounce;
+        }
+      }
+    }
+  }
 
   // ---------------------------------------------------------------- the world
   //
@@ -1031,6 +1435,7 @@ export function mountLavaCavern(container, options = {}) {
 
       lavaMat.uniforms.uTime.value = t;
       lavaMat.uniforms.uDarkAlpha.value = TUNE.lavaDarkAlpha;
+      lavaMat.uniforms.uRelief.value = TUNE.lavaRelief;
       lavaMat.uniforms.uScale1.value = LAVA_SCALE_1 * TUNE.lavaScale;
       lavaMat.uniforms.uScale2.value = LAVA_SCALE_2 * TUNE.lavaScale;
       lavaMat.uniforms.uSpeed1.value.copy(LAVA_SPEED_1).multiplyScalar(TUNE.lavaSpeed);
@@ -1070,6 +1475,15 @@ export function mountLavaCavern(container, options = {}) {
           camera.position.z + aim.z
         );
       }
+      // Rocks now drift along a world-fixed flow field, not anything
+      // camera-relative, so this no longer needs to run after the camera
+      // update for correctness — kept alongside it anyway since that's
+      // where the rest of the per-frame world state gets advanced.
+      // initRocks() lives here (not in manager.onLoad) so the initial batch
+      // spawns on the very first real tick rather than synchronously inside
+      // the load callback, matching the pattern the rest of this file uses.
+      initRocks();
+      updateRocks(dt);
       // After the camera, so the cards billboard against this frame's view
       // rather than the previous one's.
       renderActors();
@@ -1133,6 +1547,9 @@ export function mountLavaCavern(container, options = {}) {
       'lava dark %': slider('lavaDarkAlpha', 0, 1, 0.02),
       'lava speed': slider('lavaSpeed', 0, 3, 0.05),
       'lava scale': slider('lavaScale', 0.3, 3, 0.05),
+      'lava relief': slider('lavaRelief', 0, 1, 0.02),
+      'lava rock height %': slider('lavaRockHeight', 0.05, 0.5, 0.01),
+      'lava rock scale': slider('lavaRockScale', 0.3, 2.5, 0.05),
     },
     actions: [
       { label: 'rebuild (apply spacing/count)', onClick: () => buildWorld() },
@@ -1167,6 +1584,77 @@ export function mountLavaCavern(container, options = {}) {
         : null,
       tune: { ...TUNE },
     });
+    // The lava is a raw ShaderMaterial, so nothing about it shows up in the
+    // stats readout — and a shader that silently fails to compile looks
+    // exactly like a shader that renders black. Exposed so its uniforms (and
+    // whether its textures actually arrived) can be read from the console.
+    window.__cavernLava = () => lavaMat;
+    window.__cavernCam = () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z });
+    // Teleports every rock to a fan of positions near the camera's own (x,
+    // z) — for visually checking silhouette/submersion/material without
+    // waiting real minutes for the drift to carry one into view. Debug-only;
+    // ordinary flow-field motion resumes on the very next frame regardless
+    // (there's no separate "placed" state to undo), so they'll just drift
+    // off from wherever this puts them.
+    window.__cavernPlaceRocks = () => {
+      // Offset well out along the camera's OWN facing first — placing these
+      // at the camera's bare (x, z) puts them almost directly underfoot,
+      // which (same geometry as everywhere else in this file) is far
+      // steeper than any achievable look-down angle can actually reach.
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      const cx = camera.position.x + dir.x * 220;
+      const cz = camera.position.z + dir.z * 220;
+      const n = Math.min(14, rocks.length);
+      for (let i = 0; i < n; i++) {
+        const r = rocks[i];
+        if (!r.active) spawnRockAt(r, 0); // pulls an idle slot in with real geometry/material, position overridden right below
+        const col = i % 4;
+        const row = Math.floor(i / 4);
+        r.obj.position.x = cx + ROCK_PERP_DIR.x * (col - 1.5) * 14 + ROCK_FLOW_DIR.x * row * 16;
+        r.obj.position.z = cz + ROCK_PERP_DIR.z * (col - 1.5) * 14 + ROCK_FLOW_DIR.z * row * 16;
+      }
+      return { count: n, cx, cz };
+    };
+    window.__cavernRocksVisible = () => {
+      const cam = camera.position;
+      return rocks
+        .filter((r) => r.active)
+        .map((r) => {
+          const p = r.obj.position.clone().project(camera);
+          const dx = r.obj.position.x - cam.x;
+          const dz = r.obj.position.z - cam.z;
+          return {
+            dist: Math.hypot(dx, dz),
+            ndc: { x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2) },
+            inFrustum: p.z > -1 && p.z < 1 && Math.abs(p.x) < 1 && Math.abs(p.y) < 1,
+          };
+        });
+    };
+    window.__cavernRocks = () => {
+      const active = rocks.filter((r) => r.active);
+      return {
+        templates: rockTemplates.map((t) => {
+          let tris = 0;
+          t.scene.traverse((o) => {
+            if (o.isMesh) tris += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3;
+          });
+          return { tris, scale: t.scale };
+        }),
+        poolSize: rocks.length,
+        active: active.length,
+        sample: active[0]
+          ? { x: active[0].obj.position.x, y: active[0].obj.position.y, z: active[0].obj.position.z }
+          : null,
+        all: active.map((r) => ({
+          x: +r.obj.position.x.toFixed(2),
+          z: +r.obj.position.z.toFixed(2),
+          vx: +r.vx.toFixed(2),
+          vz: +r.vz.toFixed(2),
+          footprint: +(r.footprint ?? 0).toFixed(2),
+        })),
+      };
+    };
     window.__cavernWalk = (on = true) => {
       holdingForward = on;
     };
@@ -1237,6 +1725,7 @@ export function mountLavaCavern(container, options = {}) {
       }
       actors.length = 0;
       fallIconTexture.dispose();
+      scene.remove(rocksGroup);
       lavaDisc.geometry.dispose();
       lavaMat.uniforms.uLava1.value?.dispose();
       lavaMat.uniforms.uLavaDark.value?.dispose();
