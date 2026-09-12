@@ -5,11 +5,13 @@
  * together (see useLobby.js's `round-ended` broadcast handler), not just
  * whoever's Sky Path instance happened to finish first.
  *
- * "Play again" is literally `lobby.startSkyPath` — the same call the lobby's
- * own "Start Sky Path" button makes. Guide rotation means it produces a
- * different guide automatically; no separate "next round" logic exists.
+ * No more "Play again" button — Luke, 2026-09-11: the teacher starts every
+ * round now, including the next one, from their own dashboard. The same
+ * "Start game" action there re-broadcasts a fresh `game-started` for every
+ * group regardless of what phase each one is currently in, so there's no
+ * separate "next round" code path to wire up here; a device just waits.
  */
-export default function RoundResults({ round, participants, myToken, onPlayAgain, onBackToLobby }) {
+export default function RoundResults({ round, participants, myToken, onBackToLobby }) {
   const { result, role, guideToken } = round;
   const guideName = participants.find((p) => p.token === guideToken)?.displayName ?? 'someone';
   const wasGuide = guideToken === myToken;
@@ -31,8 +33,9 @@ export default function RoundResults({ round, participants, myToken, onPlayAgain
         {wasGuide ? ' (you)' : ''} — you were {role === 'guide' ? 'the guide' : 'a player'}.
       </p>
 
+      <p style={{ fontWeight: 'bold' }}>Waiting for your teacher to start the next round…</p>
+
       <p>
-        <button onClick={onPlayAgain}>Play again</button>{' '}
         <button onClick={onBackToLobby}>Back to lobby</button>
       </p>
     </div>

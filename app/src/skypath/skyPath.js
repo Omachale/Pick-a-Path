@@ -50,6 +50,12 @@ await RAPIER.init();
  * @param {HTMLElement} container  sized by its own CSS; the canvas fills it
  * @param {object} options
  * @param {string|null} options.forks       'LRLLRR' — one L/R per fork; null = random
+ * @param {Array<{left: string, right: string}>|null} options.words  one word
+ *   pair per fork, already decided (by whoever started the round for the
+ *   whole group — see TeacherDashboard.jsx's startGame()) so every device in
+ *   the group shows the same words in the same left/right layout; null =
+ *   pick locally at random (the `?solo=1` dev path, where there's no group
+ *   to agree with).
  * @param {'guide'|'player'} options.role   which layer of information to show
  * @param {boolean} options.canAct          whether this device shows the fork buttons
  * @param {(forkIndex: number, side: 'left'|'right') => void} options.onForkChoice
@@ -59,12 +65,57 @@ await RAPIER.init();
 export function mountSkyPath(container, options = {}) {
   const {
     forks: forksOverride = null,
+    words: wordsOverride = null,
     role: initialRole = 'guide',
-    canAct = true,
+    canAct: initialCanAct = true,
     onForkChoice = null,
     onRoundEnd = null,
     crowd = 0,
+    // Overrides the character-select screen's own free-text name input —
+    // Luke, on team play: a player's displayed name is whatever they typed
+    // into the LOBBY to join, not a second name typed again here. Left
+    // undefined for solo/dev play, where that input is still the only
+    // source of a name.
+    displayName = null,
+    // Fired whenever this device's OWN resting position (which fork it's
+    // standing at, having arrived and stopped) or look changes — the host
+    // (GameRoom.jsx) relays this over the room channel so teammates' own
+    // instances can call updateTeammate() below and show a real avatar
+    // standing at the right island, not a placeholder. See the long design
+    // note above updateTeammate() for why this fires on ARRIVAL, not
+    // continuously while walking.
+    onPlayerState = null,
+    // Watch mode only (see App.jsx/RoundResults.jsx) — a fallen player's
+    // Watch mode mounts a BRAND NEW SkyPath instance, whose guide-camera
+    // state (see `guideIsland` below) would otherwise always start over at
+    // fork 1 with no memory of how far the round had actually progressed.
+    // Luke, 2026-09-13: "the dead player not following... their camera
+    // appears to snap back to the FIRST island (now empty)" — that's
+    // exactly this: not a bug in the tracking logic itself, but a fresh
+    // instance genuinely starting from scratch. Seeded from the fallen
+    // player's OWN last-known fork (`round.result.forkIndex` — the fork
+    // they were AT when their own round ended) — the best available
+    // starting point without a full roster/state broadcast (see the
+    // guide's own already-documented "late arrival" gap elsewhere in this
+    // file, which applies equally here): nobody else in the group can be
+    // BEHIND this fork, since fork progress only ever moves forward.
+    initialGuideIsland = null,
   } = options;
+  // Declared here, not down near soloRoleToggle where it originally lived —
+  // setCharacter() (called during initial setup, long before that point)
+  // now reads `role` too (see figure.visible there), so it has to exist
+  // before anything else in this closure runs.
+  let role = initialRole;
+  // Mutable for the same reason `role` is — see becomeSpectator() further
+  // down, which flips both in place without a remount.
+  let canAct = initialCanAct;
+  // 'watching' (added 2026-09-12 for Watch mode) shares the guide's camera
+  // and has no avatar either — see the "guide camera" section further down
+  // for the state machine both roles ride, and RoundResults/App.jsx for how
+  // a fallen player ends up in this role instead of the plain results
+  // screen. Kept as one helper rather than repeating the `=== 'guide' ||
+  // === 'watching'` check at every call site.
+  const isSpectatorRole = (r) => r === 'guide' || r === 'watching';
 
   container.classList.add('skypath-surface');
   container.innerHTML = SKY_PATH_CHROME;
@@ -2647,7 +2698,19 @@ export function mountSkyPath(container, options = {}) {
     // words. See assignForkWords() in wordPairs.js for the actual selection
     // rules (no repeats within a round while pairs allow it; left/right order
     // independent of CORRECT_BY_FORK below).
-    roundWords = assignForkWords(wordPairs, N_FORKS);
+    //
+    // wordsOverride takes priority when given — Luke, after a multiplayer
+    // test: "the words the guide sees are different from the words the
+    // players in their teams [see]." Root cause: every device was calling
+    // assignForkWords() independently, so each one drew its own random
+    // pair AND its own random left/right layout — nothing about the words
+    // shown was ever actually shared, only which SIDE (not word) was
+    // correct (forksOverride/CORRECT_BY_FORK above). Whoever starts the
+    // round for the whole group now decides the words once (see
+    // TeacherDashboard.jsx's startGame()) and broadcasts them alongside
+    // forks, so every device in the group renders the identical array here
+    // instead of drawing its own.
+    roundWords = wordsOverride ?? assignForkWords(wordPairs, N_FORKS);
     const origin = { x: 0, z: 0, heading: 0 };
     registerIsland(origin);
     journeyCursor = origin;
@@ -2662,6 +2725,12 @@ export function mountSkyPath(container, options = {}) {
       journeyCursor = { x: sec.nextCursor.x, z: sec.nextCursor.z, heading: sec.nextCursor.heading };
     }
     buildFinalApproach(sections[N_FORKS - 1]);
+    // `sections` was just rebuilt from scratch — any teammate rig positioned
+    // against the OLD array (from a previous round on this device) needs
+    // re-anchoring against the new one, even though its own forkIndex value
+    // hasn't changed. repositionAllTeammates is declared further down (see
+    // "teammates" section) but hoists — same scope, this is safe.
+    repositionAllTeammates();
   }
 
   // The avatar is a rig of two stacked planes — the character art in front,
@@ -2676,15 +2745,21 @@ export function mountSkyPath(container, options = {}) {
   const FIGURE_H = 2.2 * 0.8 * FIGURE_SCALE;
   const FIGURE_ASPECT = 400 / 563;
 
-  // Name tag: sized off the figure's own width/height rather than a fixed
-  // constant, so it scales correctly if FIGURE_H/FIGURE_SCALE ever change.
-  // "Slightly wider than the card" (Luke, 2026-08-30) — 15% wider, a
-  // starting value, easy to retune here if it reads too wide or too tight
-  // once it's actually next to a figure in the game. Bumped 50% larger
-  // still (1.15 -> 1.725) 2026-08-30 while testing whether alternating
-  // tags above/below (see TEST_TAGS below) solves overlap between
-  // closely-spaced players at this bigger size.
-  const NAME_TAG_WIDTH_FACTOR = 1.725;
+  // Name tag: was sized off a fixed WIDTH (the figure's own width times
+  // NAME_TAG_WIDTH_FACTOR), which — Luke, 2026-09-12, after seeing several
+  // real names alternating on an island — reads "much too big" and blows up
+  // badly for short names. Cause is the exact bug WORD_SIGN_HEIGHT below was
+  // already written to avoid: buildNameTagCanvas keeps letters a fixed pixel
+  // height regardless of word length, so its aspect (height/width) grows for
+  // short words — forcing a short name like "Kahu" to the SAME WIDTH as a
+  // long one then inflates its height to match, ballooning it well past
+  // every other tag on screen. Fixed the same way as the word signs: size on
+  // a fixed world HEIGHT instead, so every name's letters read the same size
+  // and only the tag's width (how much a longer name needs) varies.
+  // NAME_TAG_HEIGHT picked relative to WORD_SIGN_HEIGHT using the ratio the
+  // 2026-09-06 comment on WORD_SIGN_HEIGHT already recorded between the two
+  // ("sized 50% bigger than a name tag") — 0.9 / 1.5.
+  const NAME_TAG_HEIGHT = 0.6;
   const NAME_TAG_GAP = 0.12; // world units between the card's top edge and the tag's bottom edge
 
   /**
@@ -2737,6 +2812,12 @@ export function mountSkyPath(container, options = {}) {
       rig = makeCharacterRig(key);
       figure = rig.group;
       disposeRig(old);
+      // Luke, 2026-09-12: "the guide should not have a character card
+      // visible while they are the guide — rather, they will see the
+      // island with all the other players on it." The rig still exists
+      // (character/colour are stored regardless, in case role ever
+      // switches — see the dev role-toggle below), it's just never shown.
+      figure.visible = !isSpectatorRole(role);
     }
   }
 
@@ -3097,7 +3178,14 @@ export function mountSkyPath(container, options = {}) {
     const moving = !!leg || falling || !!abduction || !!templeEntry || !!rescue;
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
     for (const t of nameTags) {
-      if (moving && !t.alwaysVisible) {
+      // `moving` only ever reflects the LOCAL player's own state, so it says
+      // nothing about a teammate's rig — added 2026-09-12 alongside the
+      // teammate departure animation, which hides a rig directly
+      // (rig.group.visible = false) once it reaches the fog. Without this
+      // check the tag floated on screen at its last position, alone,
+      // uselessly, forever, since nothing else here ever noticed the card
+      // underneath it was gone.
+      if ((moving && !t.alwaysVisible) || !t.rig.group.visible) {
         t.el.style.display = 'none';
         continue;
       }
@@ -3171,16 +3259,24 @@ export function mountSkyPath(container, options = {}) {
       .then(({ canvas, aspect }) => {
         if (disposed || !isCurrent()) return;
         removeNameTag(targetRig); // drop any previous tag for this rig first — avoids a leaked duplicate on re-attach
-        const w = FIGURE_H * FIGURE_ASPECT;
-        const tagW = w * NAME_TAG_WIDTH_FACTOR;
-        const tagH = tagW * aspect;
-        // "below" isn't a mirror of "above": the ground is solid right at
-        // the figure's feet (world y=0), so mirroring the above-the-head
-        // math buried the old mesh version under the stone floor. Instead
-        // it hovers just above ground near the shins/knees, low enough to
-        // read as "beneath the player" without clipping into the terrain.
+        // aspect is height/width (see buildNameTagCanvas) — height is fixed
+        // (NAME_TAG_HEIGHT above), so width is derived from it, same
+        // direction as setWordSign's own w = h / aspect and for the same
+        // reason: fixing width instead let a short name's height balloon.
+        const tagH = NAME_TAG_HEIGHT;
+        const tagW = tagH / aspect;
+        // "below" used to sit just above the shins/knees (mirroring "above"
+        // would have buried the old MESH version underground — see this
+        // section's own header comment). That reasoning no longer applies:
+        // tags are a screen-space overlay now, not a mesh with real ground
+        // clipping, so there's nothing stopping it from hanging fully below
+        // the feet. Luke, 2026-09-12: the shins/knees placement still
+        // covered too much of the avatar — "put them low enough that we can
+        // see the base of the character's avatar" — so "below" is now a true
+        // mirror of "above", the same GAP clearance on the opposite side of
+        // the figure entirely, rather than partway up its own body.
         const localY = side === 'below'
-          ? -(FIGURE_H / 2) + NAME_TAG_GAP + tagH / 2
+          ? -(FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2)
           : FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2;
         canvas.style.width = '100%';
         canvas.style.height = '100%';
@@ -3196,6 +3292,563 @@ export function mountSkyPath(container, options = {}) {
       .catch((err) => console.error('[nameTag] failed to build', err));
   }
   setCharacter(ROSTER[0].key);
+
+  // ---------------------------------------------------------------- teammates
+  //
+  // Luke, 2026-09-12: "players should also see other players from their
+  // team on the same island when they are both there" — and separately,
+  // the guide needs to see everyone waiting at a fork rather than just a
+  // HUD. Each teammate is a REAL avatar (their own chosen character/colour,
+  // reusing makeCharacterRig/attachNameTag exactly as the local player's
+  // own rig does — not a placeholder marker), kept here in a map keyed by
+  // network token.
+  //
+  // A teammate's own device decides WHEN to report a change — it calls
+  // notifyPlayerState() on departure and arrival, not continuously — and
+  // the host (GameRoom.jsx) relays that one small event to everyone else's
+  // updateTeammate(), which is what actually moves the rig here. This
+  // mirrors the "let the relay be the arbiter" pattern fork-choice
+  // arbitration already uses: cheap on the network, and every device ends
+  // up drawing from the same source of truth instead of guessing at
+  // someone else's position.
+  //
+  // Two phases, not a full position stream:
+  //   'resting' — snap to sections[forkIndex - 1].fork. Used on arrival.
+  //   'departing' — Luke, 2026-09-12: "players should see other players
+  //     leaving the island, but should not see which direction they take:
+  //     they should disappear behind the wall of fog... rather than [see]
+  //     the other players' true movement, they will see a set animation of
+  //     the player moving straight forward into the wall of fog and then
+  //     disappearing." So for a PLAYER viewer, a departing teammate is
+  //     never animated along the real branch curve (sections[k].branch.
+  //     left/right) — that would show which side they picked. Instead every
+  //     departure looks identical to another player: a straight walk from
+  //     the fork along its own heading, toward where that fork's own
+  //     curtain stands (see CURTAIN_DIST/makeCurtain above), then hidden.
+  //   Luke, 2026-09-13, once the concealment above was working correctly:
+  //     the guide (and Watch mode) must see the OPPOSITE of this — "the
+  //     guide should always be able to see the full movement of any player
+  //     who is still in the game," the real thing, not the fog stand-in.
+  //     The reasoning the fog exists for a player doesn't apply to a
+  //     spectator: concealment protects someone who could still be
+  //     influenced by learning a direction early, and the guide/a watching
+  //     player can never act on a fork at all, so there's nothing left to
+  //     protect once someone starts walking.
+  //   'moving' — Luke, 2026-09-13, after the first (simulated) attempt at
+  //     the above: "the guide is still seeing a stand-in in place of the
+  //     player's actual movement... it would be good if we could see the
+  //     players progressing rather than using a stand-in," explicitly fine
+  //     with "a short delay and/or a minor displacement." So a spectator's
+  //     view of a departing teammate is now driven by this THIRD phase — a
+  //     throttled real-position ping the departing device sends repeatedly
+  //     while its own `leg` is active (see MOVING_PING_INTERVAL in tick()),
+  //     letting a spectator track the actual thing happening on that
+  //     device's screen instead of a distance/WALK_SPEED guess. A player's
+  //     own device still only ever renders the fog stand-in regardless of
+  //     these pings (see updateTeammates' own role check) — nothing changes
+  //     for a player-to-player view; only a spectator role's rendering
+  //     reads `entry.livePos` at all.
+  //
+  // Animation timing (for the fog stand-in a player sees) is each VIEWER's
+  // own clock (Date.now() at the moment their device receives the
+  // 'departing' update), not a timestamp relayed from the sender —
+  // sidesteps cross-device clock-skew entirely, at the cost of different
+  // viewers not seeing the walk frame-perfectly in sync, which doesn't
+  // matter for a cosmetic departure animation. A spectator's live-tracked
+  // view has no such clock-skew concern in the first place — it's smoothing
+  // toward positions the sender reports directly, not deriving one from
+  // elapsed time on the receiving end.
+  // Luke, 2026-09-12, after seeing the walk-to-CURTAIN_DIST-at-WALK_SPEED
+  // version live: "the player only disappears after they have clearly
+  // started to walk along one of the two bridges. It doesn't obscure their
+  // choice." That timing tied the vanish to real island geometry and real
+  // walk speed — both of which put the curtain far enough out, and the walk
+  // slow enough, that a viewer had a full couple of seconds to watch the
+  // rig converge visually toward whichever bridge's start looked nearest,
+  // reading as "walking that bridge" even though the underlying math was
+  // centred the whole time. Decoupled entirely from CURTAIN_DIST/WALK_SPEED
+  // now: a short, fixed, purely symbolic duration, tuned to feel like "gone
+  // almost immediately" rather than a real crossing.
+  const FOG_DEPART_DURATION = 1.25; // seconds — independent of world distance/walk speed, see above
+  const teammates = new Map(); // token -> { rig, characterKey, forkIndex, displayName, colorHex, phase, departStartedAt, willFall, fallStandinStartedAt, livePos, livePosAt }
+
+  function teammateWorldPos(forkIdx) {
+    const sec = sections[forkIdx - 1];
+    return sec ? sec.fork : { x: 0, z: 0, heading: 0 };
+  }
+
+  function positionTeammateRig(entry) {
+    const p = teammateWorldPos(entry.forkIndex);
+    entry.rig.group.position.set(p.x, FIGURE_H / 2, p.z);
+    entry.rig.group.rotation.set(0, p.heading ?? 0, 0);
+  }
+
+  /** Re-anchors every RESTING teammate after buildJourney() rebuilds `sections` — see the call at the end of buildJourney(). A mid-departure teammate is left alone; updateTeammates() below re-derives its position from `sections` fresh every frame anyway. */
+  function repositionAllTeammates() {
+    for (const entry of teammates.values()) {
+      if (entry.phase === 'resting') positionTeammateRig(entry);
+    }
+  }
+
+  function ensureTeammateEntry(token, tCharacterKey, tName, colorHex) {
+    let entry = teammates.get(token);
+    if (!entry || entry.characterKey !== tCharacterKey) {
+      if (entry) disposeRig(entry.rig);
+      entry = {
+        rig: makeCharacterRig(tCharacterKey ?? ROSTER[0].key),
+        characterKey: tCharacterKey ?? ROSTER[0].key,
+        forkIndex: 1,
+        displayName: tName ?? null,
+        colorHex: colorHex ?? PALETTE[0].hex,
+        phase: 'resting',
+        departStartedAt: 0,
+        fallStandinStartedAt: 0,
+        livePos: null,
+        livePosAt: 0,
+      };
+      teammates.set(token, entry);
+      if (entry.displayName) {
+        attachNameTag(entry.rig, entry.displayName, entry.colorHex, { isCurrent: () => teammates.get(token)?.rig === entry.rig });
+      }
+    } else if (tName && tName !== entry.displayName) {
+      entry.displayName = tName;
+      entry.colorHex = colorHex ?? entry.colorHex;
+      attachNameTag(entry.rig, entry.displayName, entry.colorHex, { isCurrent: () => teammates.get(token)?.rig === entry.rig });
+    }
+    return entry;
+  }
+
+  function updateTeammate(token, { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, willFall, livePos }) {
+    if (token == null || tForkIndex == null) return;
+    const entry = ensureTeammateEntry(token, tCharacterKey, tName, colorHex);
+    if (tPhase === 'moving') {
+      // A throttled real-position ping mid-crossing — see MOVING_PING_INTERVAL.
+      // Only applied while this entry is actually departing from the SAME
+      // fork the ping claims: guards against a stale/out-of-order message
+      // (this entry object is reused across the whole game as the same
+      // token progresses) ever repositioning something it no longer
+      // describes. Doesn't touch `phase`/`departStartedAt`/anything else —
+      // purely a position overlay for updateTeammates' spectator branch.
+      if (entry.phase === 'departing' && entry.forkIndex === tForkIndex && livePos) {
+        entry.livePos = livePos;
+        entry.livePosAt = Date.now();
+      }
+      return;
+    }
+    if (tPhase === 'departing') {
+      entry.phase = 'departing';
+      entry.forkIndex = tForkIndex; // the fork being LEFT — updateTeammates() walks away from here
+      entry.departStartedAt = Date.now();
+      entry.willFall = !!willFall; // spectator-only stand-in — see updateTeammates()
+      entry.fallStandinStartedAt = 0;
+      entry.livePos = null; // clear any stale ping from a PREVIOUS departure
+      entry.livePosAt = 0;
+      entry.rig.group.visible = true;
+      // Keyed by the fork being LEFT, not a single shared variable — see the
+      // "guide camera" section's own comment on guideLastDepartedTokenByFork
+      // for why a global "whoever departed most recently, anywhere" broke
+      // with two real people actually playing at their own pace.
+      guideLastDepartedTokenByFork.set(tForkIndex, token);
+    } else {
+      entry.phase = 'resting';
+      entry.forkIndex = tForkIndex;
+      entry.rig.group.visible = true;
+      positionTeammateRig(entry);
+    }
+  }
+
+  // ---------------------------------------------------------------- island layout
+  //
+  // Luke, 2026-09-12: "it's getting quite confusing... with the cards
+  // overlapping... we did this before and it should already be in the
+  // code/plan somewhere." It was — the `?testTags=1` harness above
+  // (spawnTestCompanions) prototyped exactly this arrangement (self dead
+  // centre, others alternating sides, tags alternating above/below) as a
+  // static, hand-placed test for tag overlap, months before there was a
+  // real teammate to place. This generalises that same arrangement to
+  // however many teammates are ACTUALLY resting on a given island, rather
+  // than a fixed 5-slot layout.
+  //
+  // The local player's own figure never moves — "each player should see
+  // themselves in the centre" is already true by construction (nobody's
+  // own position has ever been touched by any of this), so only OTHER
+  // occupants get spread apart. Tag side is still assigned to the local
+  // player too, though, by including a `null`-item centre slot in the same
+  // sort — its side just gets applied to the local rig's own tag (see
+  // `self` below) rather than to a moved rig.
+  const ISLAND_SPACING_X = FIGURE_H * FIGURE_ASPECT * 1.5; // same spacing spawnTestCompanions used
+  const ISLAND_TAG_STAGGER_Y = FIGURE_H * 0.15;
+
+  /**
+   * `others` — everyone ELSE resting on the island, in a stable order (so
+   * the arrangement doesn't visibly reshuffle frame to frame as a Map
+   * iterates). Alternates sides outward from centre (right, left, right,
+   * left...) at increasing distance, matching the old test slots' -2/-1/
+   * +1/+2 pattern generalised to any count. `includeSelfAtCenter` adds one
+   * more slot at offsetX 0 purely so the ABOVE/BELOW alternation (assigned
+   * by final on-screen left-to-right order, not arrival order) accounts for
+   * whoever's own point of view this is — a player has one, the guide
+   * doesn't.
+   */
+  function layoutIslandGroup(others, includeSelfAtCenter) {
+    // Luke, 2026-09-13: with the guide (no self, `includeSelfAtCenter`
+    // false) watching, the dead centre — directly in front of its parked
+    // camera — stood permanently empty, "where their own avatar would have
+    // gone." Cause: `others` were always ranked starting at ±1 (rank
+    // `floor(i/2)+1`), reserving offsetX 0 for `self` regardless of whether
+    // a self actually exists to stand there. That's invisible for a real
+    // player, whose own body already genuinely occupies 0 in world space
+    // regardless of this bookkeeping — but for the guide, nobody does.
+    // Shifting every OTHER's index by one when there's no self to reserve
+    // slot 0 lets the first other take that centre slot instead, with
+    // every following other stepping outward exactly as before; passing
+    // `i + 1` in the self case reproduces the original ±1/±2/… ranks
+    // unchanged, so a real player's view is untouched by this.
+    const items = others.map((item, i) => {
+      const idx = includeSelfAtCenter ? i + 1 : i;
+      const rank = Math.ceil(idx / 2);
+      const side = idx % 2 === 1 ? 1 : -1;
+      const offsetX = idx === 0 ? 0 : side * rank * ISLAND_SPACING_X;
+      return { item, offsetX };
+    });
+    const self = includeSelfAtCenter ? { item: null, offsetX: 0 } : null;
+    const all = self ? [...items, self] : items.slice();
+    all.sort((a, b) => a.offsetX - b.offsetX);
+    all.forEach((slot, i) => {
+      slot.tagSide = i % 2 === 0 ? 'above' : 'below';
+      slot.tagYStagger = slot.tagSide === 'below' ? -ISLAND_TAG_STAGGER_Y : 0;
+    });
+    return { others: items, self };
+  }
+
+  /** Repositions an existing tag's vertical offset in place (above/below + stagger) without rebuilding its canvas — attachNameTag does that async reload, which nothing here needs since the text/colour aren't changing. */
+  function setNameTagSide(targetRig, side, yStagger = 0) {
+    const tag = targetRig.nameTag;
+    if (!tag) return;
+    const magnitude = FIGURE_H / 2 + NAME_TAG_GAP + tag.tagH / 2;
+    tag.localY = (side === 'below' ? -magnitude : magnitude) + yStagger;
+  }
+
+  /** Arranges every teammate currently RESTING at one fork (departing ones are mid-walk and untouched — see updateTeammates). `includeSelf` is true only when this device's own player is also resting there right now. */
+  function repositionIslandOccupants(forkIdx, includeSelf) {
+    const sec = sections[forkIdx - 1];
+    if (!sec) return;
+    const restingHere = [];
+    for (const [tok, entry] of teammates.entries()) {
+      if (entry.phase === 'resting' && entry.forkIndex === forkIdx) restingHere.push({ tok, entry });
+    }
+    // Sorted by token, not Map insertion/arrival order — otherwise the
+    // whole arrangement could visibly reshuffle whenever anyone re-reports
+    // (e.g. a name change), not just when someone actually arrives/leaves.
+    restingHere.sort((a, b) => (a.tok < b.tok ? -1 : a.tok > b.tok ? 1 : 0));
+    const { others, self } = layoutIslandGroup(
+      restingHere.map((r) => r.entry),
+      includeSelf
+    );
+    for (const slot of others) {
+      const entry = slot.item;
+      const lateral = forward(sec.fork.heading + Math.PI / 2, slot.offsetX);
+      entry.rig.group.position.set(sec.fork.x + lateral.x, FIGURE_H / 2, sec.fork.z + lateral.z);
+      entry.rig.group.rotation.set(0, sec.fork.heading, 0);
+      setNameTagSide(entry.rig, slot.tagSide, slot.tagYStagger);
+    }
+    if (self) setNameTagSide(rig, self.tagSide, self.tagYStagger);
+  }
+
+  /** Re-lays-out every island that currently has anyone resting on it — including this device's own, if it's a player idle at a fork right now. Called every frame from updateTeammates(); cheap at this scale (a handful of teammates, at most six forks). */
+  function relayoutAllIslands() {
+    const forksWithOccupants = new Set();
+    for (const entry of teammates.values()) {
+      if (entry.phase === 'resting') forksWithOccupants.add(entry.forkIndex);
+    }
+    const myFork = !isSpectatorRole(role) && !leg ? forkIndex : null;
+    if (myFork != null) forksWithOccupants.add(myFork);
+    for (const forkIdx of forksWithOccupants) {
+      repositionIslandOccupants(forkIdx, forkIdx === myFork);
+    }
+  }
+
+  // How long the fall stand-in's sink-and-tip plays once a spectator's live
+  // tracking of a `willFall` teammate goes stale (see updateTeammates) — a
+  // fixed cosmetic duration, not tied to real fall physics (see the
+  // "simplified stand-in" reasoning below).
+  const FALL_STANDIN_DURATION = 0.6;
+  // How long without a fresh 'moving' ping before a spectator gives up on
+  // live-tracking a departing teammate — comfortably more than
+  // MOVING_PING_INTERVAL so an ordinary gap between pings (network jitter,
+  // a slow frame) is never mistaken for "they've stopped, something's
+  // happened," while still being short enough that a real stop (arrival or
+  // fall) reads as prompt, not laggy.
+  const LIVE_POS_STALE_MS = 500;
+  // Per-second smoothing rate for lerping a spectator's tracked position
+  // toward the latest live report, rather than snapping straight to it —
+  // Luke, 2026-09-13, explicitly fine with "a minor displacement" for a
+  // smoother read; frame-rate independent via `Math.min(1, LIVE_POS_SMOOTH * dt)`.
+  const LIVE_POS_SMOOTH = 10;
+
+  /**
+   * Advances every currently-departing teammate, each frame, as a pure
+   * function of elapsed real time (the fog stand-in) or the sender's own
+   * live reports (a spectator's real tracking, see below). Called from
+   * tick() with its `dt`. Two entirely different renderings depending on
+   * who's watching:
+   *
+   *   - A PLAYER viewer always gets the fog stand-in: a straight walk from
+   *     the fork toward its own curtain, identical regardless of the real
+   *     side, then hidden — see the long design note above `notifyPlayerState`
+   *     for why concealing the real direction matters here and nowhere else.
+   *   - A spectator role (guide, or a fallen player's Watch mode) tracks the
+   *     REAL thing — Luke, 2026-09-13, after seeing the first (simulated)
+   *     version of this: "the guide is still seeing a stand-in in place of
+   *     the player's actual movement... it would be good if we could see
+   *     the players progressing rather than using a stand-in," explicitly
+   *     fine with "a short delay and/or a minor displacement." So rather
+   *     than *guessing* the departing player's position from distance and
+   *     WALK_SPEED, this smooths toward `entry.livePos` — the sender's own
+   *     periodic real position, see MOVING_PING_INTERVAL in tick() and the
+   *     'moving' phase in updateTeammate() — which is the actual thing
+   *     happening on their screen, holdingForward pauses and all.
+   *
+   * Luke, 2026-09-12: "if the player falls... the guide will watch until
+   * the animation is complete" — per the "simplified stand-in" decision,
+   * that doesn't mean reusing the real fall/jetpack-rescue sequence for a
+   * THIRD PARTY'S rig (no Rapier body, no wind, nothing keyed to the real
+   * fall's own timing — that's a bigger, separate undertaking). There is no
+   * explicit "I am now falling" signal on the wire — a real fall happens
+   * client-side once that device's own `leg` runs out, and the periodic
+   * 'moving' pings (only sent while `leg` is active) simply stop arriving
+   * at that exact moment. So: once a `willFall` entry's pings have gone
+   * stale (no update for LIVE_POS_STALE_MS — comfortably more than one
+   * MOVING_PING_INTERVAL, so an ordinary gap between pings is never
+   * mistaken for this), sink and tip it over from wherever it was last
+   * actually seen, for a fixed FALL_STANDIN_DURATION, then vanish —
+   * legible as "that one didn't make it" without building the full
+   * cinematic for a rig only a spectator ever sees. If pings go stale and
+   * `willFall` is false, the real arrival is imminent — just hold the last
+   * known spot until the real 'resting' update (from that same device,
+   * once it actually gets there) takes over, exactly as it already does
+   * for every other teammate.
+   */
+  function updateTeammates(dt) {
+    relayoutAllIslands();
+    for (const entry of teammates.values()) {
+      if (entry.phase !== 'departing' || !entry.rig.group.visible) continue;
+      const sec = sections[entry.forkIndex - 1];
+      if (!sec) continue;
+
+      if (isSpectatorRole(role)) {
+        const fresh = entry.livePos && Date.now() - entry.livePosAt < LIVE_POS_STALE_MS;
+        if (fresh) {
+          entry.fallStandinStartedAt = 0; // still genuinely moving — any earlier stale gap didn't turn into a real fall
+          const target = new THREE.Vector3(entry.livePos.x, FIGURE_H / 2, entry.livePos.z);
+          entry.rig.group.position.lerp(target, Math.min(1, LIVE_POS_SMOOTH * dt));
+          entry.rig.group.rotation.set(0, entry.livePos.heading ?? entry.rig.group.rotation.y, 0);
+        } else if (entry.willFall) {
+          if (!entry.fallStandinStartedAt) entry.fallStandinStartedAt = Date.now();
+          const fallT = THREE.MathUtils.clamp(
+            (Date.now() - entry.fallStandinStartedAt) / (FALL_STANDIN_DURATION * 1000),
+            0,
+            1
+          );
+          entry.rig.group.position.y = FIGURE_H / 2 - fallT * FIGURE_H * 0.6;
+          entry.rig.group.rotation.x = fallT * (Math.PI / 2.2);
+          if (fallT >= 1) entry.rig.group.visible = false;
+        }
+        // else: pings gone stale, not going to fall — hold the last known
+        // spot (nothing to update) and wait for the real 'resting' update.
+        continue;
+      }
+
+      const elapsed = (Date.now() - entry.departStartedAt) / 1000;
+      const t = THREE.MathUtils.clamp(elapsed / FOG_DEPART_DURATION, 0, 1);
+      const p = advance(sec.fork, sec.fork.heading, t * CURTAIN_DIST);
+      entry.rig.group.position.set(p.x, FIGURE_H / 2, p.z);
+      entry.rig.group.rotation.set(0, sec.fork.heading, 0);
+      if (t >= 1) entry.rig.group.visible = false; // reached the curtain — gone until a 'resting' update brings them back
+    }
+  }
+
+  // ---------------------------------------------------------------- guide camera
+  //
+  // Luke, 2026-09-12: the guide has no avatar of its own (see figure.visible
+  // in setCharacter above) — instead its camera parks at the current fork,
+  // watching every teammate's rig standing there, and does not move until
+  // the LAST player still resting there has departed. It then follows
+  // whoever that was — reusing the exact same generic walk-to-the-fog
+  // animation updateTeammates() is already driving for everyone else (see
+  // that section's own design note for why the guide seeing the REAL
+  // branch/outcome is a deliberately separate, later piece, not folded in
+  // here) — until they vanish at the curtain, then hops on to the next fork
+  // to do it again.
+  //
+  // "The last player still resting there" is derived purely from the
+  // teammates map already being kept for rendering, not from an
+  // authoritative roster count passed in from outside — simple, and
+  // correct in the common case, but it has a real edge: a player still on
+  // the character-select screen when everyone else at a fork has already
+  // departed hasn't reported 'resting' yet, so the guide has no way to know
+  // to wait for them and will move on without them. Late-joining a round
+  // already in progress has the same shape of gap (a fresh mount's
+  // `teammates` map starts empty, with no way to ask "catch me up" yet).
+  // Both are real, both are follow-up work, not silently accepted forever.
+  // Starts from initialGuideIsland when given (Watch mode resuming
+  // mid-round — see that option's own comment above) and otherwise 1 (a
+  // real guide, whose round always starts at the beginning). Clamped
+  // defensively — a value outside 1..N_FORKS shouldn't be reachable from
+  // App.jsx's own logic, but this is state a fresh mount seeds itself with
+  // exactly once, not worth a crash if it ever is.
+  let guideIsland =
+    initialGuideIsland != null ? THREE.MathUtils.clamp(initialGuideIsland, 1, N_FORKS) : 1;
+  let guideMode = 'parked'; // 'parked' | 'following'
+  let guideFollowToken = null;
+  // Was a single variable, overwritten on EVERY departure anywhere in the
+  // game, not just at the fork the guide is currently parked at. Luke,
+  // 2026-09-13, after a real two-device game (a phone and a browser tab
+  // actually playing together, not the one-at-a-time-by-hand debug-hook
+  // timing every previous "verification" used): the guide camera didn't
+  // correctly follow the last player at a fork, for EITHER a fall or a
+  // success. With two real people playing at their own pace rather than one
+  // simulated departure carefully waited-out before the next, it's entirely
+  // possible for a player already ahead at a LATER fork to depart while the
+  // guide is still parked waiting at an EARLIER one — overwriting this
+  // variable to a token the guide has no business following yet. Keyed by
+  // fork now, so a departure elsewhere in the journey can't clobber which
+  // token THIS fork's guide-follow logic cares about.
+  const guideLastDepartedTokenByFork = new Map(); // forkIndex -> token
+  // Fork indices where at least one teammate has actually been SEEN resting
+  // — without this, "zero resting here right now" is trivially true for
+  // every island nobody has reached yet, not just ones everyone has already
+  // left. Confirmed directly: a single simulated departure from fork 1, with
+  // no further data for fork 2 onward, raced the guide straight through
+  // every remaining fork in one frame — "zero resting at 2" was read as
+  // "everyone at 2 already left" instead of "no one's arrived at 2 yet".
+  const guideSeenRestingIslands = new Set();
+
+  function guideRestingCountAt(forkIdx) {
+    let n = 0;
+    for (const entry of teammates.values()) {
+      if (entry.phase === 'resting' && entry.forkIndex === forkIdx) n++;
+    }
+    return n;
+  }
+
+  function resetGuideCamera() {
+    guideIsland = 1;
+    guideMode = 'parked';
+    guideFollowToken = null;
+    guideLastDepartedTokenByFork.clear();
+    guideSeenRestingIslands.clear();
+  }
+
+  /**
+   * Turns THIS ALREADY-RUNNING instance from a player who just fell into a
+   * spectator, in place — no teardown, no remount, no fresh manager.onLoad.
+   *
+   * Luke, 2026-09-13: "a loading screen after the player falls suggests a
+   * restart of some sort. In no way should the game be restarting... after
+   * the player falls, what happens next should be something new, not a
+   * return to something else." Exactly right — the previous design routed
+   * a failed round to a brand-new `<GameRoom role="watching">`, and
+   * SkyPath.jsx's mount effect treats `role` changing as "this is a
+   * genuinely different game," tearing down the whole THREE.js scene and
+   * rebuilding it from scratch (a real `manager.onLoad` loading screen,
+   * not a UI illusion) — which is also why `initialGuideIsland` had to
+   * exist at all, to reconstruct camera state a fresh mount has no memory
+   * of. This sidesteps the whole problem: the SAME scene, SAME `sections`,
+   * SAME `teammates` map (already tracking every other player exactly
+   * where they are) just keeps running, with this device's own role
+   * flipped from 'player' to 'watching'. `guideIsland` is seeded from
+   * `forkIndex` — the CLOSURE'S OWN current value, not a value threaded in
+   * from outside — so it's exactly right by construction, no guessing.
+   * See GameRoom.jsx for the caller (an effect watching for this device's
+   * own round having just failed).
+   */
+  function becomeSpectator() {
+    if (isSpectatorRole(role)) return; // already there — e.g. a duplicate call
+    role = 'watching';
+    canAct = false;
+    figure.visible = false;
+    removeNameTag(rig);
+    guideIsland = THREE.MathUtils.clamp(forkIndex, 1, N_FORKS);
+    guideMode = 'parked';
+    guideFollowToken = null;
+    guideLastDepartedTokenByFork.clear();
+    guideSeenRestingIslands.clear();
+    els.role.dataset.role = role;
+    els.role.textContent = 'Watching';
+    refreshUI();
+  }
+
+  /** Called from tick() instead of the normal player camera branch — see the role check there. */
+  function updateGuideCamera(dt) {
+    if (guideMode === 'parked') {
+      const restingHere = guideRestingCountAt(guideIsland);
+      if (restingHere > 0) guideSeenRestingIslands.add(guideIsland);
+      if (guideSeenRestingIslands.has(guideIsland) && restingHere === 0) {
+        const lastToken = guideLastDepartedTokenByFork.get(guideIsland) ?? null;
+        const last = lastToken ? teammates.get(lastToken) : null;
+        if (last && last.phase === 'departing' && last.forkIndex === guideIsland && last.rig.group.visible) {
+          guideMode = 'following';
+          guideFollowToken = lastToken;
+        } else {
+          // Whoever was last is already gone (or never existed) — nothing
+          // left to visibly follow, so just hop on to the next island.
+          guideIsland = Math.min(guideIsland + 1, N_FORKS);
+        }
+      }
+      const sec = sections[guideIsland - 1];
+      if (!sec) return;
+      camera.position.lerp(trailingCamPos(sec.fork.x, sec.fork.z, sec.fork.heading, CAM_BACK), Math.min(1, dt * 4));
+      camera.lookAt(trailingCamLookAt(sec.fork.x, sec.fork.z, sec.fork.heading));
+    } else {
+      const entry = teammates.get(guideFollowToken);
+      if (!entry || entry.phase !== 'departing' || !entry.rig.group.visible) {
+        // Reached the curtain and vanished (or something removed them) —
+        // this island's business is done; move the guide's own reference
+        // point on. The teacher's own dashboard is the source of truth for
+        // whether the WHOLE group has finished — this only ever advances
+        // this device's camera.
+        guideMode = 'parked';
+        guideIsland = Math.min(guideIsland + 1, N_FORKS);
+        guideFollowToken = null;
+        return;
+      }
+      const p = entry.rig.group.position;
+      const heading = entry.rig.group.rotation.y;
+      camera.position.lerp(trailingCamPos(p.x, p.z, heading, CAM_BACK), Math.min(1, dt * 4));
+      camera.lookAt(trailingCamLookAt(p.x, p.z, heading));
+    }
+  }
+
+  function removeTeammate(token) {
+    const entry = teammates.get(token);
+    if (!entry) return;
+    disposeRig(entry.rig);
+    teammates.delete(token);
+  }
+
+  // The name actually shown on this device's own tag and reported to
+  // teammates — the `displayName` option (the name already typed into the
+  // LOBBY to join) when this is a networked round, falling back to
+  // whatever the character-select screen's own free-text input produces
+  // for solo/dev play, where there is no lobby name to inherit.
+  let localDisplayName = displayName;
+
+  /**
+   * Tells the host (see GameRoom.jsx) where THIS device's own player
+   * currently is, for it to relay to teammates. `phase` is 'resting'
+   * (default, on arrival), 'departing' (on choosing a fork — see
+   * applyChoice), or 'moving' (a throttled real-position ping sent
+   * repeatedly WHILE crossing — see MOVING_PING_INTERVAL in tick()).
+   * `livePos` (`{x, z, heading}`) only matters for 'moving' — see the
+   * design notes above updateTeammate on who actually acts on it. The
+   * actual chosen `side` is deliberately never included at all, for
+   * 'departing' or otherwise — a spectator's real tracking comes entirely
+   * from 'moving's live positions, so there's nothing left that needs it.
+   */
+  function notifyPlayerState(phase = 'resting', willFall = false, livePos = null) {
+    onPlayerState?.({ phase, forkIndex, characterKey, displayName: localDisplayName, colorHex: pickedColorHex, willFall, livePos });
+  }
 
   // ------------------------------------------------------------ TEST_TAGS
   // Temporary, gated behind ?testTags=1 — not a real multiplayer feature
@@ -3952,7 +4605,23 @@ export function mountSkyPath(container, options = {}) {
   // typical pair (e.g. "Sheep"/"Ship", already reviewed and approved) —
   // derived from name-tag letter height (FIGURE_H * FIGURE_ASPECT *
   // NAME_TAG_WIDTH_FACTOR, scaled by a representative aspect) times 1.5.
-  const WORD_SIGN_HEIGHT = 0.9;
+  // Bumped 20% (0.9 -> 1.08) 2026-09-12 — Luke, after approving the raised/
+  // widened position: "make the words about 20% larger, to make them more
+  // distinct from the player's names" (name tags are NAME_TAG_HEIGHT=0.6, so
+  // this also widens the gap between the two sizes, not just the position).
+  const WORD_SIGN_HEIGHT = 1.08;
+  // Luke, 2026-09-12: with several players' name tags now sitting at the
+  // same fork the words are chosen at, the signs need to sit clear of a
+  // crowd rather than just above head height. Raised well above the tallest
+  // name tag (NAME_TAG_HEIGHT-based tags top out well under FIGURE_H, itself
+  // ~1.27 world units) and pushed further outward from the fork's centreline
+  // than the branch angle alone would put them — see the extra lateral
+  // offset in updateWordSigns — so a full team of five waiting at a fork
+  // can't obscure either word. Kept the correct-word sign's +0.5 offset
+  // above the player signs' height, same relative gap as before.
+  const WORD_SIGN_Y = 3.6;
+  const WORD_SIGN_Y_CORRECT = 4.1;
+  const WORD_SIGN_LATERAL_EXTRA = ISLAND_RADIUS * 0.4; // world units, beyond the branch-angle position below
 
   function makeWordSignMesh() {
     const m = new THREE.Mesh(
@@ -4024,7 +4693,13 @@ export function mountSkyPath(container, options = {}) {
   }
 
   function updateWordSigns() {
-    const sec = sections[forkIndex - 1];
+    // A guide (or a fallen player in Watch mode, sharing the same camera —
+    // see role checks elsewhere) has no walker of its own any more since
+    // fork-choice broadcasts were scoped to the chooser alone (2026-09-12):
+    // `forkIndex` never advances for it, so the word signs would otherwise
+    // stay frozen on fork 1 forever. `guideIsland` — the guide camera's own
+    // reference point — is what actually tracks progress for these roles.
+    const sec = isSpectatorRole(role) ? sections[guideIsland - 1] : sections[forkIndex - 1];
     const showCurrent = !leg && !finished && !falling && !abduction && !templeEntry && !rescue && sec?.words;
     if (!showCurrent) {
       wordSigns.left.visible = false;
@@ -4041,13 +4716,15 @@ export function mountSkyPath(container, options = {}) {
       wordSigns.right.visible = false;
       const correctWord = sec.words[sec.correct];
       const mid = advance(sec.fork, sec.fork.heading, step);
-      setWordSign(wordSigns.correct, correctWord, mid.x, 3.1, mid.z);
+      setWordSign(wordSigns.correct, correctWord, mid.x, WORD_SIGN_Y_CORRECT, mid.z);
     } else {
       wordSigns.correct.visible = false;
-      const leftAt = advance(sec.fork, sec.fork.heading - FORK_HALF_ANGLE, step);
-      const rightAt = advance(sec.fork, sec.fork.heading + FORK_HALF_ANGLE, step);
-      setWordSign(wordSigns.left, sec.words.left, leftAt.x, 2.6, leftAt.z);
-      setWordSign(wordSigns.right, sec.words.right, rightAt.x, 2.6, rightAt.z);
+      const leftBase = advance(sec.fork, sec.fork.heading - FORK_HALF_ANGLE, step);
+      const rightBase = advance(sec.fork, sec.fork.heading + FORK_HALF_ANGLE, step);
+      const leftOut = forward(sec.fork.heading - Math.PI / 2, WORD_SIGN_LATERAL_EXTRA);
+      const rightOut = forward(sec.fork.heading + Math.PI / 2, WORD_SIGN_LATERAL_EXTRA);
+      setWordSign(wordSigns.left, sec.words.left, leftBase.x + leftOut.x, WORD_SIGN_Y, leftBase.z + leftOut.z);
+      setWordSign(wordSigns.right, sec.words.right, rightBase.x + rightOut.x, WORD_SIGN_Y, rightBase.z + rightOut.z);
     }
   }
 
@@ -4077,12 +4754,26 @@ export function mountSkyPath(container, options = {}) {
   // nobody else is depending on this device's role being fixed — i.e. when
   // there's no owner listening for choices.
   const soloRoleToggle = !onForkChoice;
-  let role = initialRole;
   let sunP = timeOfDay(1);
 
   // leg: the walk currently in progress, or null while awaiting a decision.
   let leg = null;
   let choiceSide = null; // 'left' or 'right' — tracks which path was chosen, used for camera angle during fall
+
+  // Luke, 2026-09-13: "the guide is still seeing a stand-in in place of the
+  // player's actual movement... it would be good if we could see the
+  // players progressing rather than using a stand-in" — explicitly fine
+  // with "a short delay and/or a minor displacement." So while a leg is in
+  // progress, this device periodically reports its OWN real position — see
+  // the `notifyPlayerState('moving', …)` call in tick()'s walk block —
+  // letting a spectator role track the real thing instead of a simulated
+  // guess (see updateTeammates' own design note on why a player's own view
+  // still never uses this). Throttled, not sent every frame: a classroom
+  // group is at most a handful of people, so ~6-7 messages/second per
+  // walker is negligible traffic, but there's no reason to send more often
+  // than a viewer could visually tell the difference.
+  const MOVING_PING_INTERVAL = 150; // ms
+  let lastMovingPingAt = 0;
 
   // True only while the player is actively pressing/holding the #advance
   // button — see its pointerdown/up wiring below. A leg can be committed
@@ -4557,16 +5248,45 @@ export function mountSkyPath(container, options = {}) {
   }
   updateCarouselNav();
 
-  els.charStart.addEventListener('click', () => {
+  /** Everything "Start" on the character-select screen does, minus actually hiding that screen — factored out so a spectator role (see below) can skip the screen but still reach the same end state. */
+  function finishCharacterSelect() {
     setCharacter(pickedCharacter);
     // "Player One" default per Luke, 2026-08-30 — used whenever the name
     // field is left empty rather than shipping a blank/missing name tag.
     // Under TEST_TAGS the real player's own name is overridden to "Player
     // Three" so the five tags read as one consistent numbered sequence —
-    // see the TEST_TAGS block above.
-    const name = TEST_TAGS ? 'Player Three' : (normalizePlayerName(els.nameInput.value) || 'Player One');
-    attachNameTag(rig, name, pickedColorHex);
+    // see the TEST_TAGS block above. `displayName` (the lobby name) wins
+    // over all of that when this is a real networked round — see
+    // localDisplayName's own comment.
+    const name =
+      localDisplayName ?? (TEST_TAGS ? 'Player Three' : normalizePlayerName(els.nameInput.value) || 'Player One');
+    localDisplayName = name;
+    // No tag for a spectator role — its own rig is permanently invisible
+    // (see figure.visible in setCharacter), so a tag could never be seen
+    // either; building one anyway is wasted work, and was observed to
+    // sometimes race the word signs' own concurrent glyph-texture loading
+    // for a harmless console error (nameTag.js's glyph cache, shared with
+    // getWordTexture, isn't obviously safe under concurrent first-use of
+    // the same letter from two callers at once — a separate, pre-existing
+    // issue, not chased down here since skipping the call sidesteps it
+    // entirely for a rig nothing will ever show a tag on anyway).
+    if (!isSpectatorRole(role)) attachNameTag(rig, name, pickedColorHex);
     if (TEST_TAGS) spawnTestCompanions();
+    // Luke, 2026-09-13: "the guide should have no physical presence in the
+    // game at any point... with one guide and three players [every device]
+    // should in display purposes be treated as three players." Root cause
+    // of the guide's avatar sometimes showing up on a PLAYER's own screen:
+    // this call reports "I'm here" to every teammate's `updateTeammate()`,
+    // exactly like a real player — nothing before this point distinguished
+    // a spectator's report from a real one. A guide's `forkIndex` also never
+    // advances (see updateWordSigns' own comment on why), so once added, it
+    // would sit there forever as a phantom occupant of fork 1 on every
+    // player's screen. Watch mode is excluded for the same reason: a fallen
+    // player has no more position to report either.
+    if (!isSpectatorRole(role)) notifyPlayerState();
+  }
+  els.charStart.addEventListener('click', () => {
+    finishCharacterSelect();
     els.charSelect.classList.remove('visible');
     setTimeout(() => els.charSelect.classList.remove('show'), 350);
   });
@@ -4593,7 +5313,18 @@ export function mountSkyPath(container, options = {}) {
     if (els.advance) {
       els.advance.classList.toggle('hidden', !walking || finished || falling || !!abduction || cannotAct);
     }
-    els.reset.classList.toggle('hidden', !finished);
+    // Luke, 2026-09-13: "the falling player is briefly seeing the 'again?'
+    // button, which they don't have a chance to press (and this button
+    // shouldn't be there anyway)." Real, and separate from the Watch-mode
+    // camera fix alongside it — this is `finished` flipping true the moment
+    // a fall's UI delay elapses (see emitRoundEnd's own call site), which
+    // has always shown this button regardless of context. Restarting is now
+    // the teacher's call for a real round (this same button already goes
+    // inert on click when `!soloRoleToggle` — see requestChoice's own early
+    // return) — hiding it here too means a networked player never sees a
+    // dead-end control flash up right before this whole component unmounts
+    // for Watch mode/results.
+    els.reset.classList.toggle('hidden', !finished || !soloRoleToggle);
     // Temporary test control (see startAbduction) — inert once the round is
     // over, while something else already owns the figure, or mid-walk, since
     // the event only runs on a player standing still.
@@ -4635,8 +5366,9 @@ export function mountSkyPath(container, options = {}) {
     const sec = sections[forkIndex - 1];
     if (!sec) return;
 
-    choiceSide = side; // track which path was chosen for camera angle during fall
     const wasCorrect = side === sec.correct;
+    notifyPlayerState('departing', !wasCorrect); // before forkIndex moves on — real position pings follow while walking, see tick()
+    choiceSide = side; // track which path was chosen for camera angle during fall
     const branchPts = sec.branch[side];
     const queue = branchPts.slice();
     const realPoints = [walker.clone(), ...branchPts];
@@ -4689,6 +5421,7 @@ export function mountSkyPath(container, options = {}) {
   function restart() {
     roundEndEmitted = false;
     forkIndex = 1;
+    resetGuideCamera();
     finished = false;
     finishedSuccess = false;
     falling = false;
@@ -4776,6 +5509,7 @@ export function mountSkyPath(container, options = {}) {
     role = role === 'guide' ? 'player' : 'guide';
     els.role.dataset.role = role;
     els.role.textContent = role === 'guide' ? 'Guide view' : 'Player view';
+    figure.visible = role !== 'guide';
     refreshUI(); // curtain opacity follows `role` in updateCurtains each frame
   });
 
@@ -4879,11 +5613,32 @@ export function mountSkyPath(container, options = {}) {
     startJourney();
     loadMs = Math.round(performance.now() - T_START);
     $('loader').classList.add('done');
-    els.charSelect.classList.add('show');
-    // Let 'show' (display) apply before the opacity transition starts.
-    requestAnimationFrame(() => {
-      if (!disposed) els.charSelect.classList.add('visible');
-    });
+    if (role === 'watching') {
+      // A fallen player's Watch mode already picked a character/colour
+      // earlier in this same round, back when it was still playing — asking
+      // again would be a confusing, meaningless extra step, so skip straight
+      // past the screen to the same end state Start would have reached.
+      finishCharacterSelect();
+    } else {
+      // The guide goes through the exact same screen as a normal player —
+      // Luke, 2026-09-13: "we should in fact have the guide pick an avatar,
+      // like the other players, because in the next stage of the game,
+      // players will take turns as the guide" (so whoever guides needs a
+      // real, stored choice ready for whenever they next play as a normal
+      // player instead) — "but for now, in no way should it become
+      // visible." Only what happens AFTER this screen differs for a guide
+      // (see figure.visible in setCharacter, and the isSpectatorRole guard
+      // in finishCharacterSelect below): nothing ever shows the guide's own
+      // figure, and nothing broadcasts this choice to anyone else. Do not
+      // go back to skipping this screen for the guide without re-reading
+      // this — the choice is deliberately kept even though it's currently
+      // unused for anything but storage.
+      els.charSelect.classList.add('show');
+      // Let 'show' (display) apply before the opacity transition starts.
+      requestAnimationFrame(() => {
+        if (!disposed) els.charSelect.classList.add('visible');
+      });
+    }
     refreshUI();
   };
 
@@ -4945,6 +5700,19 @@ export function mountSkyPath(container, options = {}) {
         }
         leg.traveled += moveAmount;
 
+        // Real-time position ping for a spectator role watching this
+        // device — see MOVING_PING_INTERVAL's own comment. Sent regardless
+        // of whether moveAmount is currently 0 (holdingForward released,
+        // i.e. genuinely paused) so a spectator's staleness check doesn't
+        // mistake "this player is just standing still mid-bridge" for
+        // "they've stopped reporting" — see updateTeammates.
+        const now = Date.now();
+        if (now - lastMovingPingAt >= MOVING_PING_INTERVAL) {
+          lastMovingPingAt = now;
+          const heading = distToHead > 1e-4 ? Math.atan2(dx, -dz) : undefined;
+          notifyPlayerState('moving', false, { x: walker.x, z: walker.z, heading });
+        }
+
         // Bridge height: only while the segment we are *currently crossing*
         // (from leg.lastPoint to head) has both ends tagged with the same
         // bridge — every other segment (the short hop onto an island's own
@@ -4982,6 +5750,7 @@ export function mountSkyPath(container, options = {}) {
         sunP = leg.toP;
         if (leg.arriveFork) {
           forkIndex = leg.arriveFork;
+          notifyPlayerState();
         } else if (leg.success) {
           // `finished`/`finishedSuccess`/emitRoundEnd() are deliberately NOT
           // set here any more — that used to end the round the instant the
@@ -5143,6 +5912,7 @@ export function mountSkyPath(container, options = {}) {
       }
     }
 
+    updateTeammates(dt);
     updateNameTags();
 
     applySun(sunP);
@@ -5238,7 +6008,16 @@ export function mountSkyPath(container, options = {}) {
     // this exact frame), and the camera needs to see the up-to-date state,
     // not whatever was true at the top of tick().
     const justFell = finished && !finishedSuccess;
-    if (rescue) {
+    if (isSpectatorRole(role)) {
+      // 'watching' is a fallen player's Watch mode — Luke, 2026-09-12:
+      // "they will then share the guide's view" — so it rides the exact
+      // same camera state machine as the guide, not a second copy of it.
+      // The guide has no walker/figure of its own to trail (see
+      // figure.visible in setCharacter) — an entirely separate camera
+      // state machine owns its view instead. See the "guide camera"
+      // section, up near the teammates code, for the full design.
+      updateGuideCamera(dt);
+    } else if (rescue) {
       // Already fully eased inside updateRescue (see its own "camera"
       // section) — applied directly here, not lerped again, so the
       // cameraTravelDuration/cameraZoomDuration sliders land exactly where
@@ -5301,6 +6080,21 @@ export function mountSkyPath(container, options = {}) {
 
     harness?.update(dt);
     updateBirds(dt);
+
+    // Was only called from refreshUI(), fired on discrete events (a choice
+    // made, an arrival, character-select finishing) — every one of them
+    // something that only ever happens to the LOCAL PLAYER's own state, so
+    // it happened to track forkIndex correctly for a playing device. The
+    // guide has none of those events: `guideIsland` advances silently, frame
+    // by frame, inside updateGuideCamera() above. Luke, 2026-09-12: after
+    // the guide's camera correctly moved to the second island, "the guide
+    // can't see the correct word (or the word pair)" — found live by
+    // reproducing with two simulated teammates: the correct-word sign stayed
+    // stuck on fork 1's word the whole time, since nothing ever told it
+    // guideIsland had changed. Called unconditionally every frame now
+    // instead, cheap at this scale, so it can never again go stale for a
+    // role that has no discrete refresh trigger of its own.
+    updateWordSigns();
 
     renderer.render(scene, camera);
 
@@ -5424,6 +6218,15 @@ export function mountSkyPath(container, options = {}) {
     }));
     window.__cloudRows = () => cloudRows.map((r) => +r.position.z.toFixed(2));
     window.__forceChoice = (side) => requestChoice(side);
+    // Testing convenience: holding the real #advance button requires a
+    // genuine pointerdown/up from a real input device, awkward to automate
+    // reliably. This just flips the same `holdingForward` flag tick() reads.
+    window.__debugHold = (ms = 4000) => {
+      holdingForward = true;
+      setTimeout(() => {
+        holdingForward = false;
+      }, ms);
+    };
     window.__wordSigns = () => ({
       leftVisible: wordSigns.left.visible,
       rightVisible: wordSigns.right.visible,
@@ -5431,6 +6234,32 @@ export function mountSkyPath(container, options = {}) {
       leftWord: wordSigns.left.userData.word,
       rightWord: wordSigns.right.userData.word,
       correctWord: wordSigns.correct.userData.word,
+      leftPos: wordSigns.left.position.toArray(),
+      rightPos: wordSigns.right.position.toArray(),
+      camPos: camera.position.toArray(),
+    });
+    // Simulates a relayed player-state broadcast, for testing without a
+    // second real device — exactly what GameRoom.jsx's onPlayerStateReceived
+    // handler calls in the real multiplayer path.
+    window.__testUpdateTeammate = (token, state) => updateTeammate(token, state);
+    window.__guideCam = () => ({
+      role,
+      guideIsland,
+      guideMode,
+      guideFollowToken,
+      lastDepartedAtCurrentFork: guideLastDepartedTokenByFork.get(guideIsland) ?? null,
+    });
+    window.__teammates = () => ({
+      myForkIndex: forkIndex,
+      myDisplayName: localDisplayName,
+      teammates: Array.from(teammates.entries()).map(([tok, e]) => ({
+        token: tok,
+        displayName: e.displayName,
+        characterKey: e.characterKey,
+        forkIndex: e.forkIndex,
+        pos: e.rig.group.position.toArray().map((v) => +v.toFixed(2)),
+        tagLocalY: e.rig.nameTag ? +e.rig.nameTag.localY.toFixed(3) : null,
+      })),
     });
     window.__doorTune = () => ({
       state: doorTuneState,
@@ -5526,7 +6355,15 @@ export function mountSkyPath(container, options = {}) {
       return true;
     },
 
+    /** Called by GameRoom.jsx when a teammate's own device reports (or updates) where it's resting — see the "teammates" section above. */
+    updateTeammate,
+    /** Called by GameRoom.jsx when a teammate leaves the room. */
+    removeTeammate,
+
     restart,
+
+    /** Turns this device from a player into a spectator, in place, once its own round has ended in a fall — see becomeSpectator's own header comment for why this replaces the old remount-into-role="watching" design. */
+    becomeSpectator,
 
     /** Current role, for a caller that wants to render its own role badge. */
     get role() {

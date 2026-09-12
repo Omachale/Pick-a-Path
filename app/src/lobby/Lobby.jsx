@@ -1,10 +1,15 @@
 /**
  * The lobby screen, ported from lobby-prototype/index.html + lobby.js.
  * Deliberately plain — this is functional parity with the standalone
- * prototype (Stage A's acceptance bar), not the real teacher/student UI.
+ * prototype's acceptance bar, not the real teacher/student UI.
+ *
+ * Simplified 2026-09-11, Luke: the teacher now manages groups and starts
+ * every round from their own dashboard (TeacherDashboard.jsx), not from
+ * this screen — a teacher never actually lands here any more, so there's
+ * no more `isTeacher`/`GroupEditor` branch, and a student has nothing to
+ * click to start a round, only a status line saying they're waiting.
  */
 import { useState } from 'react';
-import GroupEditor from './GroupEditor.jsx';
 import JoinByCode from './JoinByCode.jsx';
 
 function groupLabel(groupId) {
@@ -46,9 +51,8 @@ function ParticipantList({ participants, myToken }) {
   );
 }
 
-export default function Lobby({ lobby, isTeacher, onRosterStoreReady, onOpenTeacherView }) {
+export default function Lobby({ lobby, onCodeResolved, onOpenTeacherView }) {
   const [name, setName] = useState(lobby.participant?.displayName || '');
-  const [rosterActive, setRosterActive] = useState(false);
 
   return (
     <div className="screen">
@@ -57,17 +61,27 @@ export default function Lobby({ lobby, isTeacher, onRosterStoreReady, onOpenTeac
       <p className="hint" style={{ color: '#666', fontSize: '0.9rem' }}>
         My identity token: <code>{lobby.token}</code>{' '}
         <button onClick={lobby.resetDevice}>New device (reset identity)</button>{' '}
-        <button onClick={onOpenTeacherView}>Teacher? Manage classes →</button>
+        <button onClick={onOpenTeacherView}>Teacher? Start a session →</button>
       </p>
 
-      <JoinByCode
-        joined={lobby.joined}
-        onRosterStoreReady={(store) => {
-          setRosterActive(true);
-          onRosterStoreReady(store);
-        }}
-        onPickName={(pickedName) => setName(pickedName)}
-      />
+      {lobby.joined && !lobby.hasRealSession && (
+        <p
+          style={{
+            color: '#a00',
+            border: '1px solid #a00',
+            padding: '0.5rem 0.75rem',
+            borderRadius: 4,
+            fontWeight: 'bold',
+          }}
+        >
+          ⚠ Not connected to a teacher's session — this device joined without a valid session code (the link it
+          used was probably missing its <code>?join=</code> part). Anyone else in this same boat lands in one shared
+          local test room together, not your teacher's real class — go back and use the exact code or link/QR
+          shown on the teacher's screen.
+        </p>
+      )}
+
+      <JoinByCode joined={lobby.joined} onCodeResolved={onCodeResolved} />
 
       <p>
         <input
@@ -75,7 +89,7 @@ export default function Lobby({ lobby, isTeacher, onRosterStoreReady, onOpenTeac
           placeholder="Your name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          disabled={lobby.joined || rosterActive}
+          disabled={lobby.joined}
         />{' '}
         <button onClick={() => lobby.join(name)} disabled={lobby.joined || !name.trim()}>
           Join lobby
@@ -96,20 +110,11 @@ export default function Lobby({ lobby, isTeacher, onRosterStoreReady, onOpenTeac
       <h2>Participants</h2>
       <ParticipantList participants={lobby.participants} myToken={lobby.token} />
 
-      {isTeacher && <GroupEditor participants={lobby.participants} onApply={lobby.applyGroups} />}
-
       <section style={{ borderTop: '1px solid #ddd', paddingTop: '1rem', marginTop: '1.5rem' }}>
-        <h2>Start Sky Path</h2>
-        <p>
-          Room status: <span>{lobby.roomStatus}</span>
-        </p>
-        <p>
-          <button
-            onClick={lobby.startSkyPath}
-            disabled={lobby.myGroupId === null || lobby.roundPhase === 'assigning'}
-          >
-            {lobby.roundPhase === 'assigning' ? 'Starting…' : 'Start Sky Path for my group'}
-          </button>
+        <p style={{ fontWeight: 'bold' }}>
+          {lobby.myGroupId === null
+            ? 'Waiting for your teacher to put you in a group…'
+            : 'Waiting for your teacher to start the game…'}
         </p>
       </section>
     </div>

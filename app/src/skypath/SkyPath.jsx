@@ -11,35 +11,53 @@
  * down a round in progress. The effect re-runs only on the things that
  * genuinely define a different game: the fork sequence, the role, and
  * whether this device may act.
+ *
+ * `displayName` and `onPlayerState` (2026-09-12) are the teammate-visibility
+ * seam: `displayName` overrides the character-select screen's own free-text
+ * name input with whatever name this device already joined the lobby as,
+ * and `onPlayerState` fires whenever this device's own resting position
+ * changes so GameRoom.jsx can relay it to teammates — see skyPath.js's own
+ * header comment on `updateTeammate`/`notifyPlayerState` for the full
+ * design. Not listed as an effect dependency: a name can't change mid-round
+ * (it's fixed at lobby join), and onPlayerState goes through the same ref
+ * pattern as the other callbacks.
  */
 import { useEffect, useRef } from 'react';
 import { mountSkyPath } from './skyPath.js';
 
 export default function SkyPath({
   forks = null,
+  words = null,
   role = 'guide',
   canAct = true,
   crowd = 0,
+  displayName = null,
+  initialGuideIsland = null,
   onForkChoice,
   onRoundEnd,
+  onPlayerState,
   gameRef,
 }) {
   const containerRef = useRef(null);
-  const callbacks = useRef({ onForkChoice, onRoundEnd });
-  callbacks.current = { onForkChoice, onRoundEnd };
+  const callbacks = useRef({ onForkChoice, onRoundEnd, onPlayerState });
+  callbacks.current = { onForkChoice, onRoundEnd, onPlayerState };
 
   useEffect(() => {
     const handle = mountSkyPath(containerRef.current, {
       forks,
+      words,
       role,
       canAct,
       crowd,
+      displayName,
+      initialGuideIsland,
       // Only forward a handler if the parent actually supplied one — the game
       // treats a missing onForkChoice as "solo, decide it yourself".
       onForkChoice: onForkChoice
         ? (forkIndex, side) => callbacks.current.onForkChoice?.(forkIndex, side)
         : null,
       onRoundEnd: (result) => callbacks.current.onRoundEnd?.(result),
+      onPlayerState: onPlayerState ? (state) => callbacks.current.onPlayerState?.(state) : null,
     });
     if (gameRef) gameRef.current = handle;
     return () => {
@@ -47,7 +65,7 @@ export default function SkyPath({
       if (gameRef) gameRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forks, role, canAct, crowd]);
+  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
 }
