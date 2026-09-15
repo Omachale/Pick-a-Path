@@ -33,6 +33,8 @@ export default function SkyPath({
   crowd = 0,
   displayName = null,
   initialGuideIsland = null,
+  roster = [],
+  myToken = null,
   onForkChoice,
   onRoundEnd,
   onPlayerState,
@@ -51,6 +53,8 @@ export default function SkyPath({
       crowd,
       displayName,
       initialGuideIsland,
+      roster,
+      myToken,
       // Only forward a handler if the parent actually supplied one — the game
       // treats a missing onForkChoice as "solo, decide it yourself".
       onForkChoice: onForkChoice
@@ -65,7 +69,7 @@ export default function SkyPath({
       if (gameRef) gameRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland]);
+  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland, roster, myToken]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
 }

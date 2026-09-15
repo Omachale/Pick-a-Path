@@ -28,7 +28,6 @@ export const SKY_PATH_CHROME = `
   <button id="charStart">Start</button>
 </div>
 
-<div id="nameTagLayer"></div>
 <div id="hud">—</div>
 <button id="role" data-role="guide">Guide view</button>
 
@@ -73,24 +72,6 @@ export const SKY_PATH_CSS = `
   overscroll-behavior: none;
 }
 .skypath-surface canvas { display: block; touch-action: none; }
-
-/* Name tags: screen-space overlay, not part of the 3D scene — see the long
-   comment above attachNameTag() in skyPath.js for why. z-index sits below
-   the HUD/controls (10) but above the plain canvas (no z-index of its
-   own), and pointer-events is off throughout since these are read-only. */
-.skypath-surface #nameTagLayer {
-  position: absolute;
-  inset: 0;
-  z-index: 9;
-  overflow: hidden;
-  pointer-events: none;
-}
-.skypath-surface .nameTagChip {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.skypath-surface .nameTagChip canvas { display: block; }
 
 .skypath-surface #hud {
   position: absolute;

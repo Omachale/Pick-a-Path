@@ -42,6 +42,7 @@ export default function GameRoom({
   round,
   failed = false,
   displayName,
+  myToken,
   sendForkChoice,
   onForkChoiceReceived,
   sendPlayerState,
@@ -50,7 +51,7 @@ export default function GameRoom({
   onLeave,
 }) {
   const gameRef = useRef(null);
-  const { forks, words, role } = round;
+  const { forks, words, role, roster } = round;
 
   useEffect(() => {
     onForkChoiceReceived((forkIndex, side) => {
@@ -78,6 +79,8 @@ export default function GameRoom({
         role={role}
         canAct={role === 'player'}
         displayName={displayName}
+        roster={roster}
+        myToken={myToken}
         gameRef={gameRef}
         onForkChoice={sendForkChoice}
         onRoundEnd={onRoundEnd}

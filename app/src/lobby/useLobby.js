@@ -88,6 +88,56 @@ const SKY_PATH_N_FORKS = 6;
 // landing here again is obvious immediately instead of looking like success.
 const NO_SESSION_CODE = 'no-session';
 
+/**
+ * Reads who's currently present in a session's lobby channel WITHOUT this
+ * device joining it — for Lobby.jsx's "Dev player" button, which needs to
+ * pick a name that's actually free before it resets this device's own
+ * identity and reloads. `lobby.participants` (the hook's own state) can't
+ * answer that: it's only ever populated once THIS device has called `join()`
+ * at least once on THIS channel, since that's the only place a channel gets
+ * created at all (see the module header) — a device that's never joined
+ * this session has no presence data to read yet, which is exactly the gap
+ * Luke hit: six brand-new tabs, each with an empty local view of the room,
+ * each independently picking the same "first" name.
+ *
+ * Subscribes a short-lived, throwaway channel under its own random presence
+ * key (so it never announces itself as a participant — no `.track()` call
+ * here, and presence in Supabase Realtime is opt-in per-client, not implied
+ * by merely subscribing), reads the first presence sync, then tears itself
+ * down. Resolves to `[]` if the room is empty, unreachable, or the sync
+ * doesn't arrive within the timeout — a caller should treat that as "assume
+ * no one's there" (the same reasonable default an empty room actually has),
+ * not as an error to surface.
+ */
+export async function fetchCurrentDisplayNames(sessionCode) {
+  const code = (sessionCode || NO_SESSION_CODE).toUpperCase();
+  return new Promise((resolve) => {
+    let settled = false;
+    const probe = supabase.channel(`lobby-${code}`, {
+      config: { presence: { key: `probe_${Math.random().toString(36).slice(2)}` } },
+    });
+    const finish = (names) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      supabase.removeChannel(probe);
+      resolve(names);
+    };
+    probe.on('presence', { event: 'sync' }, () => {
+      const state = probe.presenceState();
+      finish(
+        Object.values(state)
+          .flatMap((metas) => metas.map((m) => m.displayName))
+          .filter(Boolean)
+      );
+    });
+    probe.subscribe((status) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') finish([]);
+    });
+    const timer = setTimeout(() => finish([]), 1500); // empty room, or a connection problem — either way, don't hang the button
+  });
+}
+
 export function useLobby(sessionCode) {
   const hasRealSession = !!sessionCode;
   const code = (sessionCode || NO_SESSION_CODE).toUpperCase();
@@ -208,6 +258,11 @@ export function useLobby(sessionCode) {
           words: payload.words,
           role: payload.guideToken === token ? 'guide' : 'player',
           guideToken: payload.guideToken,
+          // Fixed seating — the group's player tokens in one shared, fixed
+          // order; see TeacherDashboard's startGame() for why this needs no
+          // further agreement between devices, and skyPath.js's own
+          // `seatOffsets` for what it's used for.
+          roster: payload.roster,
           result: null,
         });
       });

@@ -100,6 +100,18 @@ export function mountSkyPath(container, options = {}) {
     // file, which applies equally here): nobody else in the group can be
     // BEHIND this fork, since fork progress only ever moves forward.
     initialGuideIsland = null,
+    // Fixed-seating redesign, 2026-09-13 — Luke: "each person will be
+    // assigned a position, and that won't change through the round."
+    // `roster` is the group's PLAYER tokens (guide excluded — see
+    // TeacherDashboard's startGame(), which is the one place that already
+    // knows who the guide is), in one fixed order shared by every device
+    // via the same `game-started` broadcast that carries `forks`/`words`.
+    // Every device builds the identical seat-offset table from it (see
+    // `seatOffsets` below) purely by array index, so no further messages
+    // are needed to agree on who stands where. `myToken` is this device's
+    // own entry in that same array, so it can find its own seat.
+    roster = [],
+    myToken = null,
   } = options;
   // Declared here, not down near soloRoleToggle where it originally lived —
   // setCharacter() (called during initial setup, long before that point)
@@ -244,10 +256,15 @@ export function mountSkyPath(container, options = {}) {
   // side was taken, so a same-direction streak damps out rather than
   // compounding; nothing here assumes an alternating pattern.
   //
-  // For testing a specific pattern (e.g. an all-left run to check how the path
-  // visuals handle a strong sideways veer), append ?forks=LLLRRR to the URL —
-  // one L/R per fork, case-insensitive, missing/extra forks fall back to
-  // random. Example: index.html?forks=LLLLLL
+  // For testing a specific pattern, append ?forks=LLLRRR to the URL — one
+  // L/R per fork, case-insensitive, missing/extra forks fall back to random.
+  // Example: index.html?forks=LLLLLL. Since 2026-09-13's per-player side
+  // randomisation (see buildFork()), 'L'/'R' here no longer names a
+  // physical bridge — it's a SHARED signal naming which member of the word
+  // pair (`pair.a` for 'L', `pair.b` for 'R') is correct; which physical
+  // side that word actually lands on is a separate, unforced, per-device
+  // random draw, so this override can no longer pin down a specific
+  // physical-side pattern for testing path visuals — only which word wins.
   function genCorrectSequence() {
     const override = forksOverride;
     return Array.from({ length: N_FORKS }, (_, i) => {
@@ -1929,6 +1946,15 @@ export function mountSkyPath(container, options = {}) {
   const CURTAIN_GUIDE_OPACITY = 0.28; // guide sees through it — the cheap version of "the guide can see ahead"
 
   const curtains = [];
+  // Hidden 2026-09-13 while the real-movement tracking rebuild was being
+  // tested end to end (Luke: "go ahead and disable the fog altogether...
+  // that way we can test that everyone else can see everything they
+  // should"). Re-enabled 2026-09-14 once that rebuild was confirmed working
+  // through every movement type and the guide's camera-follow behaviour —
+  // see TODO.md's step-by-step entry. The curtains occlude real movement
+  // now, same as any other piece of scenery, rather than replacing it with
+  // a stand-in the way the old fog system used to.
+  const FOG_CURTAINS_VISIBLE = true;
 
   const FOG_VERT = /* glsl */ `
     varying vec2 vUv;
@@ -2079,6 +2105,11 @@ export function mountSkyPath(container, options = {}) {
       });
     }
 
+    // Luke, 2026-09-13: "go ahead and disable the fog altogether. Don't
+    // delete it, just hide it. That way we can test that everyone else can
+    // see everything they should." Everything else about a curtain still
+    // builds and animates as before — flip this back on to restore it.
+    group.visible = FOG_CURTAINS_VISIBLE;
     scene.add(group);
     const curtain = { group, sheet, puffs, seeds, pos, heading, open: 0, opening: false, done: false };
     curtains.push(curtain);
@@ -2585,7 +2616,34 @@ export function mountSkyPath(container, options = {}) {
 
   function buildFork(k) {
     const cursor = journeyCursor;
-    const correct = CORRECT_BY_FORK[k - 1];
+    // `CORRECT_BY_FORK[k-1]` is a SHARED signal (same on every device,
+    // parsed from the group-wide `forks` string — see genCorrectSequence)
+    // but no longer names a physical side: it names which member of the
+    // word pair is correct, "left" meaning `pair.a`, "right" meaning
+    // `pair.b`, purely as internal labels carried over from before this
+    // was split. Which physical bridge each member actually sits on is a
+    // separate, LOCAL coin flip below — see `aOnLeft`.
+    const pair = roundWords[k - 1]; // { a, b } — shared pair, no side yet (see wordPairs.js's assignForkWords)
+    const correctIsA = CORRECT_BY_FORK[k - 1] === 'left';
+    // Per-player randomised side, 2026-09-13 — Luke: "the correct
+    // side/bridge and the matching word needs to be randomised per
+    // player... [to] prevent players from seeing which choice their
+    // teammates made." Every device already builds this entire scene
+    // independently from the same shared `pair`/`correctIsA` (buildFork
+    // runs locally on each device, nothing about geometry is networked —
+    // see the "single shared fact" reasoning in the seating section above
+    // for the general pattern this follows), so this is simply a fresh
+    // `Math.random()` per device, per fork: which pair member lands left
+    // vs right differs device to device, while the WORD that's actually
+    // correct — needed so everyone reacts to the same word the guide says
+    // aloud — stays identical everywhere, since it's derived from the
+    // shared `correctIsA` regardless of this device's own placement. The
+    // two physical bridges are already visually identical either way (see
+    // "Nothing here hides which bridge is correct" below), so this
+    // introduces no new visual tell for a device that happens to see both.
+    const aOnLeft = Math.random() < 0.5;
+    const words = aOnLeft ? { left: pair.a, right: pair.b } : { left: pair.b, right: pair.a };
+    const correct = correctIsA === aOnLeft ? 'left' : 'right'; // the PHYSICAL side holding the correct word, local to this device
     // The island art carries its own pillars, so the procedural pair is off.
     // spawnPillars(cursor) — kept callable for when extra props are wanted.
     if (nextIslandAlreadySpawned) {
@@ -2652,7 +2710,7 @@ export function mountSkyPath(container, options = {}) {
       fork: { ...cursor },
       correct,
       branch,
-      words: roundWords[k - 1],
+      words,
       approach: null,
       nextCursor,
       endPhase,
@@ -2694,22 +2752,28 @@ export function mountSkyPath(container, options = {}) {
   function buildJourney() {
     clearJourney();
     // Redrawn every call, not just once at page load — so "Again" (restart())
-    // deals a fresh round of pairs/order rather than repeating the last run's
+    // deals a fresh round of pairs rather than repeating the last run's
     // words. See assignForkWords() in wordPairs.js for the actual selection
-    // rules (no repeats within a round while pairs allow it; left/right order
-    // independent of CORRECT_BY_FORK below).
+    // rules (no repeats within a round while pairs allow it).
     //
     // wordsOverride takes priority when given — Luke, after a multiplayer
     // test: "the words the guide sees are different from the words the
     // players in their teams [see]." Root cause: every device was calling
-    // assignForkWords() independently, so each one drew its own random
-    // pair AND its own random left/right layout — nothing about the words
-    // shown was ever actually shared, only which SIDE (not word) was
-    // correct (forksOverride/CORRECT_BY_FORK above). Whoever starts the
-    // round for the whole group now decides the words once (see
-    // TeacherDashboard.jsx's startGame()) and broadcasts them alongside
-    // forks, so every device in the group renders the identical array here
-    // instead of drawing its own.
+    // assignForkWords() independently, so each one drew its own random PAIR
+    // — nothing about which words were even in play was ever actually
+    // shared. Whoever starts the round for the whole group now decides the
+    // pairs once (see TeacherDashboard.jsx's startGame()) and broadcasts
+    // them alongside forks, so every device in the group renders the
+    // identical `{a, b}` pairs here instead of drawing its own.
+    //
+    // Left/right PLACEMENT of each pair is deliberately NOT part of this
+    // shared array any more (see wordPairs.js's own comment) — that's a
+    // separate, per-device random draw done locally in buildFork(), added
+    // 2026-09-13 specifically so a teammate's physical side conveys nothing
+    // about which word they judged correct. Only the pair identity, and
+    // which member of it is correct (CORRECT_BY_FORK, from the shared
+    // `forks` string), need to match across the group; which one sits on
+    // which bridge does not, and now never does.
     roundWords = wordsOverride ?? assignForkWords(wordPairs, N_FORKS);
     const origin = { x: 0, z: 0, heading: 0 };
     registerIsland(origin);
@@ -2758,9 +2822,61 @@ export function mountSkyPath(container, options = {}) {
   // and only the tag's width (how much a longer name needs) varies.
   // NAME_TAG_HEIGHT picked relative to WORD_SIGN_HEIGHT using the ratio the
   // 2026-09-06 comment on WORD_SIGN_HEIGHT already recorded between the two
-  // ("sized 50% bigger than a name tag") — 0.9 / 1.5.
-  const NAME_TAG_HEIGHT = 0.6;
+  // ("sized 50% bigger than a name tag") — 0.9 / 1.5. Reduced 10% again,
+  // 2026-09-15, Luke — the tag mesh's width is derived from this same
+  // height (see attachNameTag's tagW), so its cardboard backing shrinks
+  // proportionally with the letters, not just the letters alone.
+  const NAME_TAG_HEIGHT = 0.6 * 0.9;
   const NAME_TAG_GAP = 0.12; // world units between the card's top edge and the tag's bottom edge
+
+  /**
+   * Local Y for a name tag, relative to the RIG GROUP'S OWN origin (which
+   * sits at world Y = FIGURE_H/2, mid-body — see e.g. positionTeammateRig),
+   * now that a tag is a real mesh parented to that group again (see the
+   * "Name tags" section's header comment for why). "Above" clears past the
+   * head (local +FIGURE_H/2) by GAP — straightforward, mirrors the old
+   * screen-space version exactly. "Below" can NOT mirror that by simply
+   * negating it (that's the exact bug that sank the original 2026-08-30
+   * mesh attempt): negating lands at local -(FIGURE_H/2+GAP+tagH/2), which
+   * is world Y = FIGURE_H/2 - (FIGURE_H/2+GAP+tagH/2) = -(GAP+tagH/2) — a
+   * small NEGATIVE world Y, i.e. below the ground plane, invisible behind
+   * solid terrain regardless of how small the magnitude is. A real mesh
+   * can't clip through the ground the way the screen-space DOM version
+   * could — so "below" sits with its own bottom edge right at the ground
+   * (local -FIGURE_H/2, the group's own bottom edge, plus half its own
+   * height) rather than hanging past it.
+   */
+  // NAME_TAG_BELOW_Y_OFFSET: nudge on top of the below-side formula below —
+  // added 2026-09-14, Luke: the below tag read as "partially embedded in
+  // the ground." Found live via the `?tagTune=1` panel and locked in
+  // 2026-09-15; the panel itself is being kept live for now since resizing
+  // the tag (NAME_TAG_HEIGHT below) may call for a further nudge here — see
+  // that constant's own comment.
+  let NAME_TAG_BELOW_Y_OFFSET = 0.21;
+  function tagLocalY(side, tagH) {
+    return side === 'below'
+      ? tagH / 2 - FIGURE_H / 2 + NAME_TAG_BELOW_Y_OFFSET
+      : FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2;
+  }
+
+  // Luke, 2026-09-13, after seeing a "below" tag flickering and covering the
+  // avatar's feet: a below-body tag sitting near ground level is, by
+  // construction, at the same local Z as the character's own card mesh
+  // (both default to 0) AND within its Y extent — two coplanar overlapping
+  // planes, which is a textbook z-fight (the flicker) as well as the tag
+  // visibly sitting ON TOP of the art instead of clear of it. Nudging it
+  // forward (toward the camera, since the card's own "front" faces +Z — see
+  // makeCharacterRig) by a real, visible amount puts it in the open ground
+  // just in front of the character's feet instead, matching Luke's
+  // reference screenshot: clearly separate from the card, not embedded in
+  // it. "Above" needs no such push — nothing else occupies that space.
+  // Found live via `?tagTune=1` alongside NAME_TAG_BELOW_Y_OFFSET above and
+  // locked in 2026-09-15 — see that constant's own comment for why the
+  // panel itself is being kept live a while longer.
+  let NAME_TAG_BELOW_Z = 1.06;
+  function tagLocalZ(side) {
+    return side === 'below' ? NAME_TAG_BELOW_Z : 0;
+  }
 
   /**
    * Builds one character rig: the character art as a single plane.
@@ -2789,16 +2905,7 @@ export function mountSkyPath(container, options = {}) {
     r.frontMesh.geometry.dispose();
     r.frontMesh.material.dispose();
     removeNameTag(r);
-    // r.group already removed above, which takes the power-up group with it
-    // — only the card's own uniquely-created geometry/material need explicit
-    // disposal. The clip is a clone sharing the template's geometry/material
-    // (see equipPowerUp), so it's never disposed here — doing so would break
-    // every future equip, not just this rig's.
-    if (r.powerup) {
-      r.powerup.cardMesh.geometry.dispose();
-      r.powerup.cardMesh.material.dispose();
-      disposeEngineSmoke(r.powerup);
-    }
+    disposePowerUp(r);
   }
 
   let characterKey = ROSTER[0].key;
@@ -2943,6 +3050,24 @@ export function mountSkyPath(container, options = {}) {
     rig.group.add(group);
     rig.powerup = { group, cardMesh, clip, frameIndex: 0 };
     applyPowerUpTune(rig);
+  }
+
+  /**
+   * Fully removes a rig's power-up — geometry/material disposal, whichever
+   * parent it's currently under (normally `rig.group`, or `scene` directly
+   * once mid-rescue detach has re-parented it — see updateRescue's own
+   * `scene.attach` call). Safe to call on a rig with no power-up. Factored
+   * out once a fourth call site (a teammate's power-up disappearing
+   * remotely — see updateTeammate) would otherwise have repeated the same
+   * four lines a fourth time.
+   */
+  function disposePowerUp(rig) {
+    if (!rig.powerup) return;
+    rig.powerup.group.removeFromParent();
+    rig.powerup.cardMesh.geometry.dispose();
+    rig.powerup.cardMesh.material.dispose();
+    disposeEngineSmoke(rig.powerup);
+    rig.powerup = null;
   }
 
   function applyPowerUpTune(rig) {
@@ -3137,80 +3262,88 @@ export function mountSkyPath(container, options = {}) {
    * Found live by extracting the mesh's actual world position; the tag was
    * there, just buried in the stone floor.
    *
-   * Rewritten 2026-08-31 as a plain positioned <div> per tag, layered in
-   * `#nameTagLayer` above the canvas, repositioned every frame by
-   * projecting each rig's anchor point through the camera (`worldToScreen`
-   * below). This sidesteps the ground problem entirely — a pixel offset
-   * can't clip into terrain — and comes with two things Luke asked for
-   * that were awkward as mesh-local geometry:
-   *   - visibility is now a plain per-tag flag, not a position hack, so
-   *     "hide while the card is moving, show once it's standing still on
-   *     an island" (Luke, 2026-08-31 — see `moving` in updateNameTags) is
-   *     one boolean, and any future per-avatar exception (an abduction
-   *     animation that should hide the tag mid-flight, say) is too.
-   *   - each viewer's own camera does the projecting, so who reads as
-   *     "left" or "right" — and thus how far off-centre a tag lands — is
-   *     naturally per-viewer with zero extra bookkeeping, which matters
-   *     once other players are actually networked (see TODO.md).
-   * No per-tag screen-collision layout yet (letting two tags overlap on
-   * screen if the projected math says they should) — flagged in TODO.md as
-   * the natural next step once there are several real networked players
-   * to test it against, rather than guessed at now.
+   * Rewritten 2026-08-31 as a screen-space DOM overlay, then reverted back
+   * to a mesh 2026-09-13 — Luke: "the names should be affixed to the
+   * character card, so that they have the same facing and move with the
+   * character at all times... the name tags have been applied in a
+   * different way, and shift relative to the camera, turning to face it.
+   * This should not happen." Right: a screen-space tag is by definition
+   * always flat-on to the viewer, which reads exactly as "always turning to
+   * face the camera" the moment the camera moves around at all. Checked git
+   * history for the original mesh version this superseded — it was never
+   * actually a shipped, working state (both the mesh attempt and the DOM
+   * rewrite happened within developing this same original feature) — so
+   * this isn't a revert to old committed code, it's a fresh build, but one
+   * that now avoids the exact bug that sank the first attempt: see the
+   * `localY` comment in attachNameTag below.
+   *
+   * A mesh parented directly under `targetRig.group` needs no per-frame
+   * screen-projection at all — it inherits the rig's own position AND
+   * rotation for free, which is exactly "moves and faces the same as the
+   * character" — and this game already has a working precedent for a
+   * non-billboarded text plane behaving correctly on screen: word signs
+   * (makeWordSignMesh), which never billboard either and read fine because
+   * the camera only ever views the scene from a consistent relative angle
+   * (trailing the avatar, never free-look). The local player's own rig
+   * never rotates in world space at all (the CAMERA orbits to stay behind
+   * it, not the other way around — see tick()'s camera block), so its own
+   * tag will always face correctly; a teammate's rig does rotate to face
+   * its heading, and its tag rotates with it, which is the desired "you're
+   * looking at a real object, not a HUD sticker" read a spectator gets too.
+   *
+   * `moving`/`alwaysVisible` visibility (Luke, 2026-08-31: hide while the
+   * card is moving, show once it's standing still) is unaffected by any of
+   * this — still a plain per-tag flag, just `mesh.visible` instead of a DOM
+   * `display` toggle.
    */
-  const nameTags = []; // { rig, localY, tagW, tagH, el, alwaysVisible }
+  const nameTags = []; // { rig, mesh, alwaysVisible }
 
-  function worldToScreen(pos) {
-    const v = pos.clone().project(camera);
-    return {
-      x: (v.x * 0.5 + 0.5) * surfaceWidth(),
-      y: (1 - (v.y * 0.5 + 0.5)) * surfaceHeight(),
-      behind: v.z > 1,
-    };
+  // Temporary, 2026-09-14 — diagnosing "player 4's name shows above when it
+  // should be below" (Luke: happening in PLAYERS' own views, sometimes even
+  // on the first island, not tied to any particular fork transition — ruling
+  // out both the seatOffsets table itself, which every console check so far
+  // has shown is correctly computed, and any island/fork-transition-timing
+  // theory). Records every point this device actually touches a tag's
+  // above/below placement — a fresh attach (which always defaults to
+  // 'above', corrected a moment later — see attachNameTag/setNameTagSide's
+  // own comments) and every time setNameTagSide finds the mesh's current Y
+  // doesn't match what it should be and changes it — plus tab visibility
+  // changes, since backgrounded/throttled tabs (Luke: testing via many tabs
+  // in one browser) are one live suspect. A no-op setNameTagSide call
+  // (already correct) is NOT logged — only actual attaches and actual
+  // corrections — so this stays small enough to read after the fact rather
+  // than needing to be caught live. Dump with window.__tagDebugLog(). Delete
+  // this whole block once the real bug is found.
+  const tagDebugLog = [];
+  function logTagEvent(event, extra) {
+    tagDebugLog.push({ t: Date.now(), event, hidden: document.hidden, ...extra });
+    if (tagDebugLog.length > 500) tagDebugLog.shift();
   }
+  function tagOwnerLabel(targetRig) {
+    if (targetRig === rig) return `me:${localDisplayName ?? '?'}`;
+    for (const [tok, e] of teammates) {
+      if (e.rig === targetRig) return `${e.displayName ?? '?'}:${tok}`;
+    }
+    return 'unknown-rig';
+  }
+  const onTagDebugVisibility = () => logTagEvent('visibilitychange', {});
+  document.addEventListener('visibilitychange', onTagDebugVisibility);
 
   // Run every frame regardless of state (see tick()) — visibility itself is
   // state-dependent, so the check has to happen every frame, not just while
   // walking. `moving` covers falling and being abducted too: a tag riding a
-  // card up into a flying saucer is exactly as nonsensical as a mid-walk one,
-  // and unlike a fall it would sail off the top of the screen still attached
-  // (tags only self-hide when they go *behind* the camera, not above it).
+  // card up into a flying saucer is exactly as nonsensical as a mid-walk one.
   function updateNameTags() {
     const moving = !!leg || falling || !!abduction || !!templeEntry || !!rescue;
-    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
     for (const t of nameTags) {
       // `moving` only ever reflects the LOCAL player's own state, so it says
       // nothing about a teammate's rig — added 2026-09-12 alongside the
       // teammate departure animation, which hides a rig directly
       // (rig.group.visible = false) once it reaches the fog. Without this
-      // check the tag floated on screen at its last position, alone,
-      // uselessly, forever, since nothing else here ever noticed the card
-      // underneath it was gone.
-      if ((moving && !t.alwaysVisible) || !t.rig.group.visible) {
-        t.el.style.display = 'none';
-        continue;
-      }
-      const anchor = t.rig.group.position.clone();
-      anchor.y += t.localY;
-      const center = worldToScreen(anchor);
-      if (center.behind) {
-        t.el.style.display = 'none';
-        continue;
-      }
-      // Calibrate on-screen width by projecting two points a real tagW
-      // apart at the anchor's own depth, rather than a fixed px size or a
-      // distance-ratio guess — this is exactly the perspective size a 3D
-      // plane of that world width would have rendered at, so it keeps
-      // looking right if the camera FOV/distance ever changes, with
-      // nothing here to re-tune.
-      const half = right.clone().multiplyScalar(t.tagW / 2);
-      const edgeA = worldToScreen(anchor.clone().add(half));
-      const edgeB = worldToScreen(anchor.clone().sub(half));
-      const pxWidth = Math.hypot(edgeA.x - edgeB.x, edgeA.y - edgeB.y);
-      t.el.style.display = '';
-      t.el.style.left = `${center.x}px`;
-      t.el.style.top = `${center.y}px`;
-      t.el.style.width = `${pxWidth}px`;
-      t.el.style.height = `${pxWidth * (t.tagH / t.tagW)}px`;
+      // check the tag would keep rendering, attached to an invisible rig,
+      // uselessly, since nothing else here ever notices the card underneath
+      // it is gone.
+      t.mesh.visible = (!moving || t.alwaysVisible) && t.rig.group.visible;
     }
   }
 
@@ -3218,15 +3351,19 @@ export function mountSkyPath(container, options = {}) {
     if (!targetRig.nameTag) return;
     const idx = nameTags.indexOf(targetRig.nameTag);
     if (idx !== -1) nameTags.splice(idx, 1);
-    targetRig.nameTag.el.remove();
+    const { mesh } = targetRig.nameTag;
+    targetRig.group.remove(mesh);
+    mesh.geometry.dispose();
+    mesh.material.map?.dispose();
+    mesh.material.dispose();
     targetRig.nameTag = null;
   }
 
   /**
    * Builds the name-tag canvas (async — it loads the letter/background art
-   * on demand) and registers a screen-space tag for the given rig once
-   * ready. Fire-and-forget from the Start button: by the time it resolves
-   * the player is already walking, and the tag just appears a beat later
+   * on demand) and attaches a mesh tag to the given rig once ready.
+   * Fire-and-forget from the Start button: by the time it resolves the
+   * player is already walking, and the tag just appears a beat later
    * (hidden until they stop, per updateNameTags above). Guards against the
    * rig having been swapped or the game unmounted in the meantime (neither
    * happens for the player's own rig in the current flow — character can't
@@ -3244,8 +3381,7 @@ export function mountSkyPath(container, options = {}) {
    */
   function attachNameTag(targetRig, name, glowColorHex, opts = {}) {
     if (!name) return;
-    // `side` places the tag above the head or down near the feet (see the
-    // TEST_TAGS block below for why "below" isn't a mirror-image offset).
+    // `side` places the tag above the head or down near the feet.
     // `isCurrent` replaces the old hardcoded `rig === targetRig` guard
     // (which assumed the *only* rig in play was the player's own,
     // swappable one — not true once static companion rigs that never
@@ -3253,10 +3389,18 @@ export function mountSkyPath(container, options = {}) {
     // hide-while-moving rule entirely — unused today (every tag currently
     // follows the same rule, per Luke, 2026-08-31) but cheap to leave
     // wired in for whenever the player's own tag, say, needs to differ.
-    const { side = 'above', isCurrent = () => rig === targetRig, alwaysVisible = false } = opts;
+    // `yStagger` mirrors setNameTagSide's own param — the "below" seats'
+    // small extra downward nudge (see ISLAND_TAG_STAGGER_Y) — so a caller
+    // that already knows its final seat can bake the whole placement in up
+    // front, rather than relying on a follow-up setNameTagSide call that
+    // would race this function's own async canvas build (see the bug this
+    // fixed, at this function's real-player call site).
+    const { side = 'above', yStagger = 0, isCurrent = () => rig === targetRig, alwaysVisible = false } = opts;
+    logTagEvent('attach-queued', { who: tagOwnerLabel(targetRig), name, side }); // see tagDebugLog's own comment
     const glowColor = `#${glowColorHex.toString(16).padStart(6, '0')}`;
     buildNameTagCanvas(name, { glowColor })
       .then(({ canvas, aspect }) => {
+        logTagEvent('attach-resolved', { who: tagOwnerLabel(targetRig), name, side, aborted: disposed || !isCurrent() });
         if (disposed || !isCurrent()) return;
         removeNameTag(targetRig); // drop any previous tag for this rig first — avoids a leaked duplicate on re-attach
         // aspect is height/width (see buildNameTagCanvas) — height is fixed
@@ -3265,27 +3409,18 @@ export function mountSkyPath(container, options = {}) {
         // reason: fixing width instead let a short name's height balloon.
         const tagH = NAME_TAG_HEIGHT;
         const tagW = tagH / aspect;
-        // "below" used to sit just above the shins/knees (mirroring "above"
-        // would have buried the old MESH version underground — see this
-        // section's own header comment). That reasoning no longer applies:
-        // tags are a screen-space overlay now, not a mesh with real ground
-        // clipping, so there's nothing stopping it from hanging fully below
-        // the feet. Luke, 2026-09-12: the shins/knees placement still
-        // covered too much of the avatar — "put them low enough that we can
-        // see the base of the character's avatar" — so "below" is now a true
-        // mirror of "above", the same GAP clearance on the opposite side of
-        // the figure entirely, rather than partway up its own body.
-        const localY = side === 'below'
-          ? -(FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2)
-          : FIGURE_H / 2 + NAME_TAG_GAP + tagH / 2;
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-        canvas.style.display = 'block';
-        const el = document.createElement('div');
-        el.className = 'nameTagChip';
-        el.appendChild(canvas);
-        els.nameTagLayer.appendChild(el);
-        const entry = { rig: targetRig, localY, tagW, tagH, el, alwaysVisible };
+        const localY = tagLocalY(side, tagH); // see tagLocalY's own comment for why "below" isn't a plain sign-flip of "above"
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(1, 1),
+          new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, fog: false })
+        );
+        mesh.renderOrder = 10; // same as word signs — draws above the fog puffs
+        mesh.scale.set(tagW, tagH, 1);
+        mesh.position.set(0, localY + yStagger, tagLocalZ(side));
+        targetRig.group.add(mesh);
+        const entry = { rig: targetRig, mesh, alwaysVisible };
         targetRig.nameTag = entry;
         nameTags.push(entry);
       })
@@ -3312,74 +3447,62 @@ export function mountSkyPath(container, options = {}) {
   // up drawing from the same source of truth instead of guessing at
   // someone else's position.
   //
-  // Two phases, not a full position stream:
-  //   'resting' — snap to sections[forkIndex - 1].fork. Used on arrival.
-  //   'departing' — Luke, 2026-09-12: "players should see other players
-  //     leaving the island, but should not see which direction they take:
-  //     they should disappear behind the wall of fog... rather than [see]
-  //     the other players' true movement, they will see a set animation of
-  //     the player moving straight forward into the wall of fog and then
-  //     disappearing." So for a PLAYER viewer, a departing teammate is
-  //     never animated along the real branch curve (sections[k].branch.
-  //     left/right) — that would show which side they picked. Instead every
-  //     departure looks identical to another player: a straight walk from
-  //     the fork along its own heading, toward where that fork's own
-  //     curtain stands (see CURTAIN_DIST/makeCurtain above), then hidden.
-  //   Luke, 2026-09-13, once the concealment above was working correctly:
-  //     the guide (and Watch mode) must see the OPPOSITE of this — "the
-  //     guide should always be able to see the full movement of any player
-  //     who is still in the game," the real thing, not the fog stand-in.
-  //     The reasoning the fog exists for a player doesn't apply to a
-  //     spectator: concealment protects someone who could still be
-  //     influenced by learning a direction early, and the guide/a watching
-  //     player can never act on a fork at all, so there's nothing left to
-  //     protect once someone starts walking.
-  //   'moving' — Luke, 2026-09-13, after the first (simulated) attempt at
-  //     the above: "the guide is still seeing a stand-in in place of the
-  //     player's actual movement... it would be good if we could see the
-  //     players progressing rather than using a stand-in," explicitly fine
-  //     with "a short delay and/or a minor displacement." So a spectator's
-  //     view of a departing teammate is now driven by this THIRD phase — a
-  //     throttled real-position ping the departing device sends repeatedly
-  //     while its own `leg` is active (see MOVING_PING_INTERVAL in tick()),
-  //     letting a spectator track the actual thing happening on that
-  //     device's screen instead of a distance/WALK_SPEED guess. A player's
-  //     own device still only ever renders the fog stand-in regardless of
-  //     these pings (see updateTeammates' own role check) — nothing changes
-  //     for a player-to-player view; only a spectator role's rendering
-  //     reads `entry.livePos` at all.
+  // Four phases, every one an EXPLICIT report from the moving device — no
+  // viewer ever infers anything from timing or silence (see below for why):
+  //   'resting'   — standing at sections[forkIndex - 1].fork, at its own
+  //                 fixed seat. Sent on arrival (a walk completing, or a
+  //                 jetpack rescue landing) and after character select.
+  //   'departing' — a fork has been chosen. Nothing visibly happens on
+  //                 anyone else's screen for this alone: the rig simply
+  //                 stays where it is until real positions arrive. Luke,
+  //                 2026-09-13: "once they choose the path, they don't
+  //                 move. They only move once they press the forward arrow."
+  //   'moving'    — a throttled ping (MOVING_PING_INTERVAL) carrying the
+  //                 sender's REAL current transform — `{x, z, heading}`
+  //                 while walking, `{x, y, z, quat}` while falling, being
+  //                 jetpack-rescued, or being abducted — sent for as long
+  //                 as any of those is actually happening on that device.
+  //                 Every viewer, whatever its role, just smooths its copy
+  //                 of the rig toward the latest one. If pings stop (a
+  //                 released forward button, a hiccup), the rig stops —
+  //                 Luke: "if they stop moving... everyone else will see
+  //                 them stop."
+  //   'gone'      — the sender's own fall or abduction has fully played
+  //                 out and its figure is hidden; hide this copy too.
   //
-  // Animation timing (for the fog stand-in a player sees) is each VIEWER's
-  // own clock (Date.now() at the moment their device receives the
-  // 'departing' update), not a timestamp relayed from the sender —
-  // sidesteps cross-device clock-skew entirely, at the cost of different
-  // viewers not seeing the walk frame-perfectly in sync, which doesn't
-  // matter for a cosmetic departure animation. A spectator's live-tracked
-  // view has no such clock-skew concern in the first place — it's smoothing
-  // toward positions the sender reports directly, not deriving one from
-  // elapsed time on the receiving end.
-  // Luke, 2026-09-12, after seeing the walk-to-CURTAIN_DIST-at-WALK_SPEED
-  // version live: "the player only disappears after they have clearly
-  // started to walk along one of the two bridges. It doesn't obscure their
-  // choice." That timing tied the vanish to real island geometry and real
-  // walk speed — both of which put the curtain far enough out, and the walk
-  // slow enough, that a viewer had a full couple of seconds to watch the
-  // rig converge visually toward whichever bridge's start looked nearest,
-  // reading as "walking that bridge" even though the underlying math was
-  // centred the whole time. Decoupled entirely from CURTAIN_DIST/WALK_SPEED
-  // now: a short, fixed, purely symbolic duration, tuned to feel like "gone
-  // almost immediately" rather than a real crossing.
-  const FOG_DEPART_DURATION = 1.25; // seconds — independent of world distance/walk speed, see above
-  const teammates = new Map(); // token -> { rig, characterKey, forkIndex, displayName, colorHex, phase, departStartedAt, willFall, fallStandinStartedAt, livePos, livePosAt }
+  // History, kept because the reasoning still matters: this used to be
+  // built the other way round. A PLAYER viewer got a fixed "walk straight
+  // forward into the fog and vanish" stand-in on 'departing' (to hide which
+  // side a teammate chose — moot since 2026-09-13's per-player randomised
+  // sides, see buildFork), and even a spectator's real tracking still
+  // INFERRED a fall from pings going silent for LIVE_POS_STALE_MS, playing
+  // a synthetic sink-and-tip. Both were sources of "they fell the instant
+  // they chose, before moving at all" on other people's screens — the
+  // stand-in by design (it started on 'departing'), the inference by
+  // accident (silence right after choosing, before the player has pressed
+  // forward, is indistinguishable from silence because they fell). Luke,
+  // 2026-09-13, after a full session of this: "all character movements
+  // (successfully crossing the bridge, falling, using the jetpack, being
+  // abducted by aliens) should be in theory viewable by other players...
+  // No one will see them fall until and unless they walk all the way to
+  // the mid-point of the bridge, which triggers the fall." So: one code
+  // path for every viewer, driven purely by what the sender explicitly
+  // reports, and nothing synthetic left that could show an event that
+  // hasn't happened. The fog curtains themselves still exist as scenery
+  // (hidden for now — see FOG_CURTAINS_VISIBLE) and, when shown, occlude
+  // this real movement naturally, as real meshes do.
+  const teammates = new Map(); // token -> { rig, characterKey, forkIndex, displayName, colorHex, phase, livePos, pingCount, lastPingAt, seatOffsetX, seatTagSide, seatTagYStagger }
 
   function teammateWorldPos(forkIdx) {
     const sec = sections[forkIdx - 1];
     return sec ? sec.fork : { x: 0, z: 0, heading: 0 };
   }
 
+  /** Snaps a resting teammate straight to ITS fixed seat (see seatOffsets), not the island's bare centre — used the moment a 'resting' report arrives, and after buildJourney() rebuilds `sections`, so a teammate is never seen at centre even for one frame before relayoutAllIslands next runs. */
   function positionTeammateRig(entry) {
     const p = teammateWorldPos(entry.forkIndex);
-    entry.rig.group.position.set(p.x, FIGURE_H / 2, p.z);
+    const lateral = forward((p.heading ?? 0) + Math.PI / 2, entry.seatOffsetX ?? 0);
+    entry.rig.group.position.set(p.x + lateral.x, FIGURE_H / 2, p.z + lateral.z);
     entry.rig.group.rotation.set(0, p.heading ?? 0, 0);
   }
 
@@ -3393,7 +3516,11 @@ export function mountSkyPath(container, options = {}) {
   function ensureTeammateEntry(token, tCharacterKey, tName, colorHex) {
     let entry = teammates.get(token);
     if (!entry || entry.characterKey !== tCharacterKey) {
-      if (entry) disposeRig(entry.rig);
+      if (entry) {
+        disposeRig(entry.rig);
+        entry.abduction?.dispose(); // a swapped/replaced rig mid-abduction — rare, but don't leak the saucer
+      }
+      const seat = seatOffsets.get(token) ?? { offsetX: 0, tagSide: 'above', tagYStagger: 0 };
       entry = {
         rig: makeCharacterRig(tCharacterKey ?? ROSTER[0].key),
         characterKey: tCharacterKey ?? ROSTER[0].key,
@@ -3401,10 +3528,19 @@ export function mountSkyPath(container, options = {}) {
         displayName: tName ?? null,
         colorHex: colorHex ?? PALETTE[0].hex,
         phase: 'resting',
-        departStartedAt: 0,
-        fallStandinStartedAt: 0,
         livePos: null,
-        livePosAt: 0,
+        pingCount: 0, // diagnostics only — see the HUD line in tick()
+        lastPingAt: 0,
+        departStartedAt: 0, // set once this teammate's own engine detaches — see updateTeammate/updateTeammates
+        departBaseY: 0,
+        abduction: null, // a locally-built saucer instance while this teammate is being abducted — see updateTeammate's 'departing' handling
+        // Fixed for the whole round — see the "island layout" section's
+        // `seatOffsets` above; a token not in `roster` (shouldn't happen for
+        // a real player, but keeps a stray/late report harmless) just sits
+        // at centre rather than throwing.
+        seatOffsetX: seat.offsetX,
+        seatTagSide: seat.tagSide,
+        seatTagYStagger: seat.tagYStagger,
       };
       teammates.set(token, entry);
       if (entry.displayName) {
@@ -3418,253 +3554,315 @@ export function mountSkyPath(container, options = {}) {
     return entry;
   }
 
-  function updateTeammate(token, { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, willFall, livePos }) {
+  function updateTeammate(
+    token,
+    { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, livePos, hasJetpack, firing, detached, abducting }
+  ) {
     if (token == null || tForkIndex == null) return;
     const entry = ensureTeammateEntry(token, tCharacterKey, tName, colorHex);
+    entry.pingCount++;
+    entry.lastPingAt = Date.now();
+    // Mirrors this teammate's own jetpack/flame/detach state on their rig —
+    // see notifyPlayerState's own comment for why this rides every report
+    // rather than needing its own event. equipPowerUp/disposePowerUp/
+    // startEngineFlame/stopEngineFlame all already take an arbitrary `rig`
+    // (never assume it's the local player's own), so a teammate's rig
+    // works exactly the same way the local one does — no separate remote
+    // implementation needed.
+    if (!!hasJetpack !== !!entry.rig.powerup) {
+      if (hasJetpack) {
+        equipPowerUp(entry.rig);
+        entry.departStartedAt = 0;
+      } else if (!entry.departStartedAt) {
+        // Not currently mid-depart-animation (see updateTeammates) — a
+        // legitimate immediate removal, e.g. this device only learned about
+        // a whole rescue after the fact and never saw a `detached` report
+        // at all. If a depart animation IS already running, let it finish
+        // and dispose itself instead of cutting it short.
+        disposePowerUp(entry.rig);
+      }
+    }
+    if (entry.rig.powerup) {
+      if (firing && !entry.rig.powerup.flame) startEngineFlame(entry.rig);
+      else if (!firing && entry.rig.powerup.flame) stopEngineFlame(entry.rig);
+      // The engine detaches from the character and flies off on its own —
+      // see updateRescue's own `scene.attach` for the local original. Timed
+      // from whenever THIS device first learns about it (there's no real
+      // transform stream for the departing engine itself, just this one
+      // trigger), not from the sender's own clock — see updateTeammates for
+      // the per-frame animation this kicks off.
+      if (detached && !entry.departStartedAt) {
+        entry.departStartedAt = Date.now();
+        scene.attach(entry.rig.powerup.group);
+        entry.departBaseY = entry.rig.powerup.group.position.y;
+      }
+    }
     if (tPhase === 'moving') {
-      // A throttled real-position ping mid-crossing — see MOVING_PING_INTERVAL.
       // Only applied while this entry is actually departing from the SAME
       // fork the ping claims: guards against a stale/out-of-order message
       // (this entry object is reused across the whole game as the same
       // token progresses) ever repositioning something it no longer
-      // describes. Doesn't touch `phase`/`departStartedAt`/anything else —
-      // purely a position overlay for updateTeammates' spectator branch.
+      // describes. Doesn't touch `phase` — purely the latest real transform
+      // for updateTeammates() to smooth toward.
       if (entry.phase === 'departing' && entry.forkIndex === tForkIndex && livePos) {
         entry.livePos = livePos;
-        entry.livePosAt = Date.now();
       }
       return;
     }
     if (tPhase === 'departing') {
       entry.phase = 'departing';
-      entry.forkIndex = tForkIndex; // the fork being LEFT — updateTeammates() walks away from here
-      entry.departStartedAt = Date.now();
-      entry.willFall = !!willFall; // spectator-only stand-in — see updateTeammates()
-      entry.fallStandinStartedAt = 0;
-      entry.livePos = null; // clear any stale ping from a PREVIOUS departure
-      entry.livePosAt = 0;
+      entry.forkIndex = tForkIndex; // the fork being LEFT
+      entry.livePos = null; // clear any stale ping from a PREVIOUS departure — the rig holds where it is until a real one arrives
       entry.rig.group.visible = true;
       // Keyed by the fork being LEFT, not a single shared variable — see the
       // "guide camera" section's own comment on guideLastDepartedTokenByFork
       // for why a global "whoever departed most recently, anywhere" broke
       // with two real people actually playing at their own pace.
       guideLastDepartedTokenByFork.set(tForkIndex, token);
+      // Luke, 2026-09-14: "being abducted by aliens" needs to be visible
+      // too — see notifyPlayerState's own comment for why this builds a
+      // fresh LOCAL saucer instance from just this trigger, rather than
+      // streaming a transform for it. `entry.rig.group.position` is still
+      // wherever this teammate was actually seated (an abduction only ever
+      // starts from rest, never mid-walk — see startAbduction's own guard),
+      // so it's already the correct anchor with nothing extra to send.
+      if (abducting && !entry.abduction) {
+        entry.abduction = buildAbduction({
+          scene,
+          textures: { ship: TEX.spaceship, beams: TEX.spaceshipBeams, string: TEX.string },
+        });
+        entry.abduction.start({
+          at: { x: entry.rig.group.position.x, y: 0, z: entry.rig.group.position.z },
+          targetCard: entry.rig.group,
+          cardHeight: FIGURE_H,
+          cardWidth: FIGURE_H * FIGURE_ASPECT,
+        });
+      }
+    } else if (tPhase === 'gone') {
+      entry.phase = 'gone';
+      entry.livePos = null;
+      entry.rig.group.visible = false;
+      entry.abduction?.dispose(); // defensive — the per-frame check in updateTeammates normally disposes it first, once its own local playback finishes
+      entry.abduction = null;
     } else {
       entry.phase = 'resting';
       entry.forkIndex = tForkIndex;
+      entry.livePos = null;
       entry.rig.group.visible = true;
-      positionTeammateRig(entry);
+      entry.abduction?.dispose(); // defensive — shouldn't still exist by the time a 'resting' report arrives, but a new round's fresh 'resting' must never inherit a stray saucer
+      entry.abduction = null;
+      positionTeammateRig(entry); // also resets rotation outright, so a previous rescue's tilt can't linger
     }
   }
 
   // ---------------------------------------------------------------- island layout
   //
-  // Luke, 2026-09-12: "it's getting quite confusing... with the cards
-  // overlapping... we did this before and it should already be in the
-  // code/plan somewhere." It was — the `?testTags=1` harness above
-  // (spawnTestCompanions) prototyped exactly this arrangement (self dead
-  // centre, others alternating sides, tags alternating above/below) as a
-  // static, hand-placed test for tag overlap, months before there was a
-  // real teammate to place. This generalises that same arrangement to
-  // however many teammates are ACTUALLY resting on a given island, rather
-  // than a fixed 5-slot layout.
-  //
-  // The local player's own figure never moves — "each player should see
-  // themselves in the centre" is already true by construction (nobody's
-  // own position has ever been touched by any of this), so only OTHER
-  // occupants get spread apart. Tag side is still assigned to the local
-  // player too, though, by including a `null`-item centre slot in the same
-  // sort — its side just gets applied to the local rig's own tag (see
-  // `self` below) rather than to a moved rig.
+  // Fixed seating, 2026-09-13 — Luke, after several bugs traced back to
+  // layout being computed relative to whoever was looking ("each player
+  // starts their movement from the central position of the island... other
+  // players get shunted to the side"): "each person will be assigned a
+  // position, and that won't change through the round." `seatOffsets`
+  // below is that assignment — a lateral offset AND a fixed tag side per
+  // token, built ONCE from `roster` (see mountSkyPath's options) by array
+  // index, laid out left-to-right across five fixed slots (see the comment
+  // on `seatOffsets` itself for why it's five fixed slots rather than
+  // computed outward-from-centre ranks). Because every device in the group
+  // receives the identical `roster` array over the wire, every device
+  // computes the identical table with no further messages — the "single
+  // shared fact" a fixed layout needs. A seat never moves once assigned,
+  // including this device's own — self is just another entry in the same
+  // table now, not a permanently-reserved centre slot, which is what also
+  // retires the old guide-only "empty centre" special case entirely.
   const ISLAND_SPACING_X = FIGURE_H * FIGURE_ASPECT * 1.5; // same spacing spawnTestCompanions used
   const ISLAND_TAG_STAGGER_Y = FIGURE_H * 0.15;
+  // How far from an island's centre a seat's lateral walk tapers to/from
+  // zero at the start/end of a leg (see currentSeatLateral()) — tied to
+  // ISLAND_RADIUS, the same "how big is this deck" constant CURTAIN_DIST
+  // already keys off, so the taper always finishes comfortably before the
+  // branch/bridge geometry (built far longer than one island's radius).
+  const SEAT_TAPER_DIST = ISLAND_RADIUS;
 
-  /**
-   * `others` — everyone ELSE resting on the island, in a stable order (so
-   * the arrangement doesn't visibly reshuffle frame to frame as a Map
-   * iterates). Alternates sides outward from centre (right, left, right,
-   * left...) at increasing distance, matching the old test slots' -2/-1/
-   * +1/+2 pattern generalised to any count. `includeSelfAtCenter` adds one
-   * more slot at offsetX 0 purely so the ABOVE/BELOW alternation (assigned
-   * by final on-screen left-to-right order, not arrival order) accounts for
-   * whoever's own point of view this is — a player has one, the guide
-   * doesn't.
-   */
-  function layoutIslandGroup(others, includeSelfAtCenter) {
-    // Luke, 2026-09-13: with the guide (no self, `includeSelfAtCenter`
-    // false) watching, the dead centre — directly in front of its parked
-    // camera — stood permanently empty, "where their own avatar would have
-    // gone." Cause: `others` were always ranked starting at ±1 (rank
-    // `floor(i/2)+1`), reserving offsetX 0 for `self` regardless of whether
-    // a self actually exists to stand there. That's invisible for a real
-    // player, whose own body already genuinely occupies 0 in world space
-    // regardless of this bookkeeping — but for the guide, nobody does.
-    // Shifting every OTHER's index by one when there's no self to reserve
-    // slot 0 lets the first other take that centre slot instead, with
-    // every following other stepping outward exactly as before; passing
-    // `i + 1` in the self case reproduces the original ±1/±2/… ranks
-    // unchanged, so a real player's view is untouched by this.
-    const items = others.map((item, i) => {
-      const idx = includeSelfAtCenter ? i + 1 : i;
-      const rank = Math.ceil(idx / 2);
-      const side = idx % 2 === 1 ? 1 : -1;
-      const offsetX = idx === 0 ? 0 : side * rank * ISLAND_SPACING_X;
-      return { item, offsetX };
+  const seatOffsets = new Map(); // token -> { offsetX, tagSide, tagYStagger }
+  {
+    // Five fixed on-screen slots, 2026-09-14 — Luke, after the previous
+    // by-offsetX sort-then-alternate assignment broke again ("we are once
+    // again getting two players with names above next to each other"):
+    // "have five positions fixed, and the position of the name tag when in
+    // that position also fixed. So from left to right, Position 1 will be
+    // name above, 2 below, 3 above, 4 below, five above." Above/below is
+    // now a property of the SLOT (index 0-4 below, centre = 2), not
+    // something re-derived from sorting each round — nothing left to get
+    // out of sync. `windowStart` picks the middle `roster.length` slots out
+    // of the five so a smaller group still gets the full alternation
+    // instead of always starting from the left (5 players -> slots 0-4;
+    // 4 -> 0-3, i.e. "1-4"; 3 -> 1-3 ("2-4"); 2 -> 1-2 ("2-3")). Roster
+    // order maps directly to slot order left-to-right — every device
+    // builds this from the same shared `roster` array, so it agrees with
+    // no further messages, same as before.
+    const windowStart = Math.floor((5 - roster.length) / 2);
+    roster.forEach((tok, i) => {
+      const slot = windowStart + i;
+      const offsetX = (slot - 2) * ISLAND_SPACING_X;
+      const tagSide = slot % 2 === 0 ? 'above' : 'below';
+      seatOffsets.set(tok, { offsetX, tagSide, tagYStagger: tagSide === 'below' ? -ISLAND_TAG_STAGGER_Y : 0 });
     });
-    const self = includeSelfAtCenter ? { item: null, offsetX: 0 } : null;
-    const all = self ? [...items, self] : items.slice();
-    all.sort((a, b) => a.offsetX - b.offsetX);
-    all.forEach((slot, i) => {
-      slot.tagSide = i % 2 === 0 ? 'above' : 'below';
-      slot.tagYStagger = slot.tagSide === 'below' ? -ISLAND_TAG_STAGGER_Y : 0;
-    });
-    return { others: items, self };
   }
+  const mySeat = seatOffsets.get(myToken) ?? { offsetX: 0, tagSide: 'above', tagYStagger: 0 };
+  const mySeatOffsetX = mySeat.offsetX;
 
-  /** Repositions an existing tag's vertical offset in place (above/below + stagger) without rebuilding its canvas — attachNameTag does that async reload, which nothing here needs since the text/colour aren't changing. */
+  /** Repositions an existing tag in place (above/below Y + stagger, and the below-side forward Z push) without rebuilding its canvas — attachNameTag does that async reload, which nothing here needs since the text/colour aren't changing. */
   function setNameTagSide(targetRig, side, yStagger = 0) {
     const tag = targetRig.nameTag;
-    if (!tag) return;
-    const magnitude = FIGURE_H / 2 + NAME_TAG_GAP + tag.tagH / 2;
-    tag.localY = (side === 'below' ? -magnitude : magnitude) + yStagger;
+    if (!tag) {
+      logTagEvent('setSide-no-tag', { who: tagOwnerLabel(targetRig), side }); // see tagDebugLog's own comment
+      return;
+    }
+    const newY = tagLocalY(side, tag.mesh.scale.y) + yStagger;
+    if (Math.abs(tag.mesh.position.y - newY) > 1e-4) {
+      logTagEvent('setSide-change', {
+        who: tagOwnerLabel(targetRig),
+        side,
+        fromY: +tag.mesh.position.y.toFixed(3),
+        toY: +newY.toFixed(3),
+      });
+    }
+    tag.mesh.position.y = newY;
+    tag.mesh.position.z = tagLocalZ(side);
   }
 
-  /** Arranges every teammate currently RESTING at one fork (departing ones are mid-walk and untouched — see updateTeammates). `includeSelf` is true only when this device's own player is also resting there right now. */
-  function repositionIslandOccupants(forkIdx, includeSelf) {
+  /** Places every teammate currently RESTING at one fork at ITS OWN fixed seat offset (departing ones are mid-walk and untouched — see updateTeammates). This device's own figure is never touched here — see currentSeatLateral(), which places it the same way every frame regardless of resting/walking. */
+  function repositionIslandOccupants(forkIdx) {
     const sec = sections[forkIdx - 1];
     if (!sec) return;
-    const restingHere = [];
-    for (const [tok, entry] of teammates.entries()) {
-      if (entry.phase === 'resting' && entry.forkIndex === forkIdx) restingHere.push({ tok, entry });
-    }
-    // Sorted by token, not Map insertion/arrival order — otherwise the
-    // whole arrangement could visibly reshuffle whenever anyone re-reports
-    // (e.g. a name change), not just when someone actually arrives/leaves.
-    restingHere.sort((a, b) => (a.tok < b.tok ? -1 : a.tok > b.tok ? 1 : 0));
-    const { others, self } = layoutIslandGroup(
-      restingHere.map((r) => r.entry),
-      includeSelf
-    );
-    for (const slot of others) {
-      const entry = slot.item;
-      const lateral = forward(sec.fork.heading + Math.PI / 2, slot.offsetX);
+    for (const entry of teammates.values()) {
+      if (entry.phase !== 'resting' || entry.forkIndex !== forkIdx) continue;
+      const lateral = forward(sec.fork.heading + Math.PI / 2, entry.seatOffsetX);
       entry.rig.group.position.set(sec.fork.x + lateral.x, FIGURE_H / 2, sec.fork.z + lateral.z);
       entry.rig.group.rotation.set(0, sec.fork.heading, 0);
-      setNameTagSide(entry.rig, slot.tagSide, slot.tagYStagger);
+      setNameTagSide(entry.rig, entry.seatTagSide, entry.seatTagYStagger);
     }
-    if (self) setNameTagSide(rig, self.tagSide, self.tagYStagger);
   }
 
-  /** Re-lays-out every island that currently has anyone resting on it — including this device's own, if it's a player idle at a fork right now. Called every frame from updateTeammates(); cheap at this scale (a handful of teammates, at most six forks). */
+  /** Re-lays-out every island that currently has any TEAMMATE resting on it. Called every frame from updateTeammates(); cheap at this scale (a handful of teammates, at most six forks). Doesn't need to consider this device's own fork any more — see repositionIslandOccupants(). */
   function relayoutAllIslands() {
     const forksWithOccupants = new Set();
     for (const entry of teammates.values()) {
       if (entry.phase === 'resting') forksWithOccupants.add(entry.forkIndex);
     }
-    const myFork = !isSpectatorRole(role) && !leg ? forkIndex : null;
-    if (myFork != null) forksWithOccupants.add(myFork);
-    for (const forkIdx of forksWithOccupants) {
-      repositionIslandOccupants(forkIdx, forkIdx === myFork);
-    }
+    for (const forkIdx of forksWithOccupants) repositionIslandOccupants(forkIdx);
   }
 
-  // How long the fall stand-in's sink-and-tip plays once a spectator's live
-  // tracking of a `willFall` teammate goes stale (see updateTeammates) — a
-  // fixed cosmetic duration, not tied to real fall physics (see the
-  // "simplified stand-in" reasoning below).
-  const FALL_STANDIN_DURATION = 0.6;
-  // How long without a fresh 'moving' ping before a spectator gives up on
-  // live-tracking a departing teammate — comfortably more than
-  // MOVING_PING_INTERVAL so an ordinary gap between pings (network jitter,
-  // a slow frame) is never mistaken for "they've stopped, something's
-  // happened," while still being short enough that a real stop (arrival or
-  // fall) reads as prompt, not laggy.
-  const LIVE_POS_STALE_MS = 500;
-  // Per-second smoothing rate for lerping a spectator's tracked position
-  // toward the latest live report, rather than snapping straight to it —
-  // Luke, 2026-09-13, explicitly fine with "a minor displacement" for a
-  // smoother read; frame-rate independent via `Math.min(1, LIVE_POS_SMOOTH * dt)`.
+  /**
+   * This device's own current lateral offset from the centreline every
+   * branch/bridge is actually built around — the seat walk itself. Full
+   * seat offset while resting (so a player idles at their own fixed slot,
+   * not centre); while a leg is under way, tapers from the departure
+   * fork's full offset down to zero over the first SEAT_TAPER_DIST of
+   * travel ("towards the centre when leaving an island"), then — only if
+   * the leg actually has a next island (`leg.arriveFork`) — back up to the
+   * SAME fixed offset over the last SEAT_TAPER_DIST ("away from the centre
+   * when leaving the bridge to find their position on the next island").
+   * A leg with no `arriveFork` (a wrong choice, or the final approach to
+   * the temple) only ever tapers OUT and stays at the centreline for the
+   * rest of it — those endings are scripted, centreline-only sequences
+   * (the fall, the temple doors), not a seat to arrive at.
+   */
+  function currentSeatLateral() {
+    if (!mySeatOffsetX) return { x: 0, z: 0 };
+    if (!leg) {
+      const sec = sections[forkIndex - 1];
+      return sec ? forward(sec.fork.heading + Math.PI / 2, mySeatOffsetX) : { x: 0, z: 0 };
+    }
+    const taper = Math.min(SEAT_TAPER_DIST, leg.total / 2 || 0);
+    if (taper <= 0) return { x: 0, z: 0 };
+    let out = { x: 0, z: 0 };
+    if (leg.traveled < taper) {
+      const factor = 1 - leg.traveled / taper;
+      const v = forward(leg.fromHeading + Math.PI / 2, mySeatOffsetX * factor);
+      out = { x: out.x + v.x, z: out.z + v.z };
+    }
+    const remain = leg.total - leg.traveled;
+    if (leg.arriveFork && remain < taper) {
+      const factor = 1 - remain / taper;
+      const v = forward(leg.toHeading + Math.PI / 2, mySeatOffsetX * factor);
+      out = { x: out.x + v.x, z: out.z + v.z };
+    }
+    return out;
+  }
+
+  // Per-second smoothing rate for lerping a tracked teammate toward its
+  // latest live report, rather than snapping straight to it — Luke,
+  // 2026-09-13, explicitly fine with "a minor displacement" for a smoother
+  // read; frame-rate independent via `Math.min(1, LIVE_POS_SMOOTH * dt)`.
   const LIVE_POS_SMOOTH = 10;
 
   /**
-   * Advances every currently-departing teammate, each frame, as a pure
-   * function of elapsed real time (the fog stand-in) or the sender's own
-   * live reports (a spectator's real tracking, see below). Called from
-   * tick() with its `dt`. Two entirely different renderings depending on
-   * who's watching:
-   *
-   *   - A PLAYER viewer always gets the fog stand-in: a straight walk from
-   *     the fork toward its own curtain, identical regardless of the real
-   *     side, then hidden — see the long design note above `notifyPlayerState`
-   *     for why concealing the real direction matters here and nowhere else.
-   *   - A spectator role (guide, or a fallen player's Watch mode) tracks the
-   *     REAL thing — Luke, 2026-09-13, after seeing the first (simulated)
-   *     version of this: "the guide is still seeing a stand-in in place of
-   *     the player's actual movement... it would be good if we could see
-   *     the players progressing rather than using a stand-in," explicitly
-   *     fine with "a short delay and/or a minor displacement." So rather
-   *     than *guessing* the departing player's position from distance and
-   *     WALK_SPEED, this smooths toward `entry.livePos` — the sender's own
-   *     periodic real position, see MOVING_PING_INTERVAL in tick() and the
-   *     'moving' phase in updateTeammate() — which is the actual thing
-   *     happening on their screen, holdingForward pauses and all.
-   *
-   * Luke, 2026-09-12: "if the player falls... the guide will watch until
-   * the animation is complete" — per the "simplified stand-in" decision,
-   * that doesn't mean reusing the real fall/jetpack-rescue sequence for a
-   * THIRD PARTY'S rig (no Rapier body, no wind, nothing keyed to the real
-   * fall's own timing — that's a bigger, separate undertaking). There is no
-   * explicit "I am now falling" signal on the wire — a real fall happens
-   * client-side once that device's own `leg` runs out, and the periodic
-   * 'moving' pings (only sent while `leg` is active) simply stop arriving
-   * at that exact moment. So: once a `willFall` entry's pings have gone
-   * stale (no update for LIVE_POS_STALE_MS — comfortably more than one
-   * MOVING_PING_INTERVAL, so an ordinary gap between pings is never
-   * mistaken for this), sink and tip it over from wherever it was last
-   * actually seen, for a fixed FALL_STANDIN_DURATION, then vanish —
-   * legible as "that one didn't make it" without building the full
-   * cinematic for a rig only a spectator ever sees. If pings go stale and
-   * `willFall` is false, the real arrival is imminent — just hold the last
-   * known spot until the real 'resting' update (from that same device,
-   * once it actually gets there) takes over, exactly as it already does
-   * for every other teammate.
+   * Smooths every currently-departing teammate toward the latest real
+   * transform its own device reported — see the phase model in this
+   * section's header. One code path for every viewer role: a player, the
+   * guide and a fallen player's Watch mode all see exactly the same thing.
+   * No timers, no inference: if no 'moving' ping has arrived yet for this
+   * departure the rig simply stays put, and if pings stop it stops where
+   * the last one left it — until an explicit 'resting' or 'gone' report
+   * says otherwise (see updateTeammate). Called from tick() with its `dt`.
    */
   function updateTeammates(dt) {
     relayoutAllIslands();
     for (const entry of teammates.values()) {
-      if (entry.phase !== 'departing' || !entry.rig.group.visible) continue;
-      const sec = sections[entry.forkIndex - 1];
-      if (!sec) continue;
+      // Own frame-cycling animation, not networked frame-by-frame — same as
+      // the local player's own engine (see tick()'s unconditional
+      // updateEngineFlame/updateEngineSmoke calls). Both are no-ops on a rig
+      // with no power-up or no active flame, so this is cheap to call for
+      // every teammate regardless of phase.
+      updateEngineFlame(entry.rig, dt);
+      updateEngineSmoke(entry.rig, dt);
 
-      if (isSpectatorRole(role)) {
-        const fresh = entry.livePos && Date.now() - entry.livePosAt < LIVE_POS_STALE_MS;
-        if (fresh) {
-          entry.fallStandinStartedAt = 0; // still genuinely moving — any earlier stale gap didn't turn into a real fall
-          const target = new THREE.Vector3(entry.livePos.x, FIGURE_H / 2, entry.livePos.z);
-          entry.rig.group.position.lerp(target, Math.min(1, LIVE_POS_SMOOTH * dt));
-          entry.rig.group.rotation.set(0, entry.livePos.heading ?? entry.rig.group.rotation.y, 0);
-        } else if (entry.willFall) {
-          if (!entry.fallStandinStartedAt) entry.fallStandinStartedAt = Date.now();
-          const fallT = THREE.MathUtils.clamp(
-            (Date.now() - entry.fallStandinStartedAt) / (FALL_STANDIN_DURATION * 1000),
-            0,
-            1
-          );
-          entry.rig.group.position.y = FIGURE_H / 2 - fallT * FIGURE_H * 0.6;
-          entry.rig.group.rotation.x = fallT * (Math.PI / 2.2);
-          if (fallT >= 1) entry.rig.group.visible = false;
+      // The detached engine flying off on its own — see updateTeammate's
+      // own `detached` handling for how this starts. Runs regardless of
+      // `entry.phase`: the sender's own phase can already have flipped to
+      // 'resting' (the rescue's whole sequence finishing) before this
+      // device's own copy of the fixed-duration depart animation is done,
+      // since it's timed from whenever THIS device first saw `detached`,
+      // not from the sender's clock. Disposes itself once finished, same
+      // moment the local original's engine would have flown off screen.
+      if (entry.departStartedAt) {
+        const elapsed = (Date.now() - entry.departStartedAt) / 1000;
+        if (entry.rig.powerup) {
+          const ud = smoothstep(0, RESCUE_TUNE.departDuration, elapsed);
+          entry.rig.powerup.group.position.y = entry.departBaseY + ud * ud * RESCUE_TUNE.departDistance;
         }
-        // else: pings gone stale, not going to fall — hold the last known
-        // spot (nothing to update) and wait for the real 'resting' update.
-        continue;
+        if (elapsed >= RESCUE_TUNE.departDuration) {
+          disposePowerUp(entry.rig);
+          entry.departStartedAt = 0;
+        }
       }
 
-      const elapsed = (Date.now() - entry.departStartedAt) / 1000;
-      const t = THREE.MathUtils.clamp(elapsed / FOG_DEPART_DURATION, 0, 1);
-      const p = advance(sec.fork, sec.fork.heading, t * CURTAIN_DIST);
-      entry.rig.group.position.set(p.x, FIGURE_H / 2, p.z);
-      entry.rig.group.rotation.set(0, sec.fork.heading, 0);
-      if (t >= 1) entry.rig.group.visible = false; // reached the curtain — gone until a 'resting' update brings them back
+      // A locally-built saucer replica owns this teammate's whole transform
+      // for as long as it's playing — see updateTeammate's 'departing'
+      // handling for why this is a local replay rather than a streamed
+      // transform. `facePoint` uses THIS device's own camera, same as the
+      // local original does for whoever's actually watching it.
+      if (entry.abduction) {
+        entry.abduction.update(dt);
+        entry.abduction.facePoint(camera.position);
+        if (!entry.abduction.state.playing) {
+          entry.abduction.dispose();
+          entry.abduction = null;
+        }
+        continue; // apply() already set this rig's position/rotation directly — nothing left to lerp toward
+      }
+
+      if (entry.phase !== 'departing' || !entry.rig.group.visible || !entry.livePos) continue;
+      const k = Math.min(1, LIVE_POS_SMOOTH * dt);
+      if (entry.livePos.quat) {
+        // A fall, jetpack rescue or abduction — full position and rotation.
+        entry.rig.group.position.lerp(new THREE.Vector3(entry.livePos.x, entry.livePos.y, entry.livePos.z), k);
+        entry.rig.group.quaternion.slerp(new THREE.Quaternion(...entry.livePos.quat), k);
+      } else {
+        // An ordinary walk — on its feet, facing its heading.
+        entry.rig.group.position.lerp(new THREE.Vector3(entry.livePos.x, FIGURE_H / 2, entry.livePos.z), k);
+        entry.rig.group.rotation.set(0, entry.livePos.heading ?? entry.rig.group.rotation.y, 0);
+      }
     }
   }
 
@@ -3835,19 +4033,69 @@ export function mountSkyPath(container, options = {}) {
   let localDisplayName = displayName;
 
   /**
-   * Tells the host (see GameRoom.jsx) where THIS device's own player
-   * currently is, for it to relay to teammates. `phase` is 'resting'
-   * (default, on arrival), 'departing' (on choosing a fork — see
-   * applyChoice), or 'moving' (a throttled real-position ping sent
-   * repeatedly WHILE crossing — see MOVING_PING_INTERVAL in tick()).
-   * `livePos` (`{x, z, heading}`) only matters for 'moving' — see the
-   * design notes above updateTeammate on who actually acts on it. The
-   * actual chosen `side` is deliberately never included at all, for
-   * 'departing' or otherwise — a spectator's real tracking comes entirely
-   * from 'moving's live positions, so there's nothing left that needs it.
+   * Tells the host (see GameRoom.jsx) what THIS device's own player is
+   * doing, for it to relay to teammates — see the four-phase model in the
+   * "teammates" section header: 'resting' (default), 'departing',
+   * 'moving' (with `livePos`: `{x, z, heading}` walking, `{x, y, z, quat}`
+   * falling / rescued / abducted), or 'gone'. Nothing about the chosen
+   * side or the outcome is ever sent ahead of time — a viewer only ever
+   * learns what's happening from the transforms as they happen.
+   *
+   * `hasJetpack`/`firing`/`detached` ride along on every call (not a
+   * separate event) — Luke, 2026-09-14, after watching a real rescue
+   * remotely: "there's no jetpack visible: only the moving avatar," and
+   * then, once that was fixed, "we don't see the jetpack leaving the
+   * screen... after the player lands, the jetpack simply disappears."
+   * Cheap booleans read straight off `rig.powerup`/`rescue` each time, so a
+   * teammate's own equip/unequip, ignite/extinguish, and detach are always
+   * current on whatever's the next thing this device reports anyway — see
+   * updateTeammate/updateTeammates for the receiving side, which replays
+   * the same detach-and-fly-off animation updateRescue plays locally.
+   *
+   * `abducting` is only meaningful on the 'departing' report startAbduction
+   * sends (see its own comment) — a spectator builds its OWN local saucer
+   * instance from it (see updateTeammate), rather than this device
+   * streaming its saucer's transform: unlike the jetpack's small attached
+   * prop, the saucer/beam/card move as one scripted ensemble (see
+   * alienAbduction.js's `apply()`), so a real position stream would fight a
+   * receiver's own copy rather than usefully drive it.
    */
-  function notifyPlayerState(phase = 'resting', willFall = false, livePos = null) {
-    onPlayerState?.({ phase, forkIndex, characterKey, displayName: localDisplayName, colorHex: pickedColorHex, willFall, livePos });
+  function notifyPlayerState(phase = 'resting', livePos = null) {
+    const hasJetpack = !!rig.powerup;
+    const firing = !!rig.powerup?.flame;
+    const detached = !!rescue?.detached;
+    const abducting = !!abduction;
+    window.__lastPlayerState = { phase, livePos, hasJetpack, firing, detached, abducting, at: Date.now() }; // debug only — see e.g. window.__teammates for the receiving-side equivalent
+    onPlayerState?.({
+      phase,
+      forkIndex,
+      characterKey,
+      displayName: localDisplayName,
+      colorHex: pickedColorHex,
+      livePos,
+      hasJetpack,
+      firing,
+      detached,
+      abducting,
+    });
+  }
+
+  // One throttled 'moving' ping carrying the figure's full current
+  // transform — shared by the fall, jetpack-rescue and abduction branches
+  // in tick()/updateRescue, all of which write figure.position/quaternion
+  // themselves. Same MOVING_PING_INTERVAL throttle (and the same
+  // lastMovingPingAt clock) as the ordinary walking ping; the two can never
+  // be active at the same time, so sharing the clock is safe.
+  function pingFigureTransform() {
+    const now = Date.now();
+    if (now - lastMovingPingAt < MOVING_PING_INTERVAL) return;
+    lastMovingPingAt = now;
+    notifyPlayerState('moving', {
+      x: figure.position.x,
+      y: figure.position.y,
+      z: figure.position.z,
+      quat: figure.quaternion.toArray(),
+    });
   }
 
   // ------------------------------------------------------------ TEST_TAGS
@@ -3926,6 +4174,7 @@ export function mountSkyPath(container, options = {}) {
   let falling = false;
   let fallAccumulator = 0;
   let fallElapsed = 0;
+  let fallGoneSent = false; // the one 'gone' report per fall — see tick()'s falling block
   let windAngle = 0; // current heading of the sweeping wind push, radians
 
   // The fall camera doesn't lean out from wherever it happened to be trailing
@@ -3974,6 +4223,7 @@ export function mountSkyPath(container, options = {}) {
     falling = true;
     fallAccumulator = 0;
     fallElapsed = 0;
+    fallGoneSent = false;
 
     // Anchor beside the edge (walker's position when the stub ran out), not
     // wherever the trailing camera happened to be — see comment above.
@@ -4093,11 +4343,18 @@ export function mountSkyPath(container, options = {}) {
   let rescue = null; // { t, sec, isLastFork, landing, startPos, startQuat, sideVec, ignited, detached, departBaseY, camPos, camLookAt } | null
 
   // Luke's own tuned values (2026-09-07), found via the `?rescueTune=1`
-  // panel further down and baked in here as the new defaults.
+  // panel further down and baked in here as the new defaults. Reworked
+  // 2026-09-14: Luke, having seen the loop live, "I'd like to remove the
+  // loop the player does: have them fly straight to the point above the
+  // next island and then descend." That collapsed the old three-phase
+  // flight (a sideways ignition burst, then a looping arc back over to the
+  // island) into one straight `flyDuration` leg — see rescuePosAt's own
+  // comment for the shape. `flyOutDistance`/`flyOutRise`/`loopRadius`
+  // (the sideways burst target and the loop's own radius) no longer mean
+  // anything and were removed rather than left dead.
   const RESCUE_TUNE = {
     fallDuration: 2, // Luke: "they should fall for 1s, before the engine turns on" — retuned to 2s
-    flyOutDuration: 1.9,
-    arcDuration: 2.8,
+    flyDuration: 3.4, // straight flight, fall's end to directly above the landing spot — first-pass number, not yet Luke-tuned; was ~4.7s (flyOut 1.9 + arc 2.8) before the loop was removed, shortened per "this should slightly reduce the total time of the animation as well"
     descendDuration: 3.05,
     // How long before touchdown the body has already finished rolling
     // upright, so the last stretch comes straight down with no more turning
@@ -4109,10 +4366,7 @@ export function mountSkyPath(container, options = {}) {
     uprightHoldDuration: 1.0,
     holdDuration: 0.8, // Luke: "the engine will remain firing and attached for 0.5s" — retuned to 0.8s
     departDuration: 1.7, // Luke: "leaving the screen in perhaps 1.5s" — retuned to 1.7s
-    flyOutDistance: 10.75,
-    flyOutRise: 4.45,
-    apexHeight: 20,
-    loopRadius: 2.9,
+    apexHeight: 20, // height of "the point above the next island" the straight flight aims for
     departDistance: 30,
     cameraTravelDuration: 1.2,
     cameraZoomDuration: 2.95,
@@ -4206,17 +4460,40 @@ export function mountSkyPath(container, options = {}) {
     const sec = sections[forkIndex - 1];
     const angleOffset = choiceSide === 'left' ? -Math.PI / 2 : Math.PI / 2;
     const sideVec = forward(facing + angleOffset, 1);
+    const isLastFork = forkIndex === N_FORKS;
+    // Luke, 2026-09-14: "the player currently comes to land in the centre
+    // of the island, then suddenly jumps to their position after the
+    // animation is complete. They need to land in their correct position."
+    // Right — `sec.nextCursor` is the fork's bare CENTRE, no seat offset;
+    // the whole animation used to fly to and land at that centre, and only
+    // the NEXT frame's ordinary resting render (see currentSeatLateral's
+    // `!leg` branch) actually applies this player's fixed seat, snapping
+    // them sideways the instant the sequence ended. Baking the seat offset
+    // into `landing` itself fixes it at the source — every phase of the
+    // flight (the climb, the descent, the touchdown) already aims at
+    // wherever `landing` points, so there's nothing else to change. Not
+    // applied for the last fork: that landing is the temple's own edge, a
+    // single-file approach with no seating concept at all (same reason
+    // currentSeatLateral() never tapers back in for a leg with no
+    // `arriveFork`).
+    const seatAtLanding = isLastFork
+      ? { x: 0, z: 0 }
+      : forward(sec.nextCursor.heading + Math.PI / 2, mySeatOffsetX);
 
     rescue = {
       t: 0,
       sec,
-      isLastFork: forkIndex === N_FORKS,
+      isLastFork,
       // The exact spot (and heading) the correct branch's own last waypoint
       // would have landed them at — genBridgeRoute's centreHop for a normal
       // fork, or the temple island's own edge for the last one (see
-      // buildFork's isLastFork branch) — either way, sec.nextCursor already
-      // *is* that point, so there's nothing to re-derive here.
-      landing: { x: sec.nextCursor.x, z: sec.nextCursor.z, heading: sec.nextCursor.heading },
+      // buildFork's isLastFork branch) — plus this player's own fixed seat
+      // offset at that fork (see seatAtLanding above).
+      landing: {
+        x: sec.nextCursor.x + seatAtLanding.x,
+        z: sec.nextCursor.z + seatAtLanding.z,
+        heading: sec.nextCursor.heading,
+      },
       startPos: figure.position.clone(),
       startQuat: figure.quaternion.clone(),
       sideVec,
@@ -4235,35 +4512,27 @@ export function mountSkyPath(container, options = {}) {
     fallCamAnchor.set(walker.x + side.x + ahead.x, FALL_CAM_HEIGHT, walker.z + side.z + ahead.z);
   }
 
-  /** The point sideways flight aims for before climbing — factored out of
-   * rescuePosAt so the camera section below (which needs it as a look-at
-   * target too) never has to re-derive it differently. */
-  function rescueFlyOutEnd(rescue) {
-    const R = RESCUE_TUNE;
-    const fallEndY = rescue.startPos.y - 0.5 * RESCUE_GRAVITY * R.fallDuration * R.fallDuration;
-    return new THREE.Vector3(
-      rescue.startPos.x + rescue.sideVec.x * R.flyOutDistance,
-      fallEndY + R.flyOutRise,
-      rescue.startPos.z + rescue.sideVec.z * R.flyOutDistance
-    );
-  }
-
   /**
    * Position only, as a pure function of an arbitrary t — called twice per
    * frame from updateRescue (once at rescue.t, once RESCUE_VEL_EPS later) so
    * the card's actual instantaneous direction of travel can be read straight
    * off the path instead of guessed at per phase — see computeRescueQuat's
    * own header for why that matters now.
+   *
+   * Reworked 2026-09-14 — Luke, after watching the sideways-burst-then-loop
+   * version live: "I'd like to remove the loop the player does: have them
+   * fly straight to the point above the next island and then descend."
+   * Three phases now, not five: fall, one straight flight leg from wherever
+   * the fall ended to directly above `landing` (which already carries this
+   * player's own seat offset — see startRescue), then straight down.
    */
   function rescuePosAt(rescue, t) {
     const R = RESCUE_TUNE;
     const t1 = R.fallDuration;
-    const t2 = t1 + R.flyOutDuration;
-    const t3 = t2 + R.arcDuration;
-    const t4 = t3 + R.descendDuration;
+    const t2 = t1 + R.flyDuration;
+    const t3 = t2 + R.descendDuration;
     const { startPos, landing } = rescue;
     const fallEndY = startPos.y - 0.5 * RESCUE_GRAVITY * t1 * t1;
-    const flyOutEnd = rescueFlyOutEnd(rescue);
     const above = new THREE.Vector3(landing.x, R.apexHeight, landing.z);
     const pos = new THREE.Vector3();
 
@@ -4274,40 +4543,20 @@ export function mountSkyPath(container, options = {}) {
       // nothing left to blend out of once the engine ignites.
       pos.set(startPos.x, startPos.y - 0.5 * RESCUE_GRAVITY * t * t, startPos.z);
     } else if (t < t2) {
-      // Phase B: ignition — accelerates sideways off-screen (ease-in: a
-      // burst, not a drift).
+      // Phase B: the engine ignites and flies straight to the point directly
+      // above the landing spot — ease-in (a burst, not a drift) via the
+      // squared smoothstep, same shape the old ignition sub-phase used.
       const eased = smoothstep(t1, t2, t) ** 2;
-      pos.lerpVectors(new THREE.Vector3(startPos.x, fallEndY, startPos.z), flyOutEnd, eased);
+      pos.lerpVectors(new THREE.Vector3(startPos.x, fallEndY, startPos.z), above, eased);
     } else if (t < t3) {
-      // Phase C: climbs and crosses to directly above the landing spot,
-      // threading one vertical loop onto the middle of the trip — a
-      // circular offset that's zero at both ends of its own window, so it
-      // never throws off the net destination, just bulges the path through
-      // it.
-      const u = smoothstep(t2, t3, t);
-      pos.lerpVectors(flyOutEnd, above, u);
-
-      const travelX = above.x - flyOutEnd.x;
-      const travelZ = above.z - flyOutEnd.z;
-      const travelLen = Math.hypot(travelX, travelZ) || 1;
-      const dirX = travelX / travelLen;
-      const dirZ = travelZ / travelLen;
-
-      const LOOP_START = 0.3;
-      const LOOP_END = 0.7;
-      const theta = u <= LOOP_START || u >= LOOP_END ? 0 : ((u - LOOP_START) / (LOOP_END - LOOP_START)) * Math.PI * 2;
-      pos.x += dirX * Math.sin(theta) * R.loopRadius;
-      pos.y += (1 - Math.cos(theta)) * R.loopRadius;
-      pos.z += dirZ * Math.sin(theta) * R.loopRadius;
-    } else if (t < t4) {
-      // Phase D: straight down onto the exact spot the correct branch would
+      // Phase C: straight down onto the exact spot the correct branch would
       // have landed them at, easing out into a controlled touchdown rather
       // than free-falling into it.
-      const u = smoothstep(t3, t4, t);
+      const u = smoothstep(t2, t3, t);
       const eased = 1 - (1 - u) * (1 - u);
       pos.set(landing.x, THREE.MathUtils.lerp(R.apexHeight, RESCUE_GROUND_Y, eased), landing.z);
     } else {
-      // Phases E/F: landed — the card itself just sits at the landing spot;
+      // Phases D/E: landed — the card itself just sits at the landing spot;
       // only the engine moves, once detached (handled in updateRescue, not
       // here, since that's a one-off side effect, not a pure function of t).
       pos.set(landing.x, RESCUE_GROUND_Y, landing.z);
@@ -4328,14 +4577,20 @@ export function mountSkyPath(container, options = {}) {
     const t = rescue.t;
     const R = RESCUE_TUNE;
     const t1 = R.fallDuration;
-    const t2 = t1 + R.flyOutDuration;
-    const t3 = t2 + R.arcDuration;
-    const t4 = t3 + R.descendDuration;
-    const t5 = t4 + R.holdDuration;
-    const t6 = t5 + R.departDuration;
-    // Clamped so a small descendDuration can never push this before t3 —
+    const t2 = t1 + R.flyDuration;
+    const t3 = t2 + R.descendDuration;
+    const t4 = t3 + R.holdDuration;
+    const t5 = t4 + R.departDuration;
+    // Clamped so a small descendDuration can never push this before t2 —
     // see uprightHoldDuration's own comment.
-    const orientEnd = t4 - Math.min(R.uprightHoldDuration, R.descendDuration);
+    const orientEnd = t3 - Math.min(R.uprightHoldDuration, R.descendDuration);
+    // How long of the flight is spent blending OUT of the pre-ignition lean
+    // and INTO the velocity-aligned flight orientation (see flightQuatAt
+    // below) — a fixed short fraction of the flight, not the whole thing,
+    // so the card settles into "flying" quickly rather than still visibly
+    // untwisting right up to the point it starts descending. First-pass
+    // number, not yet Luke-tuned.
+    const igniteBlendEnd = t1 + Math.min(0.5, R.flyDuration * 0.25);
 
     if (!rescue.ignited && t >= t1) {
       rescue.ignited = true;
@@ -4343,18 +4598,17 @@ export function mountSkyPath(container, options = {}) {
     }
 
     const { landing } = rescue;
-    const flyOutEnd = rescueFlyOutEnd(rescue);
     const pos = rescuePosAt(rescue, t);
 
-    // Velocity-aligned orientation only covers t1..t3 (ignition through the
-    // top of the arc) — see computeRescueQuat's header. Phase D (t3..t4) is
+    // Velocity-aligned orientation only covers the flight itself (t1..t2) —
+    // see computeRescueQuat's header. The descend phase (t2..t3) is
     // deliberately NOT more of the same: the actual velocity there points
     // straight down onto the landing spot, and aligning the body's up-axis
     // with "straight down" is exactly what put the player in head-first —
     // Luke, 2026-09-07: "the player is landing upside-down, head first."
     // A standing figure doesn't orient itself to match its fall speed on the
-    // way down, so instead this eases from whatever it was flying at the top
-    // of the arc back to upright, landing right-side-up by construction.
+    // way down, so instead this eases from whatever it was flying at the end
+    // of the flight back to upright, landing right-side-up by construction.
     function flightQuatAt(sampleT) {
       const p = rescuePosAt(rescue, sampleT);
       const velocityDir = rescuePosAt(rescue, sampleT + RESCUE_VEL_EPS).sub(p);
@@ -4368,11 +4622,12 @@ export function mountSkyPath(container, options = {}) {
     // jetpack kicks in... it's fine to bake in one set rotation." Deliberately
     // NOT a random axis (that's exactly what made the card go edge-on before
     // — see computeRescueQuat's header) — rotating around sideVec's own
-    // direction (the same axis the flyout itself travels along, and already
+    // direction (the axis the old sideways burst used to travel along, still
     // mirrored by choiceSide) keeps the tumble happening *in* the
     // camera-facing plane instead of tipping the card away from it. Scoped
-    // tightly to phase A only, and phase B blends out of this instead of out
-    // of the bare startQuat — everything from ignition on is untouched.
+    // tightly to phase A only, and the ignite blend below blends out of this
+    // instead of out of the bare startQuat — everything from ignition on is
+    // untouched.
     //
     // sideVec itself is the plain {x, z} shape forward() returns everywhere
     // else in this file (no y) — fine for the position math above, but
@@ -4389,20 +4644,19 @@ export function mountSkyPath(container, options = {}) {
     let quat;
     if (t < t1) {
       quat = rescue.startQuat.clone().slerp(fallTiltQuat, smoothstep(0, t1, t));
-    } else if (t < t2) {
+    } else if (t < igniteBlendEnd) {
       // Ignition: blends from the fall's own ending lean into the flight
-      // orientation on the same ease the position itself uses, so the two
-      // are always in step with each other.
-      quat = fallTiltQuat.slerp(flightQuatAt(t), smoothstep(t1, t2, t));
-    } else if (t < t3) {
+      // orientation over a short fixed window, not the whole flight.
+      quat = fallTiltQuat.slerp(flightQuatAt(t), smoothstep(t1, igniteBlendEnd, t));
+    } else if (t < t2) {
       quat = flightQuatAt(t);
     } else if (t < orientEnd) {
-      // Descend, still turning: eases from the arc's own final orientation
-      // (sampled once, at t3, not re-derived from the downward fall
-      // velocity — see the header above) back to upright. Finishes at
-      // orientEnd, not t4 — see uprightHoldDuration's own comment.
-      quat = flightQuatAt(t3).slerp(RESCUE_IDENTITY_QUAT, smoothstep(t3, orientEnd, t));
-    } else if (t < t4) {
+      // Descend, still turning: eases from the flight's own final
+      // orientation (sampled once, at t2, not re-derived from the downward
+      // fall velocity — see the header above) back to upright. Finishes at
+      // orientEnd, not t3 — see uprightHoldDuration's own comment.
+      quat = flightQuatAt(t2).slerp(RESCUE_IDENTITY_QUAT, smoothstep(t2, orientEnd, t));
+    } else if (t < t3) {
       // Descend, done turning: already upright, comes down straight for
       // whatever's left of the descent.
       quat = RESCUE_IDENTITY_QUAT;
@@ -4411,8 +4665,8 @@ export function mountSkyPath(container, options = {}) {
       quat = RESCUE_IDENTITY_QUAT;
     }
 
-    if (t >= t4) {
-      if (!rescue.detached && t >= t5) {
+    if (t >= t3) {
+      if (!rescue.detached && t >= t4) {
         rescue.detached = true;
         // scene.attach() (not scene.add()) preserves the group's current
         // WORLD transform as its new local one — it keeps riding exactly
@@ -4424,30 +4678,43 @@ export function mountSkyPath(container, options = {}) {
         }
       }
       if (rescue.detached && rig.powerup) {
-        const ud = smoothstep(t5, t6, t);
+        const ud = smoothstep(t4, t5, t);
         rig.powerup.group.position.y = rescue.departBaseY + ud * ud * R.departDistance;
       }
     }
 
     figure.position.copy(pos);
     figure.quaternion.copy(quat);
+    // Luke, 2026-09-13: "when a player uses the jetpack, I want that to be
+    // visible for everyone" — see the "teammates" section's phase model. A
+    // rescue ends with an explicit 'resting' report (resolveRescue), so
+    // these pings simply stop the same instant that fires.
+    pingFigureTransform();
 
     // ---- camera --------------------------------------------------------
     // Holds at the fall anchor (tracking the figure, exactly like a real
-    // fall) until the flyOut is done — Luke: "the camera will wait for the
+    // fall) until the fall is done — Luke: "the camera will wait for the
     // falling character to leave the screen" — then pans to a pulled-back
     // shot of the landing spot, then eases in to the normal trailing framing
     // as the player descends (Luke: "arrive at the island pulled back...
     // slowly zooming in"). All computed here as an exact function of t (see
     // this function's own header); the camera section in tick() just
     // applies rescue.camPos/camLookAt directly.
-    const camTravelStart = t2;
-    const camTravelEnd = t2 + R.cameraTravelDuration;
-    const camZoomStart = t3;
-    const camZoomEnd = t3 + R.cameraZoomDuration;
+    const camTravelStart = t1;
+    const camTravelEnd = t1 + R.cameraTravelDuration;
+    const camZoomStart = t2;
+    const camZoomEnd = t2 + R.cameraZoomDuration;
     const widePos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK + R.cameraPullback);
     const normalPos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK);
     const lookAtTarget = trailingCamLookAt(landing.x, landing.z, landing.heading);
+    // Fixed reference point for the travel pan's look-at, matching where the
+    // fall ends / the flight begins — the flight itself no longer has a
+    // separate "sideways burst" endpoint to aim at instead.
+    const flightStart = new THREE.Vector3(
+      rescue.startPos.x,
+      rescue.startPos.y - 0.5 * RESCUE_GRAVITY * t1 * t1,
+      rescue.startPos.z
+    );
 
     if (t < camTravelStart) {
       rescue.camPos = fallCamAnchor.clone();
@@ -4455,7 +4722,7 @@ export function mountSkyPath(container, options = {}) {
     } else if (t < camTravelEnd) {
       const u = smoothstep(camTravelStart, camTravelEnd, t);
       rescue.camPos = fallCamAnchor.clone().lerp(widePos, u);
-      rescue.camLookAt = flyOutEnd.clone().lerp(lookAtTarget, u);
+      rescue.camLookAt = flightStart.clone().lerp(lookAtTarget, u);
     } else if (t < camZoomStart) {
       rescue.camPos = widePos;
       rescue.camLookAt = lookAtTarget;
@@ -4468,7 +4735,7 @@ export function mountSkyPath(container, options = {}) {
       rescue.camLookAt = lookAtTarget;
     }
 
-    if (t >= t6) resolveRescue();
+    if (t >= t5) resolveRescue();
   }
 
   /**
@@ -4482,25 +4749,38 @@ export function mountSkyPath(container, options = {}) {
    */
   function resolveRescue() {
     const { sec, isLastFork, landing } = rescue;
-    if (rig.powerup) {
-      scene.remove(rig.powerup.group);
-      rig.powerup.cardMesh.geometry.dispose();
-      rig.powerup.cardMesh.material.dispose();
-      disposeEngineSmoke(rig.powerup);
-      rig.powerup = null;
-    }
-    walker.set(landing.x, 0, landing.z);
+    disposePowerUp(rig);
+    // `walker` (the pure-centreline simulation position — see
+    // currentSeatLateral's own header for why it must never carry a seat
+    // offset) is NOT the same thing as `landing`, which carries this
+    // player's own seat offset for the animation itself (see startRescue).
+    // The last fork's `landing` has no seat offset to begin with (no
+    // seating concept at the temple approach), so it's already centreline
+    // and safe to use directly there.
+    const centreline = isLastFork ? landing : sec.nextCursor;
+    walker.set(centreline.x, 0, centreline.z);
     facing = landing.heading;
     if (isLastFork) {
       // Same continuation a normal correct pick plays at the last fork (see
       // applyChoice) — the walk from here to the temple's own stop point,
       // already precomputed as sec.approach.
       const continuation = sec.approach || [];
-      leg = makeLeg(continuation, [walker.clone(), ...continuation], sunP, timeOfDay(N_FORKS), null);
+      leg = makeLeg(continuation, [walker.clone(), ...continuation], sunP, timeOfDay(N_FORKS), null, landing.heading, landing.heading);
       leg.success = true;
     } else {
       forkIndex += 1;
       sunP = timeOfDay(forkIndex);
+      // Luke, 2026-09-13: "the guide and dead player have their view broken
+      // when the watched player uses a jetpack to save themselves... no
+      // player visible." Cause: unlike every other arrival, a mid-round
+      // rescue never runs a `leg` at all (it teleports straight to the new
+      // fork, no walk to animate) — so it never reached tick()'s
+      // `leg.arriveFork` branch, the ONLY place that reports "I'm here,
+      // resting" to teammates. Nothing ever told anyone else this player
+      // arrived; their entry sat wherever the pre-rescue fall/departure
+      // tracking last left it (invisible, mid fall-standin). Reporting it
+      // explicitly here, exactly as that branch does, is the fix.
+      notifyPlayerState();
     }
     rescue = null;
     refreshUI();
@@ -4556,12 +4836,32 @@ export function mountSkyPath(container, options = {}) {
       scene,
       textures: { ship: TEX.spaceship, beams: TEX.spaceshipBeams, string: TEX.string },
     });
+    // `walker` is deliberately always the bare centreline (see
+    // currentSeatLateral's own header) — never where the card is actually
+    // drawn once seating is involved. Luke, 2026-09-14, from his own POV
+    // mid-abduction while seated off-centre: "the green light and the ship
+    // come down to the central position even if the player is to the
+    // side... they are not actually within the rings or the ship." Exactly
+    // that: the ship/beam/glow anchored on bare `walker`, while the card
+    // itself (targetCard: figure) is positioned by tick()'s own bob code
+    // from `walker + currentSeatLateral()` — the two silently disagreed.
+    // Adding the same seat lateral here is the fix; a spectator's own local
+    // replica (see updateTeammate) never had this bug, since it already
+    // anchors on the teammate's real RENDERED position.
+    const seatNow = currentSeatLateral();
     abduction.start({
-      at: { x: walker.x, y: walker.y, z: walker.z },
+      at: { x: walker.x + seatNow.x, y: walker.y, z: walker.z + seatNow.z },
       targetCard: figure,
       cardHeight: FIGURE_H,
       cardWidth: FIGURE_H * FIGURE_ASPECT,
     });
+    // Luke, 2026-09-13: "being abducted by aliens" is one of the movements
+    // everyone else should be able to see. An abduction starts from rest,
+    // not from a fork choice, so it's the one case that has to announce
+    // 'departing' itself — viewers only apply 'moving' pings to a departing
+    // rig (see updateTeammate); the pings themselves follow from tick()'s
+    // abduction branch, and 'gone' once the saucer has carried them off.
+    notifyPlayerState('departing');
     refreshUI();
   }
 
@@ -4919,7 +5219,7 @@ export function mountSkyPath(container, options = {}) {
     }
   }
 
-  function makeLeg(queue, realPoints, fromP, toP, arriveFork) {
+  function makeLeg(queue, realPoints, fromP, toP, arriveFork, fromHeading, toHeading) {
     // `lastPoint` is where the walker stands *right now*, snapshotted as the
     // leg begins — always flat ground (an island deck, or spawn), never
     // mid-bridge, since a leg only ever starts where the previous one ended.
@@ -4927,6 +5227,12 @@ export function mountSkyPath(container, options = {}) {
     // compares it against the upcoming one's `.bridge` tag to know whether the
     // *current segment* is a bridge crossing (see the `head.bridge` check
     // there) — untagged waypoints (islands, stone stretches) leave it null.
+    //
+    // `fromHeading`/`toHeading` — the departure/arrival fork's own heading,
+    // for currentSeatLateral()'s taper (see the "island layout" section) —
+    // are carried on the leg rather than re-derived from `forkIndex` there,
+    // since `forkIndex` itself flips to the arrival fork partway through the
+    // leg's own lifetime (see the `leg.arriveFork` branch below).
     return {
       queue,
       total: pathLength(realPoints),
@@ -4934,6 +5240,8 @@ export function mountSkyPath(container, options = {}) {
       fromP,
       toP,
       arriveFork,
+      fromHeading,
+      toHeading,
       lastPoint: { x: walker.x, z: walker.z, bridge: null, bridgeT: 0 },
     };
   }
@@ -5086,18 +5394,14 @@ export function mountSkyPath(container, options = {}) {
         extrasTitle: 'TIMING',
         extras: {
           'fall s': rescueSlider('fallDuration', 0.1, 3),
-          'fly-out s': rescueSlider('flyOutDuration', 0.1, 3),
-          'arc s': rescueSlider('arcDuration', 0.2, 5),
+          'fly s': rescueSlider('flyDuration', 0.2, 6),
           'descend s': rescueSlider('descendDuration', 0.1, 4),
           'upright hold s': rescueSlider('uprightHoldDuration', 0, 4),
           'hold s': rescueSlider('holdDuration', 0, 3),
           'depart s': rescueSlider('departDuration', 0.2, 4),
           'cam travel s': rescueSlider('cameraTravelDuration', 0.1, 4),
           'cam zoom s': rescueSlider('cameraZoomDuration', 0.1, 4),
-          'fly-out dist': rescueSlider('flyOutDistance', 0, 15),
-          'fly-out rise': rescueSlider('flyOutRise', 0, 6),
           'apex height': rescueSlider('apexHeight', 1, 20),
-          'loop radius': rescueSlider('loopRadius', 0, 6),
           'depart dist': rescueSlider('departDistance', 1, 30),
           'cam pullback': rescueSlider('cameraPullback', 0, 20),
         },
@@ -5128,6 +5432,57 @@ export function mountSkyPath(container, options = {}) {
   // than parked. If that assumption turns out wrong, rebuilding it is
   // cheap — this file's git history has the full working version.
 
+  // Below-name-tag PLACEMENT tuner (`?tagTune=1`), 2026-09-14 — Luke: the
+  // below-seated tags are "partially embedded in the ground." Two sliders,
+  // vertical (NAME_TAG_BELOW_Y_OFFSET, added on top of tagLocalY's own
+  // below-side formula) and depth-toward-the-temple (NAME_TAG_BELOW_Z, the
+  // existing forward push already used to keep a below tag off the
+  // character card — see tagLocalY/tagLocalZ). refreshBelowTagPlacement()
+  // re-applies immediately on every drag: a teammate's tag would pick up
+  // the new constant on its own next frame anyway (relayoutAllIslands
+  // re-checks it continuously), but this device's OWN tag is only
+  // positioned once at creation (see the race that was just fixed at its
+  // attachNameTag call site), so without this the slider would look like
+  // it does nothing for your own name until the next full reload.
+  function refreshBelowTagPlacement() {
+    if (rig.nameTag && mySeat.tagSide === 'below') setNameTagSide(rig, mySeat.tagSide, mySeat.tagYStagger);
+    for (const entry of teammates.values()) {
+      if (entry.seatTagSide === 'below') setNameTagSide(entry.rig, entry.seatTagSide, entry.seatTagYStagger);
+    }
+  }
+  const tagTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('tagTune')
+    ? attachBgTuner({
+        container,
+        id: 'tagTuner',
+        title: 'below name tag',
+        position: 'left',
+        panels: {},
+        extrasTitle: 'PLACEMENT',
+        extras: {
+          vertical: {
+            value: NAME_TAG_BELOW_Y_OFFSET,
+            min: -0.5,
+            max: 1.5,
+            step: 0.01,
+            set: (v) => {
+              NAME_TAG_BELOW_Y_OFFSET = v;
+              refreshBelowTagPlacement();
+            },
+          },
+          'depth (toward temple)': {
+            value: NAME_TAG_BELOW_Z,
+            min: -1,
+            max: 3,
+            step: 0.01,
+            set: (v) => {
+              NAME_TAG_BELOW_Z = v;
+              refreshBelowTagPlacement();
+            },
+          },
+        },
+      })
+    : null;
+
   // ---------------------------------------------------------------- controls
 
   const els = {
@@ -5140,7 +5495,6 @@ export function mountSkyPath(container, options = {}) {
     paletteList: $('paletteList'),
     nameInput: $('nameInput'),
     charStart: $('charStart'),
-    nameTagLayer: $('nameTagLayer'),
     abduct: $('abduct'), // temporary test trigger — see startAbduction()
     addJetpack: $('addJetpack'), // temporary test trigger — see equipPowerUp()
     templeFade: $('templeFade'), // opacity driven by updateTempleEntry()
@@ -5270,7 +5624,22 @@ export function mountSkyPath(container, options = {}) {
     // the same letter from two callers at once — a separate, pre-existing
     // issue, not chased down here since skipping the call sidesteps it
     // entirely for a rig nothing will ever show a tag on anyway).
-    if (!isSpectatorRole(role)) attachNameTag(rig, name, pickedColorHex);
+    if (!isSpectatorRole(role)) {
+      // Bug found 2026-09-14 via tagDebugLog (see attachNameTag/setNameTagSide's
+      // own comments): this used to call attachNameTag with no `side`
+      // (defaulting to 'above') and immediately follow up with
+      // setNameTagSide(mySeat.tagSide) to fix it — but attachNameTag's canvas
+      // build is ASYNC, so that follow-up ran before the tag mesh existed and
+      // silently no-opped. A TEAMMATE's tag recovers from this because
+      // relayoutAllIslands re-checks it every frame; a device's OWN tag has no
+      // such recheck, so once the async build finally resolved (always at the
+      // 'above' default baked into the closure), nothing ever corrected it —
+      // permanently wrong for the whole round, exactly matching Luke's report
+      // of it being wrong from character-select, only on the affected
+      // player's own screen. Fix: give attachNameTag the real side/stagger
+      // up front so the tag is right the instant it's created.
+      attachNameTag(rig, name, pickedColorHex, { side: mySeat.tagSide, yStagger: mySeat.tagYStagger });
+    }
     if (TEST_TAGS) spawnTestCompanions();
     // Luke, 2026-09-13: "the guide should have no physical presence in the
     // game at any point... with one guide and three players [every device]
@@ -5367,7 +5736,7 @@ export function mountSkyPath(container, options = {}) {
     if (!sec) return;
 
     const wasCorrect = side === sec.correct;
-    notifyPlayerState('departing', !wasCorrect); // before forkIndex moves on — real position pings follow while walking, see tick()
+    notifyPlayerState('departing'); // before forkIndex moves on — real position pings follow while walking, see tick(); the outcome is deliberately NOT sent ahead
     choiceSide = side; // track which path was chosen for camera angle during fall
     const branchPts = sec.branch[side];
     const queue = branchPts.slice();
@@ -5385,10 +5754,11 @@ export function mountSkyPath(container, options = {}) {
       realPoints.push(...continuation);
       const arriveFork = isLastFork ? null : forkIndex + 1;
       const toP = isLastFork ? timeOfDay(N_FORKS) : timeOfDay(forkIndex + 1);
-      leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), toP, arriveFork);
+      const toHeading = arriveFork ? sections[arriveFork - 1].fork.heading : sec.fork.heading;
+      leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), toP, arriveFork, sec.fork.heading, toHeading);
       leg.success = true;
     } else {
-      leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), timeOfDay(forkIndex), null);
+      leg = makeLeg(queue, realPoints, timeOfDay(forkIndex), timeOfDay(forkIndex), null, sec.fork.heading, sec.fork.heading);
       leg.success = false;
     }
     refreshUI();
@@ -5431,18 +5801,11 @@ export function mountSkyPath(container, options = {}) {
     templeEntry = null;
     // Defensive only — the "Again" button that calls restart() is hidden
     // for the whole rescue (see `moving`/showCurrent's own !!rescue guards),
-    // so this shouldn't normally fire mid-rescue. removeFromParent() rather
-    // than a specific scene.remove()/rig.group.remove() since the group
-    // could currently be under either, depending whether detach (see
-    // updateRescue) had already happened.
+    // so this shouldn't normally fire mid-rescue. disposePowerUp() handles
+    // whichever parent the group is currently under (rig.group, or `scene`
+    // directly if detach — see updateRescue — had already happened).
     if (rescue) {
-      if (rig.powerup) {
-        rig.powerup.group.removeFromParent();
-        rig.powerup.cardMesh.geometry.dispose();
-        rig.powerup.cardMesh.material.dispose();
-        disposeEngineSmoke(rig.powerup);
-        rig.powerup = null;
-      }
+      disposePowerUp(rig);
       rescue = null;
     }
     doorLeftPivot.rotation.y = 0;
@@ -5477,6 +5840,13 @@ export function mountSkyPath(container, options = {}) {
   els.addJetpack?.addEventListener('click', () => {
     equipPowerUp(rig);
     els.addJetpack.disabled = true;
+    // Nudges teammates right away rather than waiting for the next
+    // resting/departing/moving report — equipping usually happens while
+    // just standing around, which wouldn't otherwise send anything for a
+    // while. Harmless to send a 'resting' report here: this device's own
+    // forkIndex hasn't changed, so it's a no-op for everyone's position,
+    // just carries the updated hasJetpack flag (see notifyPlayerState).
+    if (!isSpectatorRole(role)) notifyPlayerState();
   });
 
   // Hold-to-advance: hold #advance to walk, release to freeze in place —
@@ -5700,17 +6070,22 @@ export function mountSkyPath(container, options = {}) {
         }
         leg.traveled += moveAmount;
 
-        // Real-time position ping for a spectator role watching this
-        // device — see MOVING_PING_INTERVAL's own comment. Sent regardless
-        // of whether moveAmount is currently 0 (holdingForward released,
-        // i.e. genuinely paused) so a spectator's staleness check doesn't
-        // mistake "this player is just standing still mid-bridge" for
-        // "they've stopped reporting" — see updateTeammates.
+        // Real-time position ping for everyone else watching this device —
+        // see MOVING_PING_INTERVAL's own comment. Sent regardless of whether
+        // moveAmount is currently 0 (forward released, i.e. genuinely
+        // paused): a viewer just keeps smoothing toward the same spot, which
+        // reads as "stopped" — Luke: "if they stop moving, by taking their
+        // finger off the move forward button, everyone else will see them
+        // stop."
         const now = Date.now();
         if (now - lastMovingPingAt >= MOVING_PING_INTERVAL) {
           lastMovingPingAt = now;
           const heading = distToHead > 1e-4 ? Math.atan2(dx, -dz) : undefined;
-          notifyPlayerState('moving', false, { x: walker.x, z: walker.z, heading });
+          // Broadcasts the SEAT-WALK position, not the bare centreline — so
+          // a viewer sees the real diagonal walk toward/away from a fixed
+          // seat with no extra work on the receiving end.
+          const seatNow = currentSeatLateral();
+          notifyPlayerState('moving', { x: walker.x + seatNow.x, z: walker.z + seatNow.z, heading });
         }
 
         // Bridge height: only while the segment we are *currently crossing*
@@ -5781,6 +6156,17 @@ export function mountSkyPath(container, options = {}) {
       }
     }
 
+    // This device's own seat walk (see currentSeatLateral()) — evaluated
+    // once per frame, after the leg-processing block above (so it reflects
+    // this frame's just-updated `leg.traveled`/`forkIndex`, including an
+    // arrival that just happened this very frame) and reused everywhere the
+    // rendered figure's position matters: the figure itself, the trailing
+    // camera, and the light target. Deliberately NOT applied to `walker`
+    // itself, nor to the fall/rescue/abduction branches below (all three
+    // already own figure.position outright, and all three are scripted,
+    // centreline-only sequences — see currentSeatLateral()'s own comment).
+    const seatLateral = currentSeatLateral();
+
     // Drives the door-opening ending on its own timer, independent of the
     // (now-null) `leg` — see its own doc comment. Runs before the step-bob/
     // camera code below so both see this frame's already-updated walker.z.
@@ -5815,7 +6201,18 @@ export function mountSkyPath(container, options = {}) {
       const fr = fallBody.rotation();
       figure.position.set(ft.x, ft.y, ft.z);
       figure.quaternion.set(fr.x, fr.y, fr.z, fr.w);
-      if (fallElapsed >= FALL_DISAPPEAR) figure.visible = false;
+      // Luke, 2026-09-13: "when a player falls, I want that to be visible
+      // on everyone's screen... they should see the proper falling
+      // animation" — the real physics transform, streamed for as long as
+      // the local figure is still visibly tumbling; see the "teammates"
+      // section's phase model. Once the local card has disappeared there's
+      // nothing left to mirror, so report 'gone' exactly once and stop.
+      if (fallElapsed < FALL_DISAPPEAR) {
+        pingFigureTransform();
+      } else if (!fallGoneSent) {
+        fallGoneSent = true;
+        notifyPlayerState('gone');
+      }
 
       // Broken plank pieces (if this fall came from one — see
       // triggerPlankBreak) ride the same fallWorld.step() calls above; just
@@ -5850,6 +6247,11 @@ export function mountSkyPath(container, options = {}) {
       // Billboard the rig at the live camera. Yaw only, which is what keeps
       // the beam's horizontal hide-line valid — see alienAbduction.js.
       abduction.facePoint(camera.position);
+      // Everyone else sees the card lifted away too — see startAbduction.
+      // (The yaw billboarding above is baked into the quaternion sent, so a
+      // viewer sees the card facing THIS camera, not theirs — a small
+      // oddity accepted for now over building a second facing rule.)
+      if (abduction.state.playing) pingFigureTransform();
 
       // Carried off = round over, and lost. Resolved the moment the sequence
       // ends rather than on a separate timer: unlike a fall (where the card
@@ -5858,6 +6260,7 @@ export function mountSkyPath(container, options = {}) {
       if (!abduction.state.playing && !finished) {
         finished = true;
         finishedSuccess = false;
+        notifyPlayerState('gone');
         emitRoundEnd(false);
         refreshUI();
       }
@@ -5890,9 +6293,9 @@ export function mountSkyPath(container, options = {}) {
         : null;
 
       figure.position.set(
-        walker.x + side * lift * WALK_BOB_LATERAL + (bridgeSway ? bridgeSway.offset.x : 0),
+        walker.x + seatLateral.x + side * lift * WALK_BOB_LATERAL + (bridgeSway ? bridgeSway.offset.x : 0),
         walker.y + FIGURE_H / 2 + lift * WALK_BOB_HEIGHT + (bridgeSway ? bridgeSway.offset.y : 0),
-        walker.z + (bridgeSway ? bridgeSway.offset.z : 0)
+        walker.z + seatLateral.z + (bridgeSway ? bridgeSway.offset.z : 0)
       );
       figure.rotation.z = -side * lift * WALK_BOB_TILT + (bridgeSway ? bridgeSway.roll : 0);
 
@@ -6042,9 +6445,9 @@ export function mountSkyPath(container, options = {}) {
       const behind = forward(facing, CAM_BACK * pull);
       const ahead = forward(facing, 4.6);
       camera.position.set(
-        walker.x - behind.x + look.x,
+        walker.x + seatLateral.x - behind.x + look.x,
         CAM_HEIGHT * (1 + (pull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
-        walker.z - behind.z
+        walker.z + seatLateral.z - behind.z
       );
       // During an abduction the camera tilts up to follow the saucer away.
       // Done as a rotation of the LOOK-AT point about the camera, not a move
@@ -6055,12 +6458,12 @@ export function mountSkyPath(container, options = {}) {
       if (pitch > 0) {
         const reach = CAM_BACK * pull + 4.6;
         camera.lookAt(
-          walker.x + ahead.x,
+          walker.x + seatLateral.x + ahead.x,
           CAM_LOOK_Y + Math.sin(pitch) * reach,
-          walker.z + ahead.z * Math.cos(pitch)
+          walker.z + seatLateral.z + ahead.z * Math.cos(pitch)
         );
       } else {
-        camera.lookAt(walker.x + ahead.x, CAM_LOOK_Y, walker.z + ahead.z);
+        camera.lookAt(walker.x + seatLateral.x + ahead.x, CAM_LOOK_Y, walker.z + seatLateral.z + ahead.z);
       }
     }
     // else: the round ended badly — camera stays exactly where the fall (or
@@ -6076,7 +6479,7 @@ export function mountSkyPath(container, options = {}) {
     // rig's own following, so they need the camera position it was just given.
     updateWindClouds(dt);
 
-    key.target.position.set(walker.x, 0, walker.z);
+    key.target.position.set(walker.x + seatLateral.x, 0, walker.z + seatLateral.z);
 
     harness?.update(dt);
     updateBirds(dt);
@@ -6104,9 +6507,21 @@ export function mountSkyPath(container, options = {}) {
       fps = Math.round((frames * 1000) / (now - fpsClock));
       frames = 0;
       fpsClock = now;
+      // Temporary diagnostic (2026-09-13), so a real multi-device test can
+      // be read off the screen instead of guessed at: one line per teammate
+      // this device knows about — phase, total reports received, and how
+      // long since the last one. Remove once the tracking work is settled.
+      const teammateLines = Array.from(teammates.entries())
+        .map(([tok, e]) => {
+          const age = e.lastPingAt ? `${Math.round((Date.now() - e.lastPingAt) / 100) / 10}s ago` : 'never';
+          const kind = e.livePos ? (e.livePos.quat ? 'xyz+rot' : 'xz') : '—';
+          return `<br>${e.displayName ?? tok.slice(-4)}: <b>${e.phase}</b> · ${e.pingCount} msgs · last ${age} · ${kind}`;
+        })
+        .join('');
       els.hud.innerHTML =
         `<b>${fps}</b> fps · ${surfaceWidth()}×${surfaceHeight()} @${renderer.getPixelRatio().toFixed(1)}x` +
-        (loadMs === null ? '' : ` · loaded <b>${loadMs}</b> ms`);
+        (loadMs === null ? '' : ` · loaded <b>${loadMs}</b> ms`) +
+        teammateLines;
     }
 
     rafId = requestAnimationFrame(tick);
@@ -6213,8 +6628,8 @@ export function mountSkyPath(container, options = {}) {
     });
     window.__testTags = () => testCompanions.map((c) => ({
       pos: c.rig.group.position.toArray().map((v) => +v.toFixed(3)),
-      tagLocalY: c.rig.nameTag ? +c.rig.nameTag.localY.toFixed(3) : null,
-      tagVisible: c.rig.nameTag ? c.rig.nameTag.el.style.display !== 'none' : null,
+      tagLocalY: c.rig.nameTag ? +c.rig.nameTag.mesh.position.y.toFixed(3) : null,
+      tagVisible: c.rig.nameTag ? c.rig.nameTag.mesh.visible : null,
     }));
     window.__cloudRows = () => cloudRows.map((r) => +r.position.z.toFixed(2));
     window.__forceChoice = (side) => requestChoice(side);
@@ -6258,9 +6673,29 @@ export function mountSkyPath(container, options = {}) {
         characterKey: e.characterKey,
         forkIndex: e.forkIndex,
         pos: e.rig.group.position.toArray().map((v) => +v.toFixed(2)),
-        tagLocalY: e.rig.nameTag ? +e.rig.nameTag.localY.toFixed(3) : null,
+        tagLocalY: e.rig.nameTag ? +e.rig.nameTag.mesh.position.y.toFixed(3) : null,
+        seatOffsetX: e.seatOffsetX,
+        seatTagSide: e.seatTagSide,
       })),
     });
+    // Temporary, 2026-09-14 — diagnosing "position 4 and 5 both show
+    // above" report: dumps the raw `roster` array this device received and
+    // the seatOffsets table it built from it, so we can see whether the
+    // real broadcast roster matches what's assumed, without guessing.
+    // Delete once that's resolved.
+    window.__seatOffsets = () => ({
+      roster,
+      myToken,
+      seats: roster.map((tok) => ({ token: tok, ...seatOffsets.get(tok) })),
+    });
+    // See tagDebugLog's own comment above nameTags — dump with
+    // window.__tagDebugLog(), or JSON.stringify(window.__tagDebugLog(), null, 2)
+    // to copy as plain text. window.__tagDebugClear() empties it, useful for
+    // isolating just what happens around one specific arrival.
+    window.__tagDebugLog = () => tagDebugLog.slice();
+    window.__tagDebugClear = () => {
+      tagDebugLog.length = 0;
+    };
     window.__doorTune = () => ({
       state: doorTuneState,
       frame: { pos: doorFrameMesh.position.toArray(), scale: doorFrameMesh.scale.toArray() },
@@ -6379,10 +6814,12 @@ export function mountSkyPath(container, options = {}) {
     dispose() {
       if (disposed) return;
       disposed = true;
+      document.removeEventListener('visibilitychange', onTagDebugVisibility); // temporary — see tagDebugLog's own comment
       if (rafId !== null) cancelAnimationFrame(rafId);
       harness?.dispose();
       bgTuner?.dispose();
       rescueTuner?.dispose();
+      tagTuner?.dispose();
       resizeObserver.disconnect();
       renderer.dispose();
       renderer.forceContextLoss();

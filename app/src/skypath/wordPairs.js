@@ -62,19 +62,26 @@ function shuffle(arr) {
 }
 
 /**
- * Picks `n` pairs for one round — one per fork — and randomly decides which
- * word of each lands on the left vs. the right. Never repeats a pair within
+ * Picks `n` pairs for one round — one per fork. Never repeats a pair within
  * the round as long as `pairs.length >= n` (the expected case, and the
  * reason word-pairs.json is meant to grow well past N_FORKS); if the list is
  * ever shorter than that, wraps around and reuses pairs rather than
  * crashing, once — logging a warning so a thin list gets noticed rather than
  * just quietly repeating forever.
  *
- * Returns an array of `{ left, right }` — plain word strings, not pair
- * objects — one entry per fork, in fork order. Which word is "correct" is
- * NOT decided here: that's CORRECT_BY_FORK's job in skyPath.js, entirely
- * independent of this left/right draw (Luke: "Choose the order of the words
- * entirely randomly — Hit might be left with Heat right, or vice versa").
+ * Returns an array of `{ a, b }` — plain word strings, not pair objects,
+ * NOT yet assigned to a physical side — one entry per fork, in fork order.
+ *
+ * Left/right placement used to be decided right here (one shared coin flip
+ * per fork, sent to the whole group). Luke, 2026-09-13: "the correct
+ * side/bridge and the matching word needs to be randomised per player...
+ * we need a way to prevent players from seeing which choice their teammates
+ * made." Moved to skyPath.js's buildFork() instead, which does its own
+ * LOCAL random flip per device — see that function's own comment. What
+ * stays shared (broadcast once, here) is only the PAIR itself and which of
+ * its two words is correct (skyPath.js's CORRECT_BY_FORK, entirely
+ * independent of this draw, same as before) — every device must agree on
+ * what word the guide actually said, but not on which side it's standing.
  */
 export function assignForkWords(pairs, n) {
   if (pairs.length === 0) {
@@ -89,7 +96,7 @@ export function assignForkWords(pairs, n) {
   const result = [];
   for (let i = 0; i < n; i++) {
     const [a, b] = shuffled[i % shuffled.length].words;
-    result.push(Math.random() < 0.5 ? { left: a, right: b } : { left: b, right: a });
+    result.push({ a, b });
   }
   return result;
 }

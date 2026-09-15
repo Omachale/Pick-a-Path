@@ -312,13 +312,23 @@ function SessionPanel({ joinCode, onEndSession }) {
         const guideToken = candidates[Math.floor(Math.random() * candidates.length)].token;
         guided.add(guideToken);
 
+        // Fixed seating, 2026-09-13 — Luke: "each person will be assigned a
+        // position, and that won't change through the round." This one
+        // array, broadcast once, IS the assignment: every device in the
+        // group builds its seat-offset table from the SAME array by index
+        // (see skyPath.js's own `seatOffsets`), so nobody needs to agree on
+        // anything further over the wire. The guide isn't in it — it has no
+        // seat, and never reports a position at all (see "no physical
+        // presence" in TODO.md).
+        const roster = members.filter((p) => p.token !== guideToken).map((p) => p.token);
+
         const forks = Array.from({ length: SKY_PATH_N_FORKS }, () => letters[Math.random() < 0.5 ? 0 : 1]).join('');
         const words = assignForkWords(wordPairs, SKY_PATH_N_FORKS);
         const roundId = randomRoundId();
         channelRef.current?.send({
           type: 'broadcast',
           event: 'game-started',
-          payload: { groupId, forks, words, guideToken, roundId },
+          payload: { groupId, forks, words, guideToken, roundId, roster },
         });
       }
     } catch (err) {

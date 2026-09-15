@@ -9,8 +9,20 @@
  * no more `isTeacher`/`GroupEditor` branch, and a student has nothing to
  * click to start a round, only a status line saying they're waiting.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import JoinByCode from './JoinByCode.jsx';
+import { clearToken } from './identity.js';
+import { fetchCurrentDisplayNames } from './useLobby.js';
+
+// Dev-only convenience, 2026-09-14 — Luke: "it's quite time-consuming opening
+// multi browser tabs and pressing 'New device (reset identity)' each time and
+// typing in a new name each time." One button does all three steps (reset
+// identity, pick the next unused name, join) by resetting identity AND
+// reloading straight into a URL carrying the chosen name (`?devJoin=`), since
+// identity.js's `token` is a module-level singleton fixed at import time —
+// same reason the existing "New device" button already does a hard
+// `location.reload()` rather than resetting in place.
+const DEV_PLAYER_NAMES = ['Serena', 'William', 'Louis', 'Faraday', 'Theresa', 'Wilhelmina'];
 
 function groupLabel(groupId) {
   return groupId === null || groupId === undefined ? 'Unassigned' : `Group ${groupId}`;
@@ -53,6 +65,49 @@ function ParticipantList({ participants, myToken }) {
 
 export default function Lobby({ lobby, onCodeResolved, onOpenTeacherView }) {
   const [name, setName] = useState(lobby.participant?.displayName || '');
+  const [devPlayerError, setDevPlayerError] = useState(null);
+  const [devPlayerBusy, setDevPlayerBusy] = useState(false);
+
+  // Consumes `?devJoin=<name>` left by handleDevPlayer below, exactly once,
+  // on the fresh page load it navigates to — auto-fills the name field and
+  // joins immediately, then strips the param so an ordinary later refresh
+  // doesn't try to re-join under the same name again.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const devName = params.get('devJoin');
+    if (!devName || lobby.joined) return;
+    setName(devName);
+    lobby.join(devName);
+    params.delete('devJoin');
+    const clean = `${location.pathname}${params.toString() ? `?${params}` : ''}`;
+    history.replaceState(null, '', clean);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleDevPlayer() {
+    setDevPlayerError(null);
+    setDevPlayerBusy(true);
+    // Reads who's ACTUALLY present in this session's channel right now —
+    // not `lobby.participants`, which only reflects tabs THIS device has
+    // itself joined with (see fetchCurrentDisplayNames's own comment). Luke,
+    // 2026-09-14, after six fresh tabs all picked "Serena": each one's own
+    // `lobby.participants` was empty, since none of them had joined yet.
+    const params = new URLSearchParams(location.search);
+    const used = new Set(await fetchCurrentDisplayNames(params.get('join')));
+    setDevPlayerBusy(false);
+    const next = DEV_PLAYER_NAMES.find((n) => !used.has(n));
+    if (!next) {
+      // Deliberately not reusing/cycling a name or picking anything messy —
+      // Luke asked to be told rather than have this do something clever.
+      setDevPlayerError(
+        `All ${DEV_PLAYER_NAMES.length} dev names (${DEV_PLAYER_NAMES.join(', ')}) are already in this lobby.`
+      );
+      return;
+    }
+    clearToken();
+    params.set('devJoin', next);
+    location.href = `${location.pathname}?${params}`;
+  }
 
   return (
     <div className="screen">
@@ -61,8 +116,16 @@ export default function Lobby({ lobby, onCodeResolved, onOpenTeacherView }) {
       <p className="hint" style={{ color: '#666', fontSize: '0.9rem' }}>
         My identity token: <code>{lobby.token}</code>{' '}
         <button onClick={lobby.resetDevice}>New device (reset identity)</button>{' '}
+        <button
+          onClick={handleDevPlayer}
+          disabled={devPlayerBusy}
+          title="Reset identity and join as the next unused test name"
+        >
+          {devPlayerBusy ? 'Checking…' : 'Dev player'}
+        </button>{' '}
         <button onClick={onOpenTeacherView}>Teacher? Start a session →</button>
       </p>
+      {devPlayerError && <p style={{ color: '#a00', fontSize: '0.9rem' }}>{devPlayerError}</p>}
 
       {lobby.joined && !lobby.hasRealSession && (
         <p

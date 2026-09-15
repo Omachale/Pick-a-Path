@@ -50,6 +50,12 @@ function SoloSkyPath() {
         // ?role=watching&guideIsland=N, without needing a real fall over a
         // real network to reach it.
         initialGuideIsland={Number(params.get('guideIsland')) || null}
+        // Dev-only, for exercising fixed seating without a real room —
+        // e.g. ?solo=1&roster=a,b,c&myToken=b seats "b" one slot right of
+        // centre. Omit both (the common case) and every device gets no
+        // seat offset, same as before this existed.
+        roster={params.get('roster')?.split(',').filter(Boolean) ?? []}
+        myToken={params.get('myToken')}
         gameRef={gameRef}
         onRoundEnd={(result) => console.log('[round end]', result)}
       />
@@ -104,6 +110,7 @@ export default function App() {
         round={lobby.round}
         failed={failed}
         displayName={lobby.participant?.displayName}
+        myToken={lobby.token}
         sendForkChoice={lobby.sendForkChoice}
         onForkChoiceReceived={lobby.onForkChoiceReceived}
         sendPlayerState={lobby.sendPlayerState}
