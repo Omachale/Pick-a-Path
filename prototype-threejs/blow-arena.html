@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en-NZ">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>Blow arena</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; overflow: hidden;
+        /* Same "the void is a CSS gradient, not scene geometry" trick as blow-trial.html. */
+        background: linear-gradient(to bottom, #060916 0%, #150f2e 22%, #341a3f 42%, #5c2540 60%, #7a2f3a 75%, #3a1420 100%);
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-user-select: none; user-select: none;
+      }
+      canvas { display: block; touch-action: none; }
+
+      #panel {
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 10;
+        max-height: 62vh;
+        overflow-y: auto;
+        padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 14px);
+        background: rgba(8, 12, 20, 0.78);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        color: #f4f7fa;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        transition: transform 0.25s ease;
+      }
+      /* Luke: "the controls cover half the screen so I can't see the effects
+         properly" — slides the whole panel off the bottom of the viewport
+         rather than shrinking/reflowing it, so nothing inside has to handle
+         a resized layout. */
+      #panel.collapsed { transform: translateY(100%); }
+
+      /* Always in the same spot regardless of #panel's own state, rather
+         than trying to track the panel's own (variable, scrollable) height
+         — simplest way to guarantee it's never itself covered by the panel
+         it controls. */
+      #panelToggle {
+        position: fixed;
+        right: 12px;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+        z-index: 11;
+        width: 42px;
+        height: 42px;
+        min-height: 0;
+        padding: 0;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        line-height: 1;
+      }
+      .section { display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(244,247,250,0.12); }
+      .section:last-child { border-bottom: 0; }
+      .sectionTitle { font: 700 11px/1 system-ui, sans-serif; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.6; }
+      .row { display: flex; align-items: center; gap: 10px; }
+      .row label { font: 600 12px/1.2 system-ui, sans-serif; width: 96px; flex-shrink: 0; }
+      .row input[type="range"] { flex: 1; }
+      .row .val { width: 46px; text-align: right; font: 500 11px/1 ui-monospace, monospace; opacity: 0.8; }
+      .row select { flex: 1; background: rgba(244,247,250,0.1); color: #f4f7fa; border: 0; border-radius: 8px; padding: 8px; font: 600 13px/1.2 system-ui, sans-serif; }
+
+      button {
+        min-height: 44px;
+        border: 0;
+        border-radius: 12px;
+        font: 700 14px/1.2 system-ui, sans-serif;
+        color: #12212f;
+        background: #ffe9b8;
+        box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+      }
+      button:active { transform: translateY(1px); }
+      button.secondary { color: #f4f7fa; background: rgba(244, 247, 250, 0.14); }
+      .btnRow { display: flex; gap: 10px; }
+      .btnRow button { flex: 1; }
+
+      #hud {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 8px);
+        left: 8px;
+        right: 8px;
+        z-index: 10;
+        font: 500 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #f4f7fa;
+        background: rgba(10, 20, 30, 0.5);
+        backdrop-filter: blur(6px);
+        padding: 8px 10px;
+        border-radius: 8px;
+        pointer-events: none;
+        max-height: 30vh;
+        overflow: hidden;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">blow arena</div>
+
+    <button id="panelToggle" class="secondary" aria-label="Hide controls">▼</button>
+
+    <div id="panel">
+      <div class="section">
+        <div class="sectionTitle">Add player</div>
+        <div class="row">
+          <label for="addDistance">Distance</label>
+          <input id="addDistance" type="range" min="0" max="1" step="0.01" value="0.3" />
+          <span class="val" id="addDistanceVal">3.6</span>
+        </div>
+        <div class="row">
+          <label for="addAngle">Angle</label>
+          <input id="addAngle" type="range" min="-180" max="180" step="1" value="0" />
+          <span class="val" id="addAngleVal">0°</span>
+        </div>
+        <button id="addBtn" class="secondary">Add card to arena</button>
+      </div>
+
+      <div class="section">
+        <div class="sectionTitle">Blow</div>
+        <div class="row">
+          <label for="targetSelect">Target</label>
+          <select id="targetSelect"></select>
+        </div>
+        <div class="row">
+          <label for="blowAngle">Direction</label>
+          <input id="blowAngle" type="range" min="-180" max="180" step="1" value="180" />
+          <span class="val" id="blowAngleVal">180°</span>
+        </div>
+        <div class="row">
+          <label for="strength">Strength</label>
+          <input id="strength" type="range" min="0" max="1" step="0.01" value="0.6" />
+          <span class="val" id="strengthVal">0.60</span>
+        </div>
+        <div class="btnRow">
+          <button id="blowBtn">Blow</button>
+          <button id="resetBtn" class="secondary">Reset arena</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/blow-arena-demo.js"></script>
+  </body>
+</html>
