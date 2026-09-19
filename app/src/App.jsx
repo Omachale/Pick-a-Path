@@ -56,6 +56,9 @@ function SoloSkyPath() {
         // seat offset, same as before this existed.
         roster={params.get('roster')?.split(',').filter(Boolean) ?? []}
         myToken={params.get('myToken')}
+        // Dev-only: force which item sits on island 2 (`jetpack` |
+        // `abduction`); omit for the same 50/50 draw a real round gets.
+        pickup={params.get('pickup')}
         gameRef={gameRef}
         onRoundEnd={(result) => console.log('[round end]', result)}
       />
@@ -115,6 +118,9 @@ export default function App() {
         onForkChoiceReceived={lobby.onForkChoiceReceived}
         sendPlayerState={lobby.sendPlayerState}
         onPlayerStateReceived={lobby.onPlayerStateReceived}
+        sendGameEvent={lobby.sendGameEvent}
+        onGameEventReceived={lobby.onGameEventReceived}
+        getAbductionTargets={lobby.getAbductionTargets}
         onRoundEnd={lobby.reportRoundEnd}
         onLeave={lobby.leaveGame}
       />

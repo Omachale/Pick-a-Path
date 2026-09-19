@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Alien interface — lowered into the game</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #16202b; overflow: hidden; }
+      #stage {
+        position: relative; width: 100%; height: 100%; overflow: hidden;
+        /* Stands in for the real game scene behind this UI — Luke: this
+           panel should render "in front of anything else on the screen",
+           which #hangWrap's z-index below is what actually guarantees;
+           this gradient is only here so "in front of" has something to be
+           in front OF. */
+        background: radial-gradient(ellipse at 50% 30%, #24384c 0%, #101922 70%);
+      }
+      #placeholderLabel {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: rgba(255,255,255,0.14); font: 700 15vh/1 system-ui, sans-serif; letter-spacing: 0.05em;
+        pointer-events: none; user-select: none;
+      }
+
+      #hangWrap { position: absolute; inset: 0; z-index: 20; pointer-events: none; }
+      #hangWrap canvas { position: absolute; top: 0; }
+
+      #useBtn {
+        position: absolute; left: 16px; bottom: 16px; z-index: 10;
+        padding: 12px 18px; border: 0; border-radius: 10px;
+        font: 700 14px system-ui, sans-serif; background: #ffe9b8; color: #12212f;
+        box-shadow: 0 3px 14px rgba(0,0,0,0.4); cursor: pointer;
+      }
+      #useBtn:disabled { opacity: 0.5; cursor: default; }
+
+      #ui {
+        position: absolute; top: 12px; right: 12px; z-index: 30;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10, 20, 30, 0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 220px;
+      }
+      #ui h3 {
+        margin: 10px 0 6px; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #8fb8d4; font-weight: 700;
+      }
+      #ui h3:first-child { margin-top: 0; }
+      #ui label { display: block; margin-bottom: 5px; }
+      #ui .row { display: flex; justify-content: space-between; align-items: baseline; }
+      #ui .row span { font-variant-numeric: tabular-nums; color: #9cf; font-weight: 600; }
+      #ui input[type=range] { width: 100%; }
+      #note {
+        margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.15);
+        font-size: 11px; line-height: 1.5; color: #c8dced;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    ==========================================================================
+    CARDBOARD UI — lowered into the game
+    ==========================================================================
+    Full design notes are in src/alienLowerProto.js's own header (why the
+    strings are just a long fixed length rather than a tracked anchor, why
+    the growth constants are duplicated from alienInterfaceProto.js rather
+    than imported). src/dialProto.js's header is the cardboard UI's overall
+    design doc; src/cardboardPanel.js is the shared backing panel.
+
+    The flat gradient behind everything is a stand-in for the real game
+    scene — the actual point being tested is that the hanging group renders
+    ABOVE it, and that the string is long enough to read as anchored off the
+    top of the screen at any panel size/position the sliders produce.
+    ==========================================================================
+    -->
+    <div id="stage">
+      <div id="placeholderLabel">GAME</div>
+      <button id="useBtn">🛸 Use alien device</button>
+      <div id="hangWrap"></div>
+    </div>
+
+    <div id="ui">
+      <h3>Lowering</h3>
+      <label class="row">duration <span id="lowerDurationV">0.90s</span></label>
+      <input id="lowerDuration" type="range" min="0.3" max="2.5" step="0.05" value="0.9" />
+      <label class="row">fills <span id="fillFractionV">92%</span></label>
+      <input id="fillFraction" type="range" min="0.5" max="0.98" step="0.01" value="0.92" />
+      <label class="row">top margin <span id="topMarginV">5%</span></label>
+      <input id="topMargin" type="range" min="0" max="0.25" step="0.01" value="0.05" />
+
+      <div id="note">
+        Click <b>Use alien device</b> to lower the panel, then watch the
+        alien screen grow automatically once it settles — same growth as
+        <code>alien-interface.html</code>, at the values you already tuned
+        there. <b>Top margin</b> is the gap left above the panel for the
+        string to read as hanging from something; the string itself is
+        always far longer than that, so its own top stays off-screen
+        regardless.
+      </div>
+    </div>
+
+    <script type="module" src="/src/alienLowerProto.js"></script>
+  </body>
+</html>

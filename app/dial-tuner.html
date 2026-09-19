@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Dial panel tuner</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #2a3644; overflow: hidden; }
+      /* Side by side, not overlapping — Luke's own preview pane can be
+         narrower than a desktop window, and an absolutely-positioned #ui on
+         top of a centred canvas (the first pass here) hid the canvas
+         entirely under it at that width. Flex siblings degrade gracefully
+         instead: the canvas shrinks to whatever room is actually left. */
+      body { display: flex; height: 100%; }
+      #stage {
+        flex: 1 1 auto; min-width: 0; display: flex; align-items: center; justify-content: center;
+        height: 100%; padding: 10px; box-sizing: border-box;
+      }
+      canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+
+      #ui {
+        flex: 0 0 246px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10, 20, 30, 0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; margin: 10px; border-radius: 10px;
+        height: calc(100% - 20px); overflow-y: auto; box-sizing: border-box;
+      }
+      #ui h3 {
+        margin: 10px 0 6px; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #8fb8d4; font-weight: 700;
+      }
+      #ui h3:first-child { margin-top: 0; }
+      #ui label { display: block; margin-bottom: 5px; }
+      #ui .row { display: flex; justify-content: space-between; align-items: baseline; }
+      #ui .row span { font-variant-numeric: tabular-nums; color: #9cf; font-weight: 600; }
+      #ui input[type=range] { width: 100%; }
+      #ui button {
+        border: 0; border-radius: 6px; padding: 6px 8px; margin-top: 6px; width: 100%;
+        font: 700 11px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+      #ui button:disabled { opacity: 0.45; cursor: default; }
+      #ui .btnRow { display: flex; gap: 6px; }
+      #ui .btnRow button { flex: 1; }
+      #note {
+        margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.15);
+        font-size: 11px; line-height: 1.5; color: #c8dced;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    ==========================================================================
+    CARDBOARD UI prototype — the dial + housing, on a movable panel
+    ==========================================================================
+    ** If Luke says "the cardboard UI" or "move the dial around": THIS is **
+    ** the file. Full design notes, reuse instructions, and status are in **
+    ** src/dialProto.js's own header comment — read that before changing **
+    ** anything here. TODO.md has a pointer to this exact spot. **
+
+    Short version: a cardboard sign, lowered on string from the top of the
+    screen (not built yet — see dialProto.js), carrying dials/lettering whose
+    layout changes screen to screen depending what information is being
+    shown. This page is the reference implementation of ONE dial: a housing
+    (the cardboard "window" + circular hole, WITH its own drop shadow) that
+    can be alpha-blended onto the backing at any position, with the dial
+    disc's position/size locked to a fixed offset from the housing — so
+    wherever the housing moves, the dial travels with it, seated correctly in
+    the hole, automatically. That's the one thing this whole prototype exists
+    to prove out, and it's the pattern every future dial/panel on this UI
+    reuses. Standalone page on purpose, per Luke's own ask ("make this a
+    separate prototype") — not wired into the real game yet.
+    ==========================================================================
+    -->
+    <div id="stage">
+      <canvas id="c"></canvas>
+    </div>
+
+    <div id="ui">
+      <h3>Housing, on the backing</h3>
+      <label class="row">horizontal <span id="housingXV">0</span></label>
+      <input id="housingX" type="range" min="0" max="1024" step="1" value="620" />
+      <label class="row">vertical <span id="housingYV">0</span></label>
+      <input id="housingY" type="range" min="0" max="546" step="1" value="190" />
+
+      <button id="resetBtn">Reset to defaults</button>
+
+      <h3>Turning</h3>
+      <div class="btnRow">
+        <button id="turnLeftBtn">◀ Turn left</button>
+        <button id="turnRightBtn">Turn right ▶</button>
+      </div>
+
+      <div id="note">
+        Moving the housing carries the dial with it (fixed offset) — try
+        dragging <b>horizontal</b>/<b>vertical</b> to opposite corners of the
+        panel: THIS is the actual thing being demonstrated here, since the
+        real UI will place this dial+housing pair differently on every
+        screen. Each turn is a fixed 45° over a locked 0.25s. The dial's own
+        offset/size within the housing, and the turn duration, are all
+        settled and baked into dialProto.js now — this page only exposes what
+        still varies screen to screen. The window above the dial hole is
+        still just a cut-out for now; the white paper + changing values come
+        later.
+      </div>
+    </div>
+
+    <script type="module" src="/src/dialProto.js"></script>
+  </body>
+</html>

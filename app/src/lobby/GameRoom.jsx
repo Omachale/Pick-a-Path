@@ -47,11 +47,14 @@ export default function GameRoom({
   onForkChoiceReceived,
   sendPlayerState,
   onPlayerStateReceived,
+  sendGameEvent,
+  onGameEventReceived,
+  getAbductionTargets,
   onRoundEnd,
   onLeave,
 }) {
   const gameRef = useRef(null);
-  const { forks, words, role, roster } = round;
+  const { forks, words, role, roster, pickup } = round;
 
   useEffect(() => {
     onForkChoiceReceived((forkIndex, side) => {
@@ -68,6 +71,13 @@ export default function GameRoom({
   }, [onPlayerStateReceived]);
 
   useEffect(() => {
+    onGameEventReceived((kind, payload) => {
+      gameRef.current?.applyGameEvent(kind, payload);
+    });
+    return () => onGameEventReceived(null);
+  }, [onGameEventReceived]);
+
+  useEffect(() => {
     if (failed) gameRef.current?.becomeSpectator();
   }, [failed]);
 
@@ -81,10 +91,13 @@ export default function GameRoom({
         displayName={displayName}
         roster={roster}
         myToken={myToken}
+        pickup={pickup}
         gameRef={gameRef}
         onForkChoice={sendForkChoice}
         onRoundEnd={onRoundEnd}
         onPlayerState={sendPlayerState}
+        onGameEvent={sendGameEvent}
+        getAbductionTargets={getAbductionTargets}
       />
       <button
         onClick={onLeave}

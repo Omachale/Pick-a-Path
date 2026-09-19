@@ -157,6 +157,33 @@ export function useLobby(sessionCode) {
   // forkChoiceHandlerRef, for the same reason (the channel is created once,
   // inside join(), before GameRoom.jsx even exists to register anything).
   const playerStateHandlerRef = useRef(null);
+  // Same pattern again for the generic `game-event` relay (pickup claims,
+  // abduction targeting) — see the handler in join().
+  const gameEventHandlerRef = useRef(null);
+  // Abduction targeting, 2026-09-15 — the target menu lists players on
+  // OTHER teams with "which island the player is currently on, updating
+  // only once they have fully reached the island" (Luke). The channel is
+  // session-wide, so every team's player-state reports already reach this
+  // device; the player-state handler below records the island from every
+  // 'resting' report (a player mid-bridge keeps showing the island they
+  // left, which is exactly the rule) and marks a player out on 'gone' or a
+  // round-ended report. Guides have no position and must be excluded, so
+  // each team's guideToken is recorded from ITS game-started broadcast too
+  // (the handler otherwise ignores other teams' round starts). Both are
+  // refs, not state: read on demand when the menu opens, never rendered.
+  const islandsRef = useRef(new Map()); // token -> { forkIndex, out }
+  const guideByGroupRef = useRef(new Map()); // groupId -> guideToken
+  // Session-wide character/colour table, same reasoning and same source as
+  // islandsRef right above: every player-state ping already carries
+  // characterKey/colorHex (see skyPath.js's notifyPlayerState), it's just
+  // that the handler below used to throw that away for anyone outside this
+  // device's own group. Recording it here — unconditionally, same as
+  // islandsRef — is what lets getAbductionTargets() hand back a target's
+  // REAL character/colour instead of the 'ghost'/gold placeholder abductUI
+  // used to be stuck with. A token with no entry yet (this device hasn't
+  // received a ping from them since the round started) means "not known
+  // yet" — the caller's own fallback, not a value to guess here.
+  const charByTokenRef = useRef(new Map()); // token -> { characterKey, colorHex }
   // Mirrors `participants` synchronously so the player-state handler (bound
   // once, at join() time) can look up a sender's CURRENT group without a
   // stale closure over whatever `participants` was when the channel was
@@ -251,6 +278,11 @@ export function useLobby(sessionCode) {
         applyGroupAssignment(payload.assignments);
       });
       ch.on('broadcast', { event: 'game-started' }, ({ payload }) => {
+        // Every team's round start is worth two facts for abduction
+        // targeting (see islandsRef/guideByGroupRef): who its guide is, and
+        // that its players are all back on island 1 with no one out.
+        guideByGroupRef.current.set(payload.groupId, payload.guideToken);
+        for (const tok of payload.roster ?? []) islandsRef.current.set(tok, { forkIndex: 1, out: false });
         if (payload.groupId !== myGroupIdRef.current) return; // addressed to a different group
         transition('playing', {
           roundId: payload.roundId,
@@ -263,8 +295,37 @@ export function useLobby(sessionCode) {
           // further agreement between devices, and skyPath.js's own
           // `seatOffsets` for what it's used for.
           roster: payload.roster,
+          // Which item sits on island 2 this round ('jetpack' | 'abduction')
+          // — see TeacherDashboard's startGame() and skyPath.js's pickup
+          // section.
+          pickup: payload.pickup ?? null,
           result: null,
         });
+      });
+      // One generic relay for the smaller in-round events (see
+      // `sendGameEvent` below) rather than a new event name + handler ref
+      // per feature. Routing is per `kind`: group-scoped kinds are only
+      // delivered from a sender in THIS device's group (same reasoning as
+      // player-state's own check above — the channel is session-wide);
+      // addressed kinds are delivered only to the device they name.
+      ch.on('broadcast', { event: 'game-event' }, ({ payload }) => {
+        const sender = participantsRef.current.find((p) => p.token === payload.token);
+        if (!sender) return;
+        const sameGroup = myGroupIdRef.current !== null && sender.groupId === myGroupIdRef.current;
+        switch (payload.kind) {
+          case 'pickup-claim':
+            if (!sameGroup) return;
+            break;
+          case 'abduct-target': // an attacker (any team) naming THIS device as their target
+            if (payload.targetToken !== token) return;
+            break;
+          case 'abduct-result': // the target's device reporting back to THIS device, the attacker
+            if (payload.toToken !== token) return;
+            break;
+          default:
+            return; // unknown kind — ignore rather than hand the game something it doesn't understand
+        }
+        gameEventHandlerRef.current?.(payload.kind, payload);
       });
       ch.on('broadcast', { event: 'fork-choice' }, ({ payload }) => {
         // Luke, 2026-09-12: "when one player chooses a direction, that
@@ -280,6 +341,21 @@ export function useLobby(sessionCode) {
         forkChoiceHandlerRef.current?.(payload.forkIndex, payload.side);
       });
       ch.on('broadcast', { event: 'player-state' }, ({ payload }) => {
+        // Session-wide island table for abduction targeting — see islandsRef.
+        // Only a 'resting' report moves someone; 'departing'/'moving' leave
+        // them on the island they left.
+        if (payload.phase === 'resting' && payload.forkIndex != null) {
+          islandsRef.current.set(payload.token, { forkIndex: payload.forkIndex, out: false });
+        } else if (payload.phase === 'gone') {
+          const cur = islandsRef.current.get(payload.token);
+          islandsRef.current.set(payload.token, { forkIndex: cur?.forkIndex ?? 1, out: true });
+        }
+        // See charByTokenRef above — unconditional, same as islandsRef, so a
+        // cross-team abduction target's real character/colour is on hand
+        // when getAbductionTargets() is asked, not just a same-team one's.
+        if (payload.characterKey) {
+          charByTokenRef.current.set(payload.token, { characterKey: payload.characterKey, colorHex: payload.colorHex });
+        }
         if (payload.token === token) return; // that's me — Sky Path already knows its own position
         // Only relevant if the sender is actually a teammate right now — the
         // lobby channel is shared by every group in the session (see this
@@ -290,6 +366,11 @@ export function useLobby(sessionCode) {
         playerStateHandlerRef.current?.(payload.token, payload);
       });
       ch.on('broadcast', { event: 'round-ended' }, ({ payload }) => {
+        // Anyone whose own round has ended (reached the temple, or fell
+        // without a 'gone' having arrived) is no longer an abduction target
+        // — see islandsRef.
+        const cur = islandsRef.current.get(payload.token);
+        islandsRef.current.set(payload.token, { forkIndex: cur?.forkIndex ?? 1, out: true });
         // Luke, 2026-09-12: "when one player fell, all players got the same
         // ... screen." Same root cause as the fork-choice bug — `roundId`
         // is shared by the whole group (everyone in it started together),
@@ -343,6 +424,59 @@ export function useLobby(sessionCode) {
     channelRef.current?.send({ type: 'broadcast', event: 'player-state', payload: { token, ...state } });
   }, []);
 
+  /** Registers the handler for relayed in-round game events (see the `game-event` handler in join() for the kinds and their routing). */
+  const onGameEventReceived = useCallback((handler) => {
+    gameEventHandlerRef.current = handler;
+  }, []);
+
+  /**
+   * Sends a small in-round event (e.g. `pickup-claim`) for the relay to
+   * hand back to everyone it concerns — this device included, via
+   * broadcast self:true, so the game only ever acts on the relayed copy.
+   * That relay ordering is what settles a race (two players claiming the
+   * same pickup at once): everyone sees the same first claim.
+   */
+  const sendGameEvent = useCallback((kind, data = {}) => {
+    channelRef.current?.send({ type: 'broadcast', event: 'game-event', payload: { token, kind, ...data } });
+  }, []);
+
+  /**
+   * Who this device may aim an abduction at, right now — Luke, 2026-09-15:
+   * players on OTHER teams (this device's own team only when the session
+   * has just the one team, so it stays testable), guides excluded, anyone
+   * already out (fallen/abducted/finished) excluded. Each entry carries the
+   * island the target was last seen RESTING on (see islandsRef), and their
+   * real characterKey/colorHex (see charByTokenRef) — null for either if no
+   * player-state ping has arrived from them yet this round. Whether an
+   * island is the last one (the "fizzle" rule) is Sky Path's call, since it
+   * owns N_FORKS.
+   */
+  const getAbductionTargets = useCallback(() => {
+    const everyone = participantsRef.current;
+    const myGroup = myGroupIdRef.current;
+    const groupCount = new Set(everyone.map((p) => p.groupId).filter((g) => g !== null && g !== undefined)).size;
+    const allowOwnTeam = groupCount <= 1;
+    return everyone
+      .filter((p) => p.token !== token)
+      .filter((p) => p.groupId !== null && p.groupId !== undefined)
+      .filter((p) => allowOwnTeam || p.groupId !== myGroup)
+      .filter((p) => guideByGroupRef.current.get(p.groupId) !== p.token)
+      .filter((p) => !islandsRef.current.get(p.token)?.out)
+      .map((p) => {
+        const char = charByTokenRef.current.get(p.token);
+        return {
+          token: p.token,
+          displayName: p.displayName,
+          groupId: p.groupId,
+          island: islandsRef.current.get(p.token)?.forkIndex ?? 1, // never reported = still on island 1
+          // null = no player-state ping received from them yet this round —
+          // the caller's own placeholder, not something to guess here.
+          characterKey: char?.characterKey ?? null,
+          colorHex: char?.colorHex ?? null,
+        };
+      });
+  }, []);
+
   /**
    * Reports a finished round (fall or arrival) up from Sky Path. This only
    * broadcasts; the actual `playing` -> `results` transition happens in the
@@ -384,6 +518,9 @@ export function useLobby(sessionCode) {
     onForkChoiceReceived,
     sendPlayerState,
     onPlayerStateReceived,
+    sendGameEvent,
+    onGameEventReceived,
+    getAbductionTargets,
     reportRoundEnd,
     leaveGame,
     resetDevice,

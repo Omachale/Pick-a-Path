@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "app"],
       "port": 5181
+    },
+    {
+      "name": "blow-arena-review",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", ".claude/worktrees/agent-a79f098398c058e71/prototype-threejs"],
+      "port": 5180
     }
   ]
 }

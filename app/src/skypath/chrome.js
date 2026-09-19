@@ -43,10 +43,46 @@ export const SKY_PATH_CHROME = `
      above the alien abduction button"). Same treatment as #abduct: a small
      test control, not part of the game's own UI, parked directly above it. -->
 <button id="addJetpack" title="Add jetpack power-up">🚀</button>
+<!-- The REAL abduction control (2026-09-15) — not a test trigger like the two
+     above it, which Luke asked to keep alongside it. Greyed out unless this
+     player is actually holding the abduction trigger item picked up on
+     island 2 (see skyPath.js's pickup section); once held, opens the
+     target-selection menu. -->
+<button id="useAbduct" title="Use abduction trigger (choose a target)" disabled>🛸</button>
 <div id="controls">
   <button id="advance" class="hidden" title="Hold to walk">▲</button>
   <button id="reset" class="hidden">Again</button>
 </div>
+<!-- Abduction targeting (2026-09-15, cardboard UI 2026-09-18) — see
+     skyPath.js's "abduction targeting" / "abduction cardboard UI" sections.
+     #abductMenu: the attacker's target picker, opened by #useAbduct — the
+     cardboard panel lowers into #abductStage, which skyPath.js draws
+     avatar/name-tag/arrows onto directly; #abductTeamBox and
+     #abductConfirmBtn are plain placeholder DOM elements laid over it
+     (Luke: "include a placeholder team choice window... a confirmation
+     button" — deliberately not cardboard-rendered yet). #abductCancel
+     sits outside the panel so it's reachable regardless of panel size.
+     #abductPrompt: the TARGET's Resist / Go choice, shown when the aliens
+     arrive on their next island — unrelated to the picker, unchanged.
+     #notice: a short self-hiding message. All hidden until needed. -->
+<div id="abductMenu" class="hidden">
+  <div id="abductStage">
+    <canvas id="abductCanvas"></canvas>
+    <button id="abductTeamBox" title="Switch team — not built yet">Team –</button>
+    <button id="abductConfirmBtn">Confirm</button>
+  </div>
+  <button id="abductCancel" title="Cancel">✕</button>
+</div>
+<div id="abductPrompt" class="hidden">
+  <div class="panel">
+    <h3 id="abductPromptText">The aliens have come for you!</h3>
+    <div class="row">
+      <button id="abductResist">Resist</button>
+      <button id="abductGo" class="secondary">Go</button>
+    </div>
+  </div>
+</div>
+<div id="notice" class="hidden"></div>
 <!-- The temple-doors ending: opacity driven directly by updateTempleEntry()
      in skyPath.js, frame by frame — no CSS transition here, since the fade's
      own timing is already computed there alongside the door rotation and the
@@ -154,6 +190,31 @@ export const SKY_PATH_CSS = `
 .skypath-surface #addJetpack:active { transform: translateY(1px); }
 .skypath-surface #addJetpack:disabled { opacity: 0.25; cursor: default; }
 
+/* The real abduction control, stacked above the two test buttons (next slot
+   up: 12 + 3 × 42). Fully opaque when live, unlike the test buttons — it's
+   a game control the player is meant to notice once they hold the item. */
+.skypath-surface #useAbduct {
+  position: absolute;
+  left: calc(env(safe-area-inset-left, 0px) + 8px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+  z-index: 10;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  color: #12212f;
+  background: #ffe9b8;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition: background 0.15s, opacity 0.15s;
+}
+.skypath-surface #useAbduct:hover { background: #fff3d6; }
+.skypath-surface #useAbduct:active { transform: translateY(1px); }
+.skypath-surface #useAbduct:disabled { opacity: 0.25; cursor: default; background: rgba(244, 247, 250, 0.45); }
+
 .skypath-surface #controls {
   position: absolute;
   left: 0;
@@ -197,6 +258,126 @@ export const SKY_PATH_CSS = `
   font-size: 28px;
 }
 
+
+/* #abductPrompt keeps the original dimmed-glass dialog treatment (same as
+   #charSelect) — it's still a plain Resist/Go choice, unrelated to the
+   cardboard picker below. */
+.skypath-surface #abductPrompt {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(18, 33, 47, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.skypath-surface #abductPrompt.hidden,
+.skypath-surface #notice.hidden { display: none; }
+.skypath-surface #abductPrompt .panel {
+  width: min(360px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.45);
+}
+.skypath-surface #abductPrompt h3 {
+  margin: 0 0 4px;
+  font: 700 17px/1.3 system-ui, sans-serif;
+  text-align: center;
+}
+.skypath-surface #abductPrompt button {
+  min-height: 48px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 12px;
+  font: 700 15px/1.2 system-ui, sans-serif;
+  color: var(--ink);
+  background: #ffe9b8;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+.skypath-surface #abductPrompt button.secondary { background: #cddbe8; }
+.skypath-surface #abductPrompt button:active { transform: translateY(1px); }
+.skypath-surface #abductPrompt .row { display: flex; gap: 10px; }
+.skypath-surface #abductPrompt .row button { flex: 1 1 0; text-align: center; min-height: 56px; }
+
+/* The cardboard target picker (2026-09-18) — see skyPath.js's "abduction
+   cardboard UI" section for what draws onto #abductCanvas and how
+   #abductTeamBox/#abductConfirmBtn are positioned (percentage-based, so
+   they scale with the canvas without a resize listener). Nearly opaque,
+   not blurred glass like #abductPrompt — Luke: this should be "in front
+   of anything else on the screen," reading as a real object blocking the
+   view, not a dialog floating over it. */
+.skypath-surface #abductMenu {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(10, 16, 22, 0.94);
+}
+.skypath-surface #abductMenu.hidden { display: none; }
+/* #abductStage is the visible VIEWPORT the panel lowers into — clips the
+   tall canvas above it (see skyPath.js's "abduction cardboard UI" section:
+   the canvas is taller than this box on purpose, carrying the string art
+   above the panel, and slides down via a JS-driven transform). Everything
+   inside is positioned in plain PIXELS computed in JS, not CSS percentages
+   — the canvas moves during the lower-in, so a percentage of this box
+   would drift out of alignment with the panel's own on-screen rect the
+   moment it isn't at rest. */
+.skypath-surface #abductStage { position: absolute; inset: 0; overflow: hidden; }
+.skypath-surface #abductCanvas { position: absolute; top: 0; }
+.skypath-surface #abductTeamBox,
+.skypath-surface #abductConfirmBtn {
+  position: absolute;
+  visibility: hidden; /* shown once the picker is actually interactive — see abductTick() */
+  border: 2px solid #7a2e2e;
+  border-radius: 8px;
+  background: #f4f7fa;
+  color: #7a2e2e;
+  font: 700 15px/1.2 system-ui, sans-serif;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.skypath-surface #abductCancel {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  right: 10px;
+  z-index: 31;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(244, 247, 250, 0.85);
+  color: #12212f;
+  font: 700 15px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.skypath-surface #notice {
+  position: absolute;
+  left: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 56px);
+  transform: translateX(-50%);
+  z-index: 25;
+  max-width: min(420px, calc(100% - 32px));
+  padding: 10px 16px;
+  border-radius: 12px;
+  font: 700 14px/1.3 system-ui, sans-serif;
+  color: var(--ink);
+  background: #ffe9b8;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+  text-align: center;
+  pointer-events: none;
+}
 
 .skypath-surface #templeFade {
   position: absolute;

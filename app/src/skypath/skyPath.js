@@ -41,6 +41,19 @@ import { buildNameTagCanvas, normalizePlayerName } from './nameTag.js';
 import { buildBridge, disposeBridge, breakPlank, BRIDGE_DEFAULTS, BRIDGE_ANCHORS } from './bridgeGen.js';
 import { createBridgeWind } from './bridgeWind.js';
 import { loadWordPairs, assignForkWords } from './wordPairs.js';
+import {
+  PANEL_SRC as ABDUCT_PANEL_SRC,
+  PANEL_SIZE as ABDUCT_PANEL_SIZE,
+  PANEL_HOLES as ABDUCT_PANEL_HOLES,
+  loadImage as loadAbductImage,
+  drawPanel as drawAbductPanel,
+} from '../cardboardPanel.js';
+import {
+  INTERFACE_SRC as ABDUCT_INTERFACE_SRC,
+  finalRect as abductFinalRect,
+  growthTimeline as abductGrowthTimeline,
+  drawInterfaceGrowth,
+} from '../alienInterfaceCore.js';
 
 // Rapier ships as WASM and needs an async init before any RAPIER.* class can
 // be used. Module-scope so it happens once per page load, not once per mount.
@@ -112,6 +125,19 @@ export function mountSkyPath(container, options = {}) {
     // own entry in that same array, so it can find its own seat.
     roster = [],
     myToken = null,
+    // Which item sits on island 2 this round — 'jetpack' | 'abduction',
+    // decided by whoever starts the round (TeacherDashboard's startGame(),
+    // same as `words`) so the whole group sees the same thing; null = draw
+    // it locally (the `?solo=1` dev path). See the "pickup" section.
+    pickup: pickupOverride = null,
+    // Relays a small in-round event (first arg: kind, second: data) to
+    // everyone it concerns, this device included — see useLobby's
+    // sendGameEvent for the routing. Null = solo: settle it locally.
+    onGameEvent = null,
+    // Who this device may aim an abduction at right now — see useLobby's
+    // getAbductionTargets for the eligibility rules and the "abduction
+    // targeting" section below for the menu it feeds. Null = solo: nobody.
+    getAbductionTargets = null,
   } = options;
   // Declared here, not down near soloRoleToggle where it originally lived —
   // setCharacter() (called during initial setup, long before that point)
@@ -565,6 +591,13 @@ export function mountSkyPath(container, options = {}) {
     spaceship: tex('spaceship'),
     spaceshipBeams: tex('spaceship-beams'),
     string: tex('string'),
+    // The abduction trigger's own power-up card (see POWERUP_FRAMES) — Luke's
+    // art, already composited onto the same oval cardboard the jetpack's
+    // engine cards use (matched by eye against Assets/Engine/Engine1.png;
+    // there's no separate blank-oval asset in the project to composite onto
+    // programmatically, since every existing oval card image already has its
+    // own art baked in — see TODO.md).
+    abductDevice: tex('abduct-device'),
   };
 
   // ---------------------------------------------------------------- island models
@@ -2505,6 +2538,7 @@ export function mountSkyPath(container, options = {}) {
     }
     bridges.length = 0;
     sections.length = 0;
+    disposePickupMesh(); // the island-2 item is rebuilt by buildJourney() if still unclaimed — see the "pickup" section
     // Defensive rather than load-bearing since the whole journey builds in
     // one synchronous pass now (buildJourney()'s own loop always consumes
     // this flag the very next iteration, every time) — but cheap, and it
@@ -2795,6 +2829,7 @@ export function mountSkyPath(container, options = {}) {
     // hasn't changed. repositionAllTeammates is declared further down (see
     // "teammates" section) but hoists — same scope, this is safe.
     repositionAllTeammates();
+    buildPickup(); // the island-2 item — see the "pickup" section; hoists the same way
   }
 
   // The avatar is a rig of two stacked planes — the character art in front,
@@ -2994,6 +3029,28 @@ export function mountSkyPath(container, options = {}) {
     { tex: 'engine4', w: 201, h: 346, x: -1, y: 0, scale: 1.6647 },
   ];
 
+  // The abduction trigger's own card — one static frame, no firing
+  // animation. `scale` picked (not tuner-measured, since there's no
+  // ?powerupTune=1 pass for this one yet) so its rendered HEIGHT matches
+  // ENGINE_FRAMES[0]'s (313 * 1.6409 = 513.6, before worldPerTunerPx) —
+  // Luke: "attach this as close as you possibly can to the way the jetpack
+  // is attached," which this reads as "the same size on the card," not
+  // literally the same pixel scale (the source art's own resolution
+  // differs). x/y left at 0 (centred) — nothing to correct for yet, unlike
+  // the jetpack frames' small per-frame nudges.
+  const ABDUCT_DEVICE_FRAMES = [{ tex: 'abductDevice', w: 598, h: 841, x: 0, y: 0, scale: 0.611 }];
+
+  // Which frame table equipPowerUp draws from for a given `kind` — see its
+  // own header for why every power-up otherwise shares identical
+  // clip/position/size handling.
+  const POWERUP_FRAMES = { jetpack: ENGINE_FRAMES, abduction: ABDUCT_DEVICE_FRAMES };
+
+  /** One frame's rendered world size, same maths applyPowerUpTune uses for the card mesh — factored out so buildPickup (the island-2 item) can match it exactly (see PICKUP_SCALE). */
+  function frameWorldSize(frame) {
+    const worldPerTunerPx = POWERUP_TUNE.card.scale / ENGINE_FRAME_TUNER_H;
+    return { w: frame.w * frame.scale * worldPerTunerPx, h: frame.h * frame.scale * worldPerTunerPx };
+  }
+
   // Position/scale, all in the rig group's own local space — the same space
   // the player's own frontMesh lives in (x/y/z around its centre, z=0 being
   // the card's own flat plane, matching the frontMesh's own depth). Baked in
@@ -3019,15 +3076,19 @@ export function mountSkyPath(container, options = {}) {
    * children of anything. `rig.powerup` guards against equipping a second
    * one on top of the first; there's no stacking/replacing behaviour
    * designed yet (Luke: "don't worry about how they earn it for now").
+   *
+   * `kind` ('jetpack' | 'abduction') picks which POWERUP_FRAMES table
+   * applyPowerUpTune draws from — everything else (the clip, the card's
+   * position/size formula) is identical regardless of which item it is.
    */
-  function equipPowerUp(rig) {
+  function equipPowerUp(rig, kind = 'jetpack') {
     if (rig.powerup || !plasticClipTemplate) return;
     const group = new THREE.Group();
 
     // Unit geometry, sized via mesh.scale — same pattern as the word signs
     // and the temple doors, so applyPowerUpTune can resize live without
     // rebuilding geometry. No map yet — applyPowerUpTune sets it from
-    // whichever ENGINE_FRAMES entry is active.
+    // whichever POWERUP_FRAMES[kind] entry is active.
     const cardMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
       new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
@@ -3048,7 +3109,7 @@ export function mountSkyPath(container, options = {}) {
     group.add(clip);
 
     rig.group.add(group);
-    rig.powerup = { group, cardMesh, clip, frameIndex: 0 };
+    rig.powerup = { group, cardMesh, clip, frameIndex: 0, kind };
     applyPowerUpTune(rig);
   }
 
@@ -3072,19 +3133,16 @@ export function mountSkyPath(container, options = {}) {
 
   function applyPowerUpTune(rig) {
     if (!rig.powerup) return;
-    const { cardMesh, clip, frameIndex } = rig.powerup;
-    const frame = ENGINE_FRAMES[frameIndex];
+    const { cardMesh, clip, frameIndex, kind } = rig.powerup;
+    const frame = POWERUP_FRAMES[kind][frameIndex] ?? POWERUP_FRAMES[kind][0];
     cardMesh.material.map = TEX[frame.tex];
     cardMesh.material.needsUpdate = true;
 
-    // worldPerTunerPx converts ENGINE_FRAMES' tuner-space x/y/scale into
-    // this scene's world units — see ENGINE_FRAMES' own comment. Derived
-    // from the card's own current size rather than a fixed constant, so a
-    // future retune of POWERUP_TUNE.card.scale can't silently throw this
-    // per-frame correction out of proportion with it.
+    // worldPerTunerPx converts a frame's tuner-space x/y/scale into this
+    // scene's world units — see ENGINE_FRAMES' own comment (frameWorldSize
+    // is the same w/h half of this maths, reused by buildPickup).
     const worldPerTunerPx = POWERUP_TUNE.card.scale / ENGINE_FRAME_TUNER_H;
-    const h = frame.h * frame.scale * worldPerTunerPx;
-    const w = frame.w * frame.scale * worldPerTunerPx;
+    const { w, h } = frameWorldSize(frame);
     cardMesh.scale.set(w, h, 1);
     cardMesh.position.set(
       POWERUP_TUNE.card.x + frame.x * worldPerTunerPx,
@@ -3556,22 +3614,24 @@ export function mountSkyPath(container, options = {}) {
 
   function updateTeammate(
     token,
-    { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, livePos, hasJetpack, firing, detached, abducting }
+    { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, livePos, powerupKind: tPowerupKind, firing, detached, abducting }
   ) {
     if (token == null || tForkIndex == null) return;
     const entry = ensureTeammateEntry(token, tCharacterKey, tName, colorHex);
     entry.pingCount++;
     entry.lastPingAt = Date.now();
-    // Mirrors this teammate's own jetpack/flame/detach state on their rig —
-    // see notifyPlayerState's own comment for why this rides every report
-    // rather than needing its own event. equipPowerUp/disposePowerUp/
-    // startEngineFlame/stopEngineFlame all already take an arbitrary `rig`
-    // (never assume it's the local player's own), so a teammate's rig
-    // works exactly the same way the local one does — no separate remote
-    // implementation needed.
-    if (!!hasJetpack !== !!entry.rig.powerup) {
-      if (hasJetpack) {
-        equipPowerUp(entry.rig);
+    // Mirrors this teammate's own held power-up (jetpack OR abduction
+    // device — the same single slot, see equipPowerUp's own header) plus
+    // its flame/detach state onto their rig — see notifyPlayerState's own
+    // comment for why this rides every report rather than needing its own
+    // event. equipPowerUp/disposePowerUp/startEngineFlame/stopEngineFlame
+    // all already take an arbitrary `rig` (never assume it's the local
+    // player's own), so a teammate's rig works exactly the same way the
+    // local one does — no separate remote implementation needed.
+    const tKind = tPowerupKind ?? null;
+    if ((entry.rig.powerup?.kind ?? null) !== tKind) {
+      if (tKind) {
+        equipPowerUp(entry.rig, tKind);
         entry.departStartedAt = 0;
       } else if (!entry.departStartedAt) {
         // Not currently mid-depart-animation (see updateTeammates) — a
@@ -3996,7 +4056,20 @@ export function mountSkyPath(container, options = {}) {
       }
       const sec = sections[guideIsland - 1];
       if (!sec) return;
-      camera.position.lerp(trailingCamPos(sec.fork.x, sec.fork.z, sec.fork.heading, CAM_BACK), Math.min(1, dt * 4));
+      // Pan offset folded into the LERP TARGET, not added to the result —
+      // adding it after the lerp would fight the lerp's own pull back
+      // toward the un-offset target every subsequent frame (each frame's
+      // partial step toward `target` erodes most of a flat addition,
+      // needing a much larger correction than dt*4 actually intends).
+      // Targeting `trailingCamPos + look` instead means the lerp settles
+      // exactly on the panned position, same as it already settles on
+      // `trailingCamPos` alone with no pan. The look-AT point stays fixed
+      // ahead, unshifted — same "slide the eye, not the gaze" parallax the
+      // active player's own camera branch uses look.x/y for.
+      const target = trailingCamPos(sec.fork.x, sec.fork.z, sec.fork.heading, CAM_BACK);
+      target.x += look.x;
+      target.y += look.y;
+      camera.position.lerp(target, Math.min(1, dt * 4));
       camera.lookAt(trailingCamLookAt(sec.fork.x, sec.fork.z, sec.fork.heading));
     } else {
       const entry = teammates.get(guideFollowToken);
@@ -4013,7 +4086,12 @@ export function mountSkyPath(container, options = {}) {
       }
       const p = entry.rig.group.position;
       const heading = entry.rig.group.rotation.y;
-      camera.position.lerp(trailingCamPos(p.x, p.z, heading, CAM_BACK), Math.min(1, dt * 4));
+      // Same target-side pan offset as the parked branch above — see its
+      // comment for why it has to be folded in before the lerp, not after.
+      const target = trailingCamPos(p.x, p.z, heading, CAM_BACK);
+      target.x += look.x;
+      target.y += look.y;
+      camera.position.lerp(target, Math.min(1, dt * 4));
       camera.lookAt(trailingCamLookAt(p.x, p.z, heading));
     }
   }
@@ -4041,12 +4119,14 @@ export function mountSkyPath(container, options = {}) {
    * side or the outcome is ever sent ahead of time — a viewer only ever
    * learns what's happening from the transforms as they happen.
    *
-   * `hasJetpack`/`firing`/`detached` ride along on every call (not a
+   * `powerupKind`/`firing`/`detached` ride along on every call (not a
    * separate event) — Luke, 2026-09-14, after watching a real rescue
    * remotely: "there's no jetpack visible: only the moving avatar," and
    * then, once that was fixed, "we don't see the jetpack leaving the
    * screen... after the player lands, the jetpack simply disappears."
-   * Cheap booleans read straight off `rig.powerup`/`rescue` each time, so a
+   * `powerupKind` (2026-09-15: generalised from a plain `hasJetpack` boolean
+   * once the abduction device became a second thing that can occupy the
+   * same `rig.powerup` slot) reads straight off `rig.powerup?.kind`, so a
    * teammate's own equip/unequip, ignite/extinguish, and detach are always
    * current on whatever's the next thing this device reports anyway — see
    * updateTeammate/updateTeammates for the receiving side, which replays
@@ -4061,11 +4141,11 @@ export function mountSkyPath(container, options = {}) {
    * receiver's own copy rather than usefully drive it.
    */
   function notifyPlayerState(phase = 'resting', livePos = null) {
-    const hasJetpack = !!rig.powerup;
+    const powerupKind = rig.powerup?.kind ?? null; // 'jetpack' | 'abduction' | null — see equipPowerUp's own header
     const firing = !!rig.powerup?.flame;
     const detached = !!rescue?.detached;
     const abducting = !!abduction;
-    window.__lastPlayerState = { phase, livePos, hasJetpack, firing, detached, abducting, at: Date.now() }; // debug only — see e.g. window.__teammates for the receiving-side equivalent
+    window.__lastPlayerState = { phase, livePos, powerupKind, firing, detached, abducting, at: Date.now() }; // debug only — see e.g. window.__teammates for the receiving-side equivalent
     onPlayerState?.({
       phase,
       forkIndex,
@@ -4073,7 +4153,7 @@ export function mountSkyPath(container, options = {}) {
       displayName: localDisplayName,
       colorHex: pickedColorHex,
       livePos,
-      hasJetpack,
+      powerupKind,
       firing,
       detached,
       abducting,
@@ -4111,6 +4191,17 @@ export function mountSkyPath(container, options = {}) {
   // two call sites below) once the above/below question is settled.
   const TEST_TAGS = new URLSearchParams(location.search).has('testTags');
   const testCompanions = []; // { rig, offsetX, yStagger }
+
+  // `?debugAbduct=1` — Luke, 2026-09-19, checking the target-picker's own
+  // legibility on his phone: solo play has no second device to target, so
+  // `getAbductionTargets()` always comes back empty and the real item pickup
+  // is a coin flip needing a walk to island 2 either way. This forces the
+  // island-2 item to be the abduction device (see pickupKind below) AND
+  // auto-claims it the instant character-select finishes (see
+  // finishCharacterSelect's own DEBUG_ABDUCT block) — reachable by URL
+  // alone, unlike window.__debugAbductTargets on its own, which still needed
+  // a console to set it and force-click the disabled real button by hand.
+  const DEBUG_ABDUCT = new URLSearchParams(location.search).has('debugAbduct');
 
   function spawnTestCompanions() {
     const SPACING_X = FIGURE_H * FIGURE_ASPECT * 1.5;
@@ -4865,6 +4956,802 @@ export function mountSkyPath(container, options = {}) {
     refreshUI();
   }
 
+  // ---------------------------------------------------------------- pickup
+  //
+  // The island-2 item, 2026-09-15 — Luke: "just add a very simple icon on
+  // the second island, which will be picked up by the first player to reach
+  // the island. It will have a 50% chance of being the jetpack, and 50%
+  // chance of being the abduction trigger... When the player reaches it it
+  // will be transferred to their character." The first real way of earning
+  // either; the two test buttons (#addJetpack/#abduct) stay alongside it.
+  //
+  // Which item it is (`pickupKind`) is a shared fact decided by whoever
+  // starts the round, exactly like `words` — never drawn locally except on
+  // the solo dev path. WHO gets it is settled the same way a fork choice is
+  // ("let the relay be the arbiter", TODO.md): arriving on island 2 sends a
+  // `pickup-claim`, and every device — the claimant included, via
+  // broadcast self:true — grants it to the FIRST claim the relay hands
+  // back, ignoring any later one. Two players stepping off their bridges in
+  // the same instant therefore never disagree about who won: the relay's
+  // delivery order is the same for everyone. Nothing is ever granted from a
+  // device's own local knowledge of who arrived first.
+  const PICKUP_FORK = 2;
+  const PICKUP_KINDS = ['jetpack', 'abduction'];
+  // Luke, 2026-09-15: the island's floating icon should be "the same images
+  // used when they are attached to players... 80% of the size... spin about
+  // their vertical central axis, revealing their backs which look the same
+  // but reversed. Period of 360 degree rotation, 2s." Reuses each kind's own
+  // idle frame (POWERUP_FRAMES[kind][0] — Engine1 for the jetpack, the only
+  // frame the abduction device has) and frameWorldSize's own maths, scaled
+  // by PICKUP_SCALE, so it's never a separate guess at size — a future
+  // retune of either card automatically resizes its island icon too. The
+  // "reversed back" is free: a plain double-sided plane shows its front
+  // texture mirrored when seen from behind, which for a front-to-back
+  // symmetric card (an oval with centred art) reads exactly as its own
+  // backside.
+  const PICKUP_SCALE = 0.8;
+  const PICKUP_SPIN_PERIOD = 2; // seconds per full 360°
+  const PICKUP_AHEAD = 2.4; // world units forward of the island's centre, so it sits clear of the seated row
+  const PICKUP_HOVER_Y = FIGURE_H * 0.9;
+  const PICKUP_BOB = 0.12;
+  const pickupKind = DEBUG_ABDUCT
+    ? 'abduction' // see DEBUG_ABDUCT's own header — forced, not left to pickupOverride/chance
+    : PICKUP_KINDS.includes(pickupOverride)
+    ? pickupOverride
+    : PICKUP_KINDS[Math.random() < 0.5 ? 0 : 1];
+  let pickupClaimedBy = null; // token of the winner, once the relay has settled it
+  let pickupMesh = null;
+
+  /** Plants the item on island 2 — called from buildJourney() once `sections` exists; a no-op once already claimed this round. */
+  function buildPickup() {
+    disposePickupMesh();
+    if (pickupClaimedBy) return;
+    const sec = sections[PICKUP_FORK - 1];
+    if (!sec) return;
+    const at = advance(sec.fork, sec.fork.heading, PICKUP_AHEAD);
+    const frame = POWERUP_FRAMES[pickupKind][0];
+    const { w, h } = frameWorldSize(frame);
+    pickupMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: TEX[frame.tex], transparent: true, alphaTest: 0.3, side: THREE.DoubleSide, fog: false })
+    );
+    pickupMesh.scale.set(w * PICKUP_SCALE, h * PICKUP_SCALE, 1);
+    pickupMesh.position.set(at.x, PICKUP_HOVER_Y, at.z);
+    pickupMesh.userData.baseHeading = sec.fork.heading; // the spin (see updatePickup) is added on top of this, not a replacement for it
+    pickupMesh.renderOrder = 5;
+    scene.add(pickupMesh);
+  }
+
+  function disposePickupMesh() {
+    if (!pickupMesh) return;
+    scene.remove(pickupMesh);
+    pickupMesh.geometry.dispose();
+    pickupMesh.material.dispose();
+    pickupMesh = null;
+  }
+
+  function updatePickup(t) {
+    if (!pickupMesh) return;
+    pickupMesh.position.y = PICKUP_HOVER_Y + Math.sin(t * 2.2) * PICKUP_BOB;
+    pickupMesh.rotation.y = pickupMesh.userData.baseHeading + t * ((2 * Math.PI) / PICKUP_SPIN_PERIOD);
+  }
+
+  /** This device just came to rest on a fork (see tick()'s arrival branch) — the one moment a pickup can be claimed, and when an armed abduction fires. */
+  function onArrivedAtFork() {
+    if (isSpectatorRole(role)) return;
+    if (forkIndex === PICKUP_FORK && !pickupClaimedBy) {
+      if (onGameEvent) onGameEvent('pickup-claim', {});
+      else resolvePickupClaim(myToken ?? 'me'); // solo: no relay, nobody to race
+    }
+    triggerPendingAbduction(); // see the "abduction targeting" section
+  }
+
+  /** The relay's answer to a claim — first one in wins, everywhere; later ones are the losers of a genuine tie and are simply dropped. */
+  function resolvePickupClaim(token) {
+    if (pickupClaimedBy) return;
+    pickupClaimedBy = token;
+    disposePickupMesh();
+    const mine = token === (myToken ?? 'me');
+    if (mine) {
+      equipPowerUp(rig, pickupKind);
+      // Teammates learn about the new item from this report's own
+      // powerupKind flag — same route the test #addJetpack button uses.
+      if (!isSpectatorRole(role)) notifyPlayerState();
+    }
+    refreshUI();
+  }
+
+  /** Relayed in-round events, handed in by GameRoom.jsx — see useLobby's `game-event` handler for what reaches here and from whom. */
+  function applyGameEvent(kind, payload) {
+    if (kind === 'pickup-claim') resolvePickupClaim(payload.token);
+    else if (kind === 'abduct-target') receiveAbductionTarget(payload);
+    else if (kind === 'abduct-result') receiveAbductionResult(payload);
+  }
+
+  // ---------------------------------------------------------------- abduction targeting
+  //
+  // Luke, 2026-09-15: "The alien abduction trigger will target a player in
+  // another team: when the player chooses to use it, it will bring down a
+  // menu from which they can choose the name of a player on another team.
+  // Guides will be excluded. This list will show which island the player is
+  // currently on, updating only once they have fully reached the island...
+  // When a player is targeted for abduction, nothing will happen until they
+  // reach their next island. At this point the abduction will trigger and
+  // try to take them away... give them an option: Resist or Go."
+  //
+  // Three relayed events (see useLobby's `game-event` routing):
+  //   'abduct-target' {targetToken, byName} — attacker → the one target;
+  //   'abduct-result' {toToken, outcome}    — target's device → attacker,
+  //     outcome 'abducted' | 'resisted' | 'fizzled'.
+  // The TARGET's own device runs the abduction (its own startAbduction(),
+  // so its teammates/guide see it through the existing `abducting`
+  // networking) — the attacker's screen shows nothing of it beyond a
+  // notice, since the two teams are never on the same islands. Eligibility
+  // (other teams, no guides, nobody already out) is useLobby's — the one
+  // rule kept here is the "fizzle": a target already on the LAST island has
+  // no next island to arrive on, so they're not offered at all, and a
+  // target that somehow can't be abducted when the request lands reports
+  // 'fizzled' straight back rather than silently swallowing it.
+  let pendingAbduction = null; // { byToken, byName } — armed on this device until its next arrival
+  let abductPromptOpen = false; // the Resist/Go choice is up — nothing else may move this player
+  let noticeTimer = null;
+
+  function showNotice(text, ms = 4000) {
+    if (!els.notice) return;
+    els.notice.textContent = text;
+    els.notice.classList.remove('hidden');
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => els.notice?.classList.add('hidden'), ms);
+  }
+
+  // ---------------------------------------------------------------- abduction cardboard UI
+  //
+  // The picker surface openAbductMenu()/chooseAbductTarget() actually show
+  // — Luke, 2026-09-18: "It's time to insert this into the game as the
+  // interface when a player activates the alien abduction device. Include
+  // a placeholder team choice window and the arrows to choose the target
+  // member, and a confirmation button. The whole process doesn't have to
+  // be complete at this stage." Built across several standalone prototypes
+  // first (dialProto.js's own header has the full cardboard-UI design
+  // history; TODO.md points at each one) — this wires those same ideas to
+  // REAL data as a 2D canvas overlay laid over the game inside #abductStage
+  // (a plain DOM element the WebGL canvas knows nothing about, exactly like
+  // the rest of the HUD).
+  //
+  // A target's avatar/name-tag glow show their REAL character/colour, from
+  // `getAbductionTargets()`'s characterKey/colorHex (useLobby.js now records
+  // every player-state ping session-wide, not just same-group ones — see
+  // that file's charByTokenRef, added 2026-09-19 to close the gap this
+  // comment used to describe). The 'ghost'/gold pairing lives on only as
+  // the fallback for a target whose characterKey is still null — this
+  // device hasn't received a ping from them yet this round, a brief window
+  // right at round start, not a permanent unknown.
+  //
+  // THE SEQUENCE: the panel lowers on strings from off-screen (same maths
+  // as alien-lower.html's prototype — a long fixed string length is
+  // provably enough to stay off-screen at any panel size, never a tracked
+  // anchor point), the alien screen grows open (the two-step widen-then-
+  // open alien-interface.html settled on), then the first target's avatar
+  // plays the glitch-slice reveal Luke picked (variant 2 of six, 0.30s),
+  // after which it spins continuously about its own vertical axis (never
+  // the name tag) until the arrows change it. An arrow press ALWAYS
+  // restarts the reveal from t=0 for the newly-selected target, even
+  // mid-reveal — Luke: "if the player presses the button before the
+  // animation is complete, interrupt and move to the next player" — so
+  // there is deliberately no "ignore while animating" guard here, unlike
+  // the dial's own turn.
+  const ABDUCT_STRING_SRC = 'textures/hanging-string.png';
+  const ABDUCT_STRING_TILE = { w: 67, h: 526 };
+  const ABDUCT_STRING_CENTER_X = 35; // the rope's own opaque centre within that 67px-wide tile — see alienLowerProto.js
+  const ABDUCT_STRING_LEN = 2400; // canvas-space px; see this section's header
+  const ABDUCT_ARROW_LEFT_SRC = 'textures/alien-arrow-left.png';
+  const ABDUCT_ARROW_RIGHT_SRC = 'textures/alien-arrow-right.png';
+  const ABDUCT_EARTH_SRC = 'textures/earth.png';
+  const ABDUCT_TAG_GLOW = '#ffe9b8'; // fallback glow, for a target with no colorHex yet — see this section's header
+
+  const ABDUCT_AVATAR = { height: 224, centerY: 343 };
+  const ABDUCT_TAG = { height: 49, centerY: 189 };
+  const ABDUCT_ARROW = { size: 114, centerY: 350, inset: 267 };
+  // Target cluster group offset — Luke, 2026-09-19, next step toward the
+  // ship-formation animation: "moving the avatar and arrows left and down
+  // to make room for the Earth on the bottom right," from a mockup showing
+  // the whole target cluster (avatar, name tag, both arrows) sliding as one
+  // unit from dead centre to a bottom-left box. Applied uniformly to
+  // ABDUCT_AVATAR/ABDUCT_TAG/ABDUCT_ARROW's centres in abductAvatarRect/
+  // abductArrowRects/abductDraw's own tag placement, rather than moving
+  // each of those constants individually, so the cluster's own internal
+  // spacing (avatar-to-tag, avatar-to-arrows) stays exactly what it already
+  // was — only WHERE the whole group sits changes. Baked from the
+  // `?abductTune=1` panel's logged values (now removed).
+  const ABDUCT_TARGET_OFFSET = { x: -183, y: 52 };
+  // Earth — Luke, 2026-09-19: static for now, bottom-right of the interface,
+  // sized/positioned to fit the room the target-cluster move above frees up.
+  // The small formation of ships descending toward it (from his second
+  // reference image) is explicitly NOT this step: "Don't try to add the
+  // ship yet, we'll do that next." Baked from the `?abductTune=1` panel's
+  // logged values (now removed) — deliberately sized/placed so the
+  // interface's own bottom edge clips it (see abductDraw's clip around the
+  // earth draw): "I want the border to cut the Earth, so that the bottom
+  // of the Earth is missing," not the other way around (Earth overlapping
+  // and visually cutting across the border, which is what an earlier,
+  // unclipped draw did).
+  const ABDUCT_EARTH = { width: 220, centerX: 801, centerY: 462 };
+  // Luke, 2026-09-19: "the same shimmer used to make the avatars appear...
+  // but this shimmer should go top to bottom, and should begin 0.3s after
+  // the rest of the interface is loaded." Same ABDUCT_GLITCH_DURATION as
+  // the avatar's own reveal (just mirrored — see abductDrawEarthGlitch),
+  // offset by this delay from the SAME anchor instant as the avatar's own
+  // clock (see abductEarthRevealStartedAt) — not from each arrow press,
+  // since the Earth isn't per-target and has nothing to restart for.
+  const ABDUCT_EARTH_REVEAL_DELAY = 0.3;
+  const ABDUCT_GLITCH_DURATION = 0.3; // Luke, 2026-09-18: "0.30s animation duration for the player avatar wipe"
+  const ABDUCT_SPIN_PERIOD = 9; // Luke, 2026-09-19: slow to ~33% of the original speed (was 3)
+  const ABDUCT_LOWER_DURATION = 0.9;
+  const ABDUCT_FILL_FRACTION = 0.92;
+  const ABDUCT_TOP_MARGIN = 0.05;
+
+  // ---- confirmation dynamic (2026-09-19) ----
+  // Luke: "when a player clicks on a player's avatar, both the avatar and
+  // the Earth will be bordered in a new green border. At the same time, the
+  // new animation will begin, with the small spaceships seeming to leave
+  // the Earth via a curved path... clicking the avatar again will deselect.
+  // Clicking an arrow to move to the next target will also deselect." A
+  // real confirm button comes later ("don't worry about that yet") — this
+  // step is only the selection toggle, the highlight, and the ship
+  // animation. See abductToggleSelect (click handling), ABDUCT_SELECT_*
+  // (the bracket-image highlight, replacing an earlier 6-drawn-style
+  // exploration Luke didn't want — "I don't like the border options...
+  // add these images as brackets around the player" instead), and
+  // ABDUCT_SHIP_POSITIONS below.
+  //
+  // Second pass, same day: no aura ("I don't like the aura that's been
+  // added around the ship. Remove it"), no per-position growth/brightening
+  // either ("Forget about changing brightness and size: have it at full
+  // size for all instances") — both were Claude's own embellishment on top
+  // of "a crude animation... shown in only five positions," not something
+  // Luke asked for the first time round. The ship art itself was also
+  // swapped for a version with the cardboard backing stripped out (same
+  // filename, replaced on disk — re-copied over the old one).
+  const ABDUCT_SHIP_SRC = 'textures/abduct-ship-small.png';
+  // Five fixed stops along the "curved path," baked from the numbers Luke
+  // logged against the live tuner (position/gap duration, and an offset+
+  // scale nudge applied uniformly to all five — see ABDUCT_SHIP_PATH_ADJUST
+  // below for why a per-stop `scale` is gone; the same nudge maths still
+  // applies at draw time in abductDrawShip, just baked to fixed values now
+  // instead of a slider).
+  const ABDUCT_SHIP_POSITIONS = [
+    { x: 847, y: 297 },
+    { x: 885, y: 242 },
+    { x: 842, y: 186 },
+    { x: 743, y: 143 },
+    { x: 629, y: 100 },
+  ];
+  const ABDUCT_SHIP_WIDTH = 90; // same size at every stop — no more per-position `scale`
+  // Luke's logged values, replacing the `?abductTune=1` sliders that found them.
+  const ABDUCT_SHIP_PATH_ADJUST = { offsetX: 21, offsetY: -1, scale: 0.87 };
+  const ABDUCT_SHIP_POSITION_DURATION = 0.13;
+  const ABDUCT_SHIP_GAP_DURATION = 0.25;
+  // The new avatar-highlight brackets — Luke: "I've decided to skip the
+  // border around the planet, and add these images as brackets around the
+  // player." He supplied one image per side, but Luke, having seen the two
+  // drawn at their own (slightly different, 105×282 vs 118×305) sizes: "the
+  // left and right borders are not the same size. Choose one and duplicate
+  // and turn it, as I suggested" (his own original suggestion: "If it's
+  // easier to use one and then flip it 180 degrees for the other side, do
+  // that"). Only the left image is loaded now — see abductDrawSelectBrackets
+  // for the horizontal mirror that draws the right side from it, which is
+  // what actually reproduces a matching pair (the two source files ARE
+  // horizontal mirrors of each other, not 180°-rotations — a true 180°
+  // turn would also flip the gear-notch bump vertically, landing it upside
+  // down relative to the source art). Position/size baked from the
+  // `?abductTune=1` panel's logged values (now removed) — a negative `gap`
+  // means the bracket's inner edge overlaps INTO the avatar's own edge by
+  // that many px, not a gap outward.
+  const ABDUCT_SELECT_SRC = 'textures/abduct-select-left.png';
+  const ABDUCT_SELECT_BRACKET = { height: 230, gap: -40 };
+
+  // Every ROSTER character, not just 'ghost' — a target's real card art
+  // (see the header above) needs the whole set on hand, keyed the same way
+  // CHAR_TEX already is. 'ghost' is still IN this set (ROSTER carries it),
+  // so it doubles as the fallback lookup with no separate load of its own.
+  let abductImgs = null;
+  const abductImgsPromise = Promise.all([
+    loadAbductImage(ABDUCT_PANEL_SRC),
+    loadAbductImage(ABDUCT_INTERFACE_SRC),
+    loadAbductImage(ABDUCT_STRING_SRC),
+    loadAbductImage(ABDUCT_ARROW_LEFT_SRC),
+    loadAbductImage(ABDUCT_ARROW_RIGHT_SRC),
+    loadAbductImage(ABDUCT_EARTH_SRC),
+    loadAbductImage(ABDUCT_SHIP_SRC),
+    loadAbductImage(ABDUCT_SELECT_SRC),
+    Promise.all(ROSTER.map((c) => loadAbductImage(`textures/${c.tex}.${c.ext}`).then((img) => [c.key, img]))),
+  ])
+    .then(([panel, iface, string, arrowLeft, arrowRight, earth, ship, select, charPairs]) => {
+      abductImgs = { panel, iface, string, arrowLeft, arrowRight, earth, ship, select, chars: new Map(charPairs) };
+    })
+    .catch((err) => console.error('[abductUI] asset load failed', err));
+
+  /** The image to draw for a target: their real character if known, else the 'ghost' fallback — see this section's header. */
+  function abductAvatarImg(target) {
+    return (target?.characterKey && abductImgs.chars.get(target.characterKey)) || abductImgs.chars.get('ghost');
+  }
+
+  let abductCtx = null;
+  let abductTargets = [];
+  let abductIndex = 0;
+  let abductRevealStartedAt = 0; // avatar glitch-reveal clock — reset on every arrow press, even mid-reveal
+  let abductEarthRevealStartedAt = 0; // Earth's own shimmer clock — set ONCE, at the same instant as abductRevealStartedAt's first value, and never reset by arrow presses (the Earth isn't per-target)
+  let abductAnim = null; // { phase: 'lowering' | 'growing' | 'interactive', startedAt, growStartedAt }
+  let abductRafId = null;
+  const abductTagCache = new Map(); // token -> { canvas, aspect } — built once per target seen, kept for the round
+  // Confirmation-dynamic state (see this section's "confirmation dynamic"
+  // header) — abductSelected toggles on an avatar click and off on either a
+  // second click or any arrow press (abductStep clears it); abductShipCycleStartedAt
+  // is the ship animation's own clock, restarted fresh each time selection
+  // turns ON (not shared with the avatar/Earth reveal clocks — those play
+  // once per target, this loops for as long as the target stays selected).
+  let abductSelected = false;
+  let abductShipCycleStartedAt = 0;
+
+  function abductAvatarRect(img) {
+    const iface = abductFinalRect();
+    const aspect = img.naturalWidth / img.naturalHeight;
+    const w = ABDUCT_AVATAR.height * aspect;
+    const cx = iface.x + iface.w / 2 + ABDUCT_TARGET_OFFSET.x;
+    const cy = ABDUCT_AVATAR.centerY + ABDUCT_TARGET_OFFSET.y;
+    return { x: cx - w / 2, y: cy - ABDUCT_AVATAR.height / 2, w, h: ABDUCT_AVATAR.height, cx, cy };
+  }
+
+  function abductArrowRects() {
+    const iface = abductFinalRect();
+    const half = ABDUCT_ARROW.size / 2;
+    const leftX = iface.x + ABDUCT_ARROW.inset + ABDUCT_TARGET_OFFSET.x;
+    const rightX = iface.x + iface.w - ABDUCT_ARROW.inset + ABDUCT_TARGET_OFFSET.x;
+    const centerY = ABDUCT_ARROW.centerY + ABDUCT_TARGET_OFFSET.y;
+    return {
+      left: { x: leftX - half, y: centerY - half, w: ABDUCT_ARROW.size, h: ABDUCT_ARROW.size },
+      right: { x: rightX - half, y: centerY - half, w: ABDUCT_ARROW.size, h: ABDUCT_ARROW.size },
+    };
+  }
+
+  /** The Earth's rect at its currently-tuned size/position — see ABDUCT_EARTH. */
+  function abductEarthRect() {
+    const aspect = abductImgs.earth.naturalWidth / abductImgs.earth.naturalHeight;
+    const w = ABDUCT_EARTH.width;
+    const h = w / aspect;
+    return { x: ABDUCT_EARTH.centerX - w / 2, y: ABDUCT_EARTH.centerY - h / 2, w, h };
+  }
+
+  function abductPointInRect(x, y, r) {
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  /** Async name-tag build, cached per token — real cardboard lettering, the actual in-game renderer (see nameTag.js), same one attachNameTag uses. Returns null (draw nothing this frame) until the build resolves. */
+  function abductGetTag(target) {
+    const cached = abductTagCache.get(target.token);
+    if (cached) return cached;
+    if (cached === null) return null; // build already in flight
+    abductTagCache.set(target.token, null);
+    buildNameTagCanvas(target.displayName ?? target.token, { glowColor: target.colorHex ?? ABDUCT_TAG_GLOW })
+      .then(({ canvas, aspect }) => abductTagCache.set(target.token, { canvas, aspect }))
+      .catch((err) => console.error('[abductUI] name tag build failed', err));
+    return null;
+  }
+
+  /** Glitch-slice avatar reveal — Luke's pick, variant 2 of six built in alienFizzleProto.js (see that file's own effect2 for the original this mirrors). Bottom-up, green-tinted, sideways-shifted slices near the still-hidden edge. */
+  function abductDrawAvatarGlitch(ctx, img, r, p) {
+    const revealY = r.y + r.h * (1 - p);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, revealY, r.w, r.y + r.h - revealY);
+    ctx.clip();
+    ctx.drawImage(img, r.x, r.y, r.w, r.h);
+    ctx.restore();
+    if (p <= 0 || p >= 1) return;
+    const glitchH = 46;
+    const top = Math.max(r.y, revealY - glitchH);
+    const sliceH = 4;
+    for (let y = top; y < revealY; y += sliceH) {
+      if (Math.random() < 0.35) continue;
+      const offset = (Math.random() - 0.5) * 26;
+      const srcY = ((y - r.y) / r.h) * img.naturalHeight;
+      const srcH = (sliceH / r.h) * img.naturalHeight;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(r.x, y, r.w, sliceH);
+      ctx.clip();
+      ctx.drawImage(img, 0, srcY, img.naturalWidth, srcH, r.x + offset, y, r.w, sliceH);
+      ctx.fillStyle = 'rgba(120, 255, 160, 0.32)';
+      ctx.fillRect(r.x, y, r.w, sliceH);
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Same glitch-slice shimmer as abductDrawAvatarGlitch, mirrored top-to-
+   * bottom for the Earth's own reveal — Luke, 2026-09-19: "the same shimmer
+   * used to make the avatars appear... but this shimmer should go top to
+   * bottom." The growing edge (where the glitch band rides) is therefore the
+   * BOTTOM of the revealed region here, not the top.
+   */
+  function abductDrawEarthGlitch(ctx, img, r, p) {
+    const revealBottom = r.y + r.h * p;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, revealBottom - r.y);
+    ctx.clip();
+    ctx.drawImage(img, r.x, r.y, r.w, r.h);
+    ctx.restore();
+    if (p <= 0 || p >= 1) return;
+    const glitchH = 46;
+    const bottom = Math.min(r.y + r.h, revealBottom + glitchH);
+    const sliceH = 4;
+    for (let y = revealBottom; y < bottom; y += sliceH) {
+      if (Math.random() < 0.35) continue;
+      const offset = (Math.random() - 0.5) * 26;
+      const srcY = ((y - r.y) / r.h) * img.naturalHeight;
+      const srcH = (sliceH / r.h) * img.naturalHeight;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(r.x, y, r.w, sliceH);
+      ctx.clip();
+      ctx.drawImage(img, 0, srcY, img.naturalWidth, srcH, r.x + offset, y, r.w, sliceH);
+      ctx.fillStyle = 'rgba(120, 255, 160, 0.32)';
+      ctx.fillRect(r.x, y, r.w, sliceH);
+      ctx.restore();
+    }
+  }
+
+  /**
+   * The "leaving Earth" ship loop — Luke, 2026-09-19: "a crude animation
+   * with a small version of the alien spaceship shown in only five
+   * positions." Deliberately a jump-cut between ABDUCT_SHIP_POSITIONS, not
+   * a tween — "crude" and "only five positions" both say so. `elapsed` is
+   * seconds since abductShipCycleStartedAt; the cycle is the 5 positions at
+   * ABDUCT_SHIP_POSITION_DURATION each, then a silent gap of
+   * ABDUCT_SHIP_GAP_DURATION before it restarts from position 1 — draws
+   * nothing during that gap. Same full size/opacity at every stop — an
+   * earlier pass grew/brightened the ship across the 5 stops and added a
+   * green "materialising" glow behind it; Luke, same day: "I don't like the
+   * aura that's been added around the ship. Remove it" and "forget about
+   * changing brightness and size: have it at full size for all instances."
+   */
+  function abductDrawShip(ctx, img, elapsed) {
+    const n = ABDUCT_SHIP_POSITIONS.length;
+    const cycleLen = ABDUCT_SHIP_POSITION_DURATION * n + ABDUCT_SHIP_GAP_DURATION;
+    const t = elapsed % cycleLen;
+    if (t >= ABDUCT_SHIP_POSITION_DURATION * n) return; // in the gap — nothing to draw
+    const stepIndex = Math.min(n - 1, Math.floor(t / ABDUCT_SHIP_POSITION_DURATION));
+    const raw = ABDUCT_SHIP_POSITIONS[stepIndex];
+    // See ABDUCT_SHIP_PATH_ADJUST's own header — pivots the scale on Earth's
+    // own centre so "scale" reads as "how far out the path reaches," not an
+    // arbitrary stretch from the canvas origin.
+    const x = ABDUCT_EARTH.centerX + (raw.x - ABDUCT_EARTH.centerX) * ABDUCT_SHIP_PATH_ADJUST.scale + ABDUCT_SHIP_PATH_ADJUST.offsetX;
+    const y = ABDUCT_EARTH.centerY + (raw.y - ABDUCT_EARTH.centerY) * ABDUCT_SHIP_PATH_ADJUST.scale + ABDUCT_SHIP_PATH_ADJUST.offsetY;
+    const w = ABDUCT_SHIP_WIDTH;
+    const h = w * (img.naturalHeight / img.naturalWidth);
+    ctx.drawImage(img, x - w / 2, y - h / 2, w, h);
+  }
+
+  /**
+   * The avatar-selection highlight — Luke, 2026-09-19, second pass: "I
+   * don't like the border options. I've decided to skip the border around
+   * the planet, and add these images as brackets around the player." One
+   * real art asset (see ABDUCT_SELECT_SRC's own header for why only one,
+   * not two), drawn once normally for the left side and once horizontally
+   * mirrored for the right — the source art's own left/right pair were
+   * mirrors of each other, so this reproduces the same look from a single
+   * file with no distortion.
+   */
+  function abductDrawSelectBrackets(ctx, avatarRect, img) {
+    const h = ABDUCT_SELECT_BRACKET.height;
+    const w = h * (img.naturalWidth / img.naturalHeight);
+    const y = avatarRect.cy - h / 2;
+
+    const leftX = avatarRect.x - ABDUCT_SELECT_BRACKET.gap - w;
+    ctx.drawImage(img, leftX, y, w, h);
+
+    const rightX = avatarRect.x + avatarRect.w + ABDUCT_SELECT_BRACKET.gap;
+    ctx.save();
+    ctx.translate(rightX + w, 0); // horizontal mirror, pivoting on the drawn rect's own right edge
+    ctx.scale(-1, 1);
+    ctx.drawImage(img, 0, y, w, h);
+    ctx.restore();
+  }
+
+  /** Sizes/positions the (taller-than-its-viewport) canvas for the current window size — see this section's header for why the string is just a long fixed length. Cheap; called every frame rather than wired to a separate resize listener. */
+  function abductLayout() {
+    const vw = els.abductStage.clientWidth;
+    const vh = els.abductStage.clientHeight;
+    const scale = Math.min((vw * ABDUCT_FILL_FRACTION) / ABDUCT_PANEL_SIZE.w, (vh * ABDUCT_FILL_FRACTION) / ABDUCT_PANEL_SIZE.h);
+    const cssW = ABDUCT_PANEL_SIZE.w * scale;
+    const cssH = (ABDUCT_STRING_LEN + ABDUCT_PANEL_SIZE.h) * scale;
+    els.abductCanvas.style.width = `${cssW}px`;
+    els.abductCanvas.style.height = `${cssH}px`;
+    const cssLeft = (vw - cssW) / 2;
+    els.abductCanvas.style.left = `${cssLeft}px`;
+    const restingPanelTop = vh * ABDUCT_TOP_MARGIN;
+    const restY = restingPanelTop - ABDUCT_STRING_LEN * scale;
+    const startY = -cssH;
+    return { scale, cssLeft, startY, restY };
+  }
+
+  /** Positions the placeholder team-box/confirm-button in real pixels — computed once the panel is at rest, from the same scale/offset abductLayout() just used, converting fixed panel-space rects into screen space. Percentages of #abductStage would drift while the canvas is mid-descent; see chrome.js's own comment. */
+  function abductPositionOverlayButtons(scale, cssLeft, restY) {
+    const iface = abductFinalRect();
+    const toScreen = (localX, localY) => ({
+      x: cssLeft + localX * scale,
+      y: restY + (ABDUCT_STRING_LEN + localY) * scale,
+    });
+    const team = toScreen(iface.x + 40, iface.y + 25);
+    els.abductTeamBox.style.left = `${team.x}px`;
+    els.abductTeamBox.style.top = `${team.y}px`;
+    els.abductTeamBox.style.width = `${180 * scale}px`;
+    els.abductTeamBox.style.height = `${50 * scale}px`;
+    els.abductTeamBox.style.fontSize = `${15 * scale}px`;
+
+    const confirm = toScreen(iface.x + iface.w - 220, iface.y + iface.h - 70);
+    els.abductConfirmBtn.style.left = `${confirm.x}px`;
+    els.abductConfirmBtn.style.top = `${confirm.y}px`;
+    els.abductConfirmBtn.style.width = `${200 * scale}px`;
+    els.abductConfirmBtn.style.height = `${55 * scale}px`;
+    els.abductConfirmBtn.style.fontSize = `${15 * scale}px`;
+  }
+
+  function abductUpdateTeamBox() {
+    const t = abductTargets[abductIndex];
+    if (t && els.abductTeamBox) els.abductTeamBox.textContent = `Team ${t.groupId}`;
+  }
+
+  /** Draws one frame: strings (static art, always the same length/position) + panel + growing interface + (once fully open) avatar/name-tag/arrows. `growthElapsed` is null while the panel is still lowering — the interface hasn't started growing yet, so nothing of it is drawn at all (see abductTick's 'lowering' branch). `revealNow` is null before the interface has finished growing — nothing to show yet. */
+  function abductDraw(growthElapsed, revealNow) {
+    abductCtx.clearRect(0, 0, els.abductCanvas.width, els.abductCanvas.height);
+    for (const hole of ABDUCT_PANEL_HOLES) {
+      const x = hole.x - ABDUCT_STRING_CENTER_X;
+      for (let y = ABDUCT_STRING_LEN; y > 0; y -= ABDUCT_STRING_TILE.h) {
+        abductCtx.drawImage(abductImgs.string, x, y - ABDUCT_STRING_TILE.h, ABDUCT_STRING_TILE.w, ABDUCT_STRING_TILE.h);
+      }
+    }
+    abductCtx.save();
+    abductCtx.translate(0, ABDUCT_STRING_LEN); // panel-local (0,0) is now at canvas (0, ABDUCT_STRING_LEN)
+    drawAbductPanel(abductCtx, abductImgs.panel);
+    // Luke, 2026-09-19: "When the cardboard backing is lowered from the top,
+    // it already has the thin rectangle that will grow into the green UI
+    // background. Please remove this thin rectangle, and only have it
+    // appear when the animation starts." drawInterfaceGrowth(elapsed=0)
+    // draws the interface at its own startWidth/startHeight — a real sliver,
+    // not nothing — which is exactly that thin rectangle; skipping the call
+    // entirely while still lowering is what actually hides it, since 0 is a
+    // valid elapsed value to that function, not an "off" signal.
+    if (growthElapsed !== null) drawInterfaceGrowth(abductCtx, abductImgs.iface, growthElapsed);
+
+    if (revealNow !== null) {
+      // Static for now — see ABDUCT_EARTH's own header. Drawn before the
+      // target cluster so it always sits "behind" in draw order. Clipped to
+      // the interface's own rect — Luke: "I want the border to cut the
+      // Earth, so that the bottom of the Earth is missing," the opposite of
+      // an earlier unclipped draw where Earth spilled past the border and
+      // visually cut across IT instead.
+      const iface = abductFinalRect();
+      const er = abductEarthRect();
+      const earthElapsed = (revealNow - abductEarthRevealStartedAt) / 1000 - ABDUCT_EARTH_REVEAL_DELAY;
+      const earthP = Math.max(0, Math.min(1, earthElapsed / ABDUCT_GLITCH_DURATION));
+      abductCtx.save();
+      abductCtx.beginPath();
+      abductCtx.rect(iface.x, iface.y, iface.w, iface.h);
+      abductCtx.clip();
+      abductDrawEarthGlitch(abductCtx, abductImgs.earth, er, earthP);
+      abductCtx.restore();
+
+      const target = abductTargets[abductIndex];
+      let avatarRect = null; // hoisted so the selection-border block below (drawn on top of everything) can still reach it
+      if (target) {
+        const avatarImg = abductAvatarImg(target);
+        const r = abductAvatarRect(avatarImg);
+        avatarRect = r;
+        const revealElapsed = (revealNow - abductRevealStartedAt) / 1000;
+        const p = Math.min(1, revealElapsed / ABDUCT_GLITCH_DURATION);
+        if (p < 1) {
+          abductDrawAvatarGlitch(abductCtx, avatarImg, r, p);
+        } else {
+          // Settled: continuous spin about the avatar's own vertical axis
+          // — never the name tag. Same 2D stand-in for a real Y-rotation
+          // the dial's turn already relies on: a double-sided plane's back
+          // is its own mirrored front, which ctx.scale(cos,1) reproduces
+          // for free past 90°/270°.
+          const spinT = revealElapsed - ABDUCT_GLITCH_DURATION;
+          const spinAngle = ((spinT / ABDUCT_SPIN_PERIOD) % 1) * Math.PI * 2;
+          abductCtx.save();
+          abductCtx.translate(r.cx, r.cy);
+          abductCtx.scale(Math.cos(spinAngle), 1);
+          abductCtx.drawImage(avatarImg, -r.w / 2, -r.h / 2, r.w, r.h);
+          abductCtx.restore();
+        }
+
+        const tag = abductGetTag(target);
+        if (tag) {
+          const iface = abductFinalRect();
+          const tagW = ABDUCT_TAG.height / tag.aspect;
+          abductCtx.drawImage(
+            tag.canvas,
+            iface.x + iface.w / 2 + ABDUCT_TARGET_OFFSET.x - tagW / 2,
+            ABDUCT_TAG.centerY + ABDUCT_TARGET_OFFSET.y - ABDUCT_TAG.height / 2,
+            tagW,
+            ABDUCT_TAG.height
+          );
+        }
+      }
+      const { left, right } = abductArrowRects();
+      abductCtx.drawImage(abductImgs.arrowLeft, left.x, left.y, left.w, left.h);
+      abductCtx.drawImage(abductImgs.arrowRight, right.x, right.y, right.w, right.h);
+
+      // Confirmation-dynamic highlight + ship loop — see this section's
+      // "confirmation dynamic" header. Drawn last so both sit on top of the
+      // avatar/arrows already drawn this frame, not under them.
+      if (abductSelected && avatarRect) {
+        abductDrawSelectBrackets(abductCtx, avatarRect, abductImgs.select);
+        const shipElapsed = (revealNow - abductShipCycleStartedAt) / 1000;
+        abductDrawShip(abductCtx, abductImgs.ship, shipElapsed);
+      }
+    }
+    abductCtx.restore();
+  }
+
+  function abductTick() {
+    if (!abductAnim) return; // closed mid-frame
+    if (!abductImgs) {
+      abductRafId = requestAnimationFrame(abductTick);
+      return;
+    }
+    const now = performance.now();
+    const { scale, cssLeft, startY, restY } = abductLayout();
+
+    if (abductAnim.phase === 'lowering') {
+      const t = Math.min(1, (now - abductAnim.startedAt) / (ABDUCT_LOWER_DURATION * 1000));
+      const eased = 1 - (1 - t) * (1 - t) * (1 - t); // ease-out: never overshoots restY — see this section's header on why that's what keeps the string safely off-screen throughout
+      els.abductCanvas.style.transform = `translateY(${startY + (restY - startY) * eased}px)`;
+      abductDraw(null, null); // still lowering — see abductDraw's own header for why null, not 0
+      if (t >= 1) {
+        abductAnim.phase = 'growing';
+        abductAnim.growStartedAt = now;
+      }
+    } else {
+      els.abductCanvas.style.transform = `translateY(${restY}px)`;
+      if (abductAnim.phase === 'growing') {
+        const ge = (now - abductAnim.growStartedAt) / 1000;
+        abductDraw(ge, null);
+        if (ge >= abductGrowthTimeline().total) {
+          abductAnim.phase = 'interactive';
+          abductRevealStartedAt = now;
+          abductEarthRevealStartedAt = now; // see its own declaration — set once here, never reset by arrow presses
+          els.abductTeamBox.style.visibility = 'visible';
+          els.abductConfirmBtn.style.visibility = 'visible';
+        }
+      } else {
+        abductDraw(abductGrowthTimeline().total, now);
+        // Re-laid-out every frame, not just once on the growing->interactive
+        // transition — a window resize while the picker sits open (found
+        // live: the canvas itself already rescaled every frame, but the
+        // two DOM overlay buttons hadn't, so they drifted off the panel
+        // entirely at a resized viewport) needs these to track it too.
+        abductPositionOverlayButtons(scale, cssLeft, restY);
+      }
+    }
+    abductRafId = requestAnimationFrame(abductTick);
+  }
+
+  function abductStep(dir) {
+    if (!abductAnim || abductAnim.phase !== 'interactive' || abductTargets.length === 0) return;
+    abductIndex = (abductIndex + dir + abductTargets.length) % abductTargets.length;
+    abductRevealStartedAt = performance.now(); // always restarts, interrupting any reveal in progress — see this section's header
+    abductSelected = false; // Luke: "Clicking an arrow to move to the next target will also deselect."
+    abductUpdateTeamBox();
+  }
+
+  /** Toggles the confirmation-dynamic selection for the CURRENT target — see this section's "confirmation dynamic" header. Only live once the picker is fully open. */
+  function abductToggleSelect() {
+    if (!abductAnim || abductAnim.phase !== 'interactive') return;
+    abductSelected = !abductSelected;
+    if (abductSelected) abductShipCycleStartedAt = performance.now(); // fresh loop each time selection turns on
+  }
+
+  function openAbductMenu() {
+    if (rig.powerup?.kind !== 'abduction' || !els.abductMenu) return;
+    // window.__debugAbductTargets: real cross-team targeting has no solo
+    // equivalent to test against (getAbductionTargets is only ever wired
+    // up by the real networked lobby) — this override lets a console
+    // session fake the list without a second real device. Harmless to
+    // leave: only ever read here, never written except by hand.
+    const targets = (window.__debugAbductTargets ?? getAbductionTargets?.() ?? []).filter((t) => t.island < N_FORKS);
+    if (targets.length === 0) {
+      showNotice('Nobody can be targeted right now.');
+      return;
+    }
+    abductTargets = targets;
+    abductIndex = 0;
+    abductSelected = false;
+    els.abductTeamBox.style.visibility = 'hidden';
+    els.abductConfirmBtn.style.visibility = 'hidden';
+    abductUpdateTeamBox();
+    els.abductCanvas.width = ABDUCT_PANEL_SIZE.w;
+    els.abductCanvas.height = ABDUCT_STRING_LEN + ABDUCT_PANEL_SIZE.h;
+    abductCtx = els.abductCanvas.getContext('2d');
+    els.abductMenu.classList.remove('hidden');
+    const { startY } = abductLayout();
+    els.abductCanvas.style.transform = `translateY(${startY}px)`;
+    if (abductRafId !== null) cancelAnimationFrame(abductRafId);
+    abductAnim = { phase: 'lowering', startedAt: performance.now() };
+    abductImgsPromise.then(() => {
+      if (abductAnim) abductRafId = requestAnimationFrame(abductTick);
+    });
+  }
+
+  function closeAbductMenu() {
+    if (abductRafId !== null) cancelAnimationFrame(abductRafId);
+    abductRafId = null;
+    abductAnim = null;
+    els.abductMenu?.classList.add('hidden');
+  }
+
+  function chooseAbductTarget(t) {
+    closeAbductMenu();
+    if (rig.powerup?.kind !== 'abduction') return;
+    // One use — the item is spent the moment the aliens are sent, whatever
+    // happens at the other end.
+    disposePowerUp(rig);
+    if (!isSpectatorRole(role)) notifyPlayerState(); // teammates lose the card too
+    onGameEvent?.('abduct-target', { targetToken: t.token, byName: localDisplayName ?? 'Someone' });
+    showNotice(`The aliens are on their way to ${t.displayName ?? 'your target'}…`);
+    refreshUI();
+  }
+
+  /** 'abduct-target' landed on THIS device — arm it for the next arrival, or say why it can't be. */
+  function receiveAbductionTarget(payload) {
+    const reply = (outcome) => onGameEvent?.('abduct-result', { toToken: payload.token, outcome, targetName: localDisplayName });
+    // Already out, spectating, already on the last island (no next island
+    // to arrive on), or already spoken for by an earlier attacker: fizzle.
+    if (isSpectatorRole(role) || finished || falling || abduction || forkIndex >= N_FORKS || pendingAbduction) {
+      reply('fizzled');
+      return;
+    }
+    pendingAbduction = { byToken: payload.token, byName: payload.byName ?? 'Someone' };
+  }
+
+  /** Called from onArrivedAtFork(): the armed abduction fires now, as a choice. */
+  function triggerPendingAbduction() {
+    if (!pendingAbduction || abductPromptOpen) return;
+    abductPromptOpen = true;
+    if (els.abductPromptText) els.abductPromptText.textContent = `${pendingAbduction.byName} has sent the aliens for you!`;
+    els.abductPrompt?.classList.remove('hidden');
+    refreshUI();
+  }
+
+  function resolveAbductPrompt(choice) {
+    if (!abductPromptOpen || !pendingAbduction) return;
+    const { byToken } = pendingAbduction;
+    pendingAbduction = null;
+    abductPromptOpen = false;
+    els.abductPrompt?.classList.add('hidden');
+    if (choice === 'go') {
+      startAbduction(); // the existing sequence, networked to teammates via `abducting`
+      onGameEvent?.('abduct-result', { toToken: byToken, outcome: 'abducted', targetName: localDisplayName });
+    } else {
+      // Resist — Luke: "We'll add that feature next." For now resisting
+      // simply calls the aliens off; the real resist mechanic replaces
+      // this branch.
+      onGameEvent?.('abduct-result', { toToken: byToken, outcome: 'resisted', targetName: localDisplayName });
+    }
+    refreshUI();
+  }
+
+  /** 'abduct-result' — THIS device sent the aliens; here's what happened. */
+  function receiveAbductionResult(payload) {
+    const who = payload.targetName ?? 'Your target';
+    if (payload.outcome === 'abducted') showNotice(`${who} was taken by the aliens!`);
+    else if (payload.outcome === 'resisted') showNotice(`${who} resisted the aliens!`);
+    else showNotice(`The aliens couldn't reach ${who}.`);
+  }
+
   // figure.position/rotation are the *visual* transform, redrawn from these
   // every frame (see the step-bob block in tick()) — walker is the actual
   // logical path position everything else (movement, camera, fork/curtain
@@ -5483,6 +6370,16 @@ export function mountSkyPath(container, options = {}) {
       })
     : null;
 
+  // Three generations of `?abductTune=1` panel have now been through this
+  // same cycle and been removed once Luke logged final numbers: the
+  // target-cluster/Earth placement tuner (see ABDUCT_TARGET_OFFSET/
+  // ABDUCT_EARTH), the confirmation-dynamic's ship timing/path tuner (see
+  // ABDUCT_SHIP_POSITION_DURATION/ABDUCT_SHIP_GAP_DURATION/
+  // ABDUCT_SHIP_PATH_ADJUST), and this one, the select-bracket size/gap
+  // tuner (see ABDUCT_SELECT_BRACKET). The flag is free for a fourth if a
+  // future abduction-UI pass needs one — see git history for any of the
+  // three if a look back at how it was tuned live would help.
+
   // ---------------------------------------------------------------- controls
 
   const els = {
@@ -5497,6 +6394,19 @@ export function mountSkyPath(container, options = {}) {
     charStart: $('charStart'),
     abduct: $('abduct'), // temporary test trigger — see startAbduction()
     addJetpack: $('addJetpack'), // temporary test trigger — see equipPowerUp()
+    useAbduct: $('useAbduct'), // the real abduction control — see the "pickup" section
+    // Abduction targeting overlays — see the "abduction targeting" section.
+    abductMenu: $('abductMenu'),
+    abductStage: $('abductStage'),
+    abductCanvas: $('abductCanvas'),
+    abductTeamBox: $('abductTeamBox'),
+    abductConfirmBtn: $('abductConfirmBtn'),
+    abductCancel: $('abductCancel'),
+    abductPrompt: $('abductPrompt'),
+    abductPromptText: $('abductPromptText'),
+    abductResist: $('abductResist'),
+    abductGo: $('abductGo'),
+    notice: $('notice'),
     templeFade: $('templeFade'), // opacity driven by updateTempleEntry()
   };
 
@@ -5641,6 +6551,19 @@ export function mountSkyPath(container, options = {}) {
       attachNameTag(rig, name, pickedColorHex, { side: mySeat.tagSide, yStagger: mySeat.tagYStagger });
     }
     if (TEST_TAGS) spawnTestCompanions();
+    if (DEBUG_ABDUCT) {
+      // Two varied fake targets (different character/colour each) so the
+      // arrows have something real to cycle between, not just a single
+      // fixed card — see DEBUG_ABDUCT's own header. Auto-claimed here
+      // rather than waiting for a walk to island 2: resolvePickupClaim
+      // equips rig.powerup and calls refreshUI() itself, which is what
+      // un-disables the real 🛸 button — nothing else to do by hand.
+      window.__debugAbductTargets = [
+        { token: 'debug-1', displayName: 'Zara', groupId: 2, island: 3, characterKey: 'robot', colorHex: '#2ecc71' },
+        { token: 'debug-2', displayName: 'Milo', groupId: 2, island: 4, characterKey: 'monkey', colorHex: '#e74c3c' },
+      ];
+      resolvePickupClaim(myToken ?? 'me');
+    }
     // Luke, 2026-09-13: "the guide should have no physical presence in the
     // game at any point... with one guide and three players [every device]
     // should in display purposes be treated as three players." Root cause
@@ -5698,6 +6621,14 @@ export function mountSkyPath(container, options = {}) {
     // over, while something else already owns the figure, or mid-walk, since
     // the event only runs on a player standing still.
     if (els.abduct) els.abduct.disabled = !!abduction || falling || finished || walking || !!templeEntry || !!rescue;
+    // The real abduction control — Luke, 2026-09-15: "greyed out when a
+    // player doesn't have the trigger item." Same "not while something else
+    // owns the figure" guards as the test button, on top of actually
+    // holding the item (see the "pickup" section).
+    if (els.useAbduct) {
+      els.useAbduct.disabled =
+        rig.powerup?.kind !== 'abduction' || !!abduction || falling || finished || walking || !!templeEntry || !!rescue || !canAct || abductPromptOpen;
+    }
     // No more status line at the bottom of the screen — Luke, 2026-09-09:
     // "remove the small text at the bottom... I don't want any of those
     // messages." (fork progress, "Falling…", the hold-to-walk prompt, etc.)
@@ -5773,7 +6704,7 @@ export function mountSkyPath(container, options = {}) {
    * that reintroduces divergence — see TODO.md.
    */
   function requestChoice(side) {
-    if (leg || finished || falling || !canAct) return;
+    if (leg || finished || falling || !canAct || abductPromptOpen) return; // Resist/Go must be answered first — see triggerPendingAbduction
     if (onForkChoice) onForkChoice(forkIndex, side);
     else applyChoice(side); // no owner listening: solo play, decide it here
   }
@@ -5799,15 +6730,15 @@ export function mountSkyPath(container, options = {}) {
     choiceSide = null;
     holdingForward = false;
     templeEntry = null;
-    // Defensive only — the "Again" button that calls restart() is hidden
-    // for the whole rescue (see `moving`/showCurrent's own !!rescue guards),
-    // so this shouldn't normally fire mid-rescue. disposePowerUp() handles
+    // Unconditional, not just "if mid-rescue": a fresh round starts with
+    // empty hands regardless of what's currently equipped (jetpack OR the
+    // abduction device — see equipPowerUp's single `rig.powerup` slot).
+    // disposePowerUp() is a no-op with nothing equipped, and handles
     // whichever parent the group is currently under (rig.group, or `scene`
-    // directly if detach — see updateRescue — had already happened).
-    if (rescue) {
-      disposePowerUp(rig);
-      rescue = null;
-    }
+    // directly if a jetpack detach — see updateRescue — had already
+    // happened) either way.
+    disposePowerUp(rig);
+    rescue = null;
     doorLeftPivot.rotation.y = 0;
     doorRightPivot.rotation.y = 0;
     doorLeftPivot.position.z = DOOR_LEAF_Z; // undo the swing's forward hinge slide
@@ -5828,6 +6759,14 @@ export function mountSkyPath(container, options = {}) {
     // a second rig and leak the first.
     clearAbduction();
     abductedThisRound = false;
+    // A fresh round puts the island-2 item back and empties everyone's
+    // hands — startJourney()'s buildJourney() replants it once this is
+    // cleared. (Solo/dev restart only; a real new round remounts entirely.)
+    pickupClaimedBy = null;
+    pendingAbduction = null;
+    abductPromptOpen = false;
+    els.abductPrompt?.classList.add('hidden');
+    closeAbductMenu();
     startJourney();
     refreshUI();
   }
@@ -5845,9 +6784,49 @@ export function mountSkyPath(container, options = {}) {
     // just standing around, which wouldn't otherwise send anything for a
     // while. Harmless to send a 'resting' report here: this device's own
     // forkIndex hasn't changed, so it's a no-op for everyone's position,
-    // just carries the updated hasJetpack flag (see notifyPlayerState).
+    // just carries the updated powerupKind flag (see notifyPlayerState).
     if (!isSpectatorRole(role)) notifyPlayerState();
   });
+  // The real abduction control (enabled only while holding the island-2
+  // trigger — see refreshUI) and its overlays — see the "abduction
+  // targeting" section.
+  els.useAbduct?.addEventListener('click', () => openAbductMenu());
+  els.abductCancel?.addEventListener('click', () => closeAbductMenu());
+  els.abductResist?.addEventListener('click', () => resolveAbductPrompt('resist'));
+  els.abductGo?.addEventListener('click', () => resolveAbductPrompt('go'));
+  // The picker itself — arrows are drawn ON the canvas (real hit-testing
+  // against their own rects, converted from screen space into the tall
+  // canvas's own internal pixel space); the team box/confirm button are
+  // plain DOM elements laid over it — see abductPositionOverlayButtons().
+  els.abductCanvas?.addEventListener('click', (e) => {
+    const rect = els.abductCanvas.getBoundingClientRect();
+    const scaleX = els.abductCanvas.width / rect.width;
+    const scaleY = els.abductCanvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY - ABDUCT_STRING_LEN; // back into panel-local space
+    const { left, right } = abductArrowRects();
+    if (abductPointInRect(x, y, left)) { abductStep(-1); return; }
+    if (abductPointInRect(x, y, right)) { abductStep(1); return; }
+    // Tapping the avatar itself toggles the confirmation-dynamic selection
+    // — see abductToggleSelect. Needs the target's own image for its real
+    // aspect (same rect abductDraw itself uses), so it's a no-op before
+    // abductImgs/the target have actually loaded.
+    const target = abductTargets[abductIndex];
+    if (target && abductImgs) {
+      const avatarImg = abductAvatarImg(target);
+      if (abductPointInRect(x, y, abductAvatarRect(avatarImg))) abductToggleSelect();
+    }
+  });
+  els.abductConfirmBtn?.addEventListener('click', () => {
+    if (!abductAnim || abductAnim.phase !== 'interactive') return;
+    const t = abductTargets[abductIndex];
+    if (t) chooseAbductTarget(t);
+  });
+  // Switching teams isn't built yet — Luke: "Switch Team can be simply
+  // clicking on the team name window, for now" describes the INTENDED
+  // future behaviour; per his own "the whole process doesn't have to be
+  // complete," this is a placeholder with no click behaviour yet.
+  els.abductTeamBox?.addEventListener('click', () => {});
 
   // Hold-to-advance: hold #advance to walk, release to freeze in place —
   // Luke, 2026-09-06: "they will also have to move their card forward by
@@ -6126,6 +7105,7 @@ export function mountSkyPath(container, options = {}) {
         if (leg.arriveFork) {
           forkIndex = leg.arriveFork;
           notifyPlayerState();
+          onArrivedAtFork(); // the island-2 pickup claim — see the "pickup" section
         } else if (leg.success) {
           // `finished`/`finishedSuccess`/emitRoundEnd() are deliberately NOT
           // set here any more — that used to end the round the instant the
@@ -6148,7 +7128,10 @@ export function mountSkyPath(container, options = {}) {
           // header for why that's a separate, non-physics path rather than
           // a branch inside startFall().
           if (leg.lastPoint.breakablePlanks?.length) triggerPlankBreak(leg.lastPoint.breakablePlanks);
-          if (rig.powerup) startRescue();
+          // Only a JETPACK turns a fall into a rescue — holding the
+          // abduction device (the same `rig.powerup` slot, see
+          // equipPowerUp's own header) is not a "spare life."
+          if (rig.powerup?.kind === 'jetpack') startRescue();
           else startFall();
         }
         leg = null;
@@ -6317,6 +7300,7 @@ export function mountSkyPath(container, options = {}) {
 
     updateTeammates(dt);
     updateNameTags();
+    updatePickup(t);
 
     applySun(sunP);
     applyAtmosphere(sunP); // leaves the current tint in tintScratch for updateCurtains
@@ -6411,6 +7395,18 @@ export function mountSkyPath(container, options = {}) {
     // this exact frame), and the camera needs to see the up-to-date state,
     // not whatever was true at the top of tick().
     const justFell = finished && !finishedSuccess;
+    // Eased here, once, regardless of which camera branch below actually
+    // reads it — a guide/watcher has no walker of their own to trail (see
+    // isSpectatorRole below), but the SAME drag-to-look pointer handlers are
+    // registered unconditionally, so look.tx/ty update no matter whose
+    // camera is live. Used to only ease inside the active-player branch,
+    // which is why a guide/watcher's drag never went anywhere — dragging
+    // moved look.tx/ty just fine, nothing ever eased look.x/y toward them,
+    // and nothing in updateGuideCamera read them at all. Fixed 2026-09-19
+    // (Luke: "guides and watchers... don't have the ability to pan their
+    // view in the same way that active players do").
+    look.x += (look.tx - look.x) * Math.min(1, dt * 4);
+    look.y += (look.ty - look.y) * Math.min(1, dt * 4);
     if (isSpectatorRole(role)) {
       // 'watching' is a fallen player's Watch mode — Luke, 2026-09-12:
       // "they will then share the guide's view" — so it rides the exact
@@ -6434,9 +7430,7 @@ export function mountSkyPath(container, options = {}) {
       camera.position.lerp(fallCamAnchor, Math.min(1, dt * FALL_CAM_EASE));
       camera.lookAt(figure.position.x, figure.position.y, figure.position.z);
     } else if (!justFell) {
-      // camera: trails the avatar along its facing direction, plus the drag offset, eased
-      look.x += (look.tx - look.x) * Math.min(1, dt * 4);
-      look.y += (look.ty - look.y) * Math.min(1, dt * 4);
+      // camera: trails the avatar along its facing direction, plus the drag offset (eased above)
 
       // An abduction dollies the camera back on top of whatever pull is
       // already set (the crowd harness owns the base value) — multiplied, not
@@ -6692,6 +7686,26 @@ export function mountSkyPath(container, options = {}) {
     // window.__tagDebugLog(), or JSON.stringify(window.__tagDebugLog(), null, 2)
     // to copy as plain text. window.__tagDebugClear() empties it, useful for
     // isolating just what happens around one specific arrival.
+    window.__pickup = () => ({
+      kind: pickupKind,
+      claimedBy: pickupClaimedBy,
+      heldKind: rig.powerup?.kind ?? null,
+      meshOnIsland: !!pickupMesh,
+      meshPos: pickupMesh ? pickupMesh.position.toArray().map((v) => +v.toFixed(2)) : null,
+      pendingAbduction,
+      abductPromptOpen,
+    });
+    // Simulates a relayed game event (a pickup claim, an incoming abduction
+    // target, a result) without a second device — same as
+    // __testUpdateTeammate for player-state.
+    window.__testGameEvent = (kind, payload) => applyGameEvent(kind, payload);
+    window.__abductUIState = () => ({
+      phase: abductAnim?.phase ?? 'closed',
+      index: abductIndex,
+      targets: abductTargets.map((t) => t.displayName),
+      current: abductTargets[abductIndex]?.displayName ?? null,
+      revealElapsed: abductAnim ? (performance.now() - abductRevealStartedAt) / 1000 : null,
+    });
     window.__tagDebugLog = () => tagDebugLog.slice();
     window.__tagDebugClear = () => {
       tagDebugLog.length = 0;
@@ -6710,8 +7724,9 @@ export function mountSkyPath(container, options = {}) {
         ? {
             pos: rig.powerup.cardMesh.position.toArray(),
             scale: rig.powerup.cardMesh.scale.toArray(),
+            kind: rig.powerup.kind,
             frameIndex: rig.powerup.frameIndex,
-            frameTex: ENGINE_FRAMES[rig.powerup.frameIndex].tex,
+            frameTex: POWERUP_FRAMES[rig.powerup.kind][rig.powerup.frameIndex].tex,
           }
         : null,
       clip: rig.powerup
@@ -6794,6 +7809,8 @@ export function mountSkyPath(container, options = {}) {
     updateTeammate,
     /** Called by GameRoom.jsx when a teammate leaves the room. */
     removeTeammate,
+    /** Called by GameRoom.jsx with a relayed in-round event (a pickup claim, etc.) — see the "pickup" section and useLobby's `game-event` handler. */
+    applyGameEvent,
 
     restart,
 
@@ -6815,7 +7832,9 @@ export function mountSkyPath(container, options = {}) {
       if (disposed) return;
       disposed = true;
       document.removeEventListener('visibilitychange', onTagDebugVisibility); // temporary — see tagDebugLog's own comment
+      clearTimeout(noticeTimer);
       if (rafId !== null) cancelAnimationFrame(rafId);
+      if (abductRafId !== null) cancelAnimationFrame(abductRafId);
       harness?.dispose();
       bgTuner?.dispose();
       rescueTuner?.dispose();

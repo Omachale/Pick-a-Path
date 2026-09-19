@@ -35,14 +35,17 @@ export default function SkyPath({
   initialGuideIsland = null,
   roster = [],
   myToken = null,
+  pickup = null,
   onForkChoice,
   onRoundEnd,
   onPlayerState,
+  onGameEvent,
+  getAbductionTargets,
   gameRef,
 }) {
   const containerRef = useRef(null);
-  const callbacks = useRef({ onForkChoice, onRoundEnd, onPlayerState });
-  callbacks.current = { onForkChoice, onRoundEnd, onPlayerState };
+  const callbacks = useRef({ onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets });
+  callbacks.current = { onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets };
 
   useEffect(() => {
     const handle = mountSkyPath(containerRef.current, {
@@ -55,6 +58,7 @@ export default function SkyPath({
       initialGuideIsland,
       roster,
       myToken,
+      pickup,
       // Only forward a handler if the parent actually supplied one — the game
       // treats a missing onForkChoice as "solo, decide it yourself".
       onForkChoice: onForkChoice
@@ -62,6 +66,9 @@ export default function SkyPath({
         : null,
       onRoundEnd: (result) => callbacks.current.onRoundEnd?.(result),
       onPlayerState: onPlayerState ? (state) => callbacks.current.onPlayerState?.(state) : null,
+      // Same "missing = solo, settle it locally" contract as onForkChoice.
+      onGameEvent: onGameEvent ? (kind, data) => callbacks.current.onGameEvent?.(kind, data) : null,
+      getAbductionTargets: getAbductionTargets ? () => callbacks.current.getAbductionTargets?.() ?? [] : null,
     });
     if (gameRef) gameRef.current = handle;
     return () => {
@@ -69,7 +76,7 @@ export default function SkyPath({
       if (gameRef) gameRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland, roster, myToken]);
+  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland, roster, myToken, pickup]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
 }

@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Alien avatar fizzle candidates</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #2a3644; overflow: hidden; }
+      body { display: flex; height: 100%; }
+      #stage {
+        flex: 1 1 auto; min-width: 0; display: flex; align-items: center; justify-content: center;
+        height: 100%; padding: 10px; box-sizing: border-box;
+      }
+      canvas { max-width: 100%; max-height: 100%; }
+
+      #ui {
+        flex: 0 0 246px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10, 20, 30, 0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; margin: 10px; border-radius: 10px;
+        height: calc(100% - 20px); overflow-y: auto; box-sizing: border-box;
+      }
+      #ui h3 {
+        margin: 10px 0 6px; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #8fb8d4; font-weight: 700;
+      }
+      #ui h3:first-child { margin-top: 0; }
+      #ui label { display: block; margin-bottom: 5px; }
+      #ui .row { display: flex; justify-content: space-between; align-items: baseline; }
+      #ui .row span { font-variant-numeric: tabular-nums; color: #9cf; font-weight: 600; }
+      #ui input[type=range] { width: 100%; }
+      #ui button {
+        border: 0; border-radius: 6px; padding: 9px 8px; margin-top: 6px; width: 100%;
+        font: 700 12px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+        text-align: left;
+      }
+      #ui button b { font-variant-numeric: tabular-nums; margin-right: 6px; color: #12212f; }
+      #label {
+        margin-top: 8px; text-align: center; font: 700 12px system-ui, sans-serif; color: #ffe9b8; min-height: 1.4em;
+      }
+      #note {
+        margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.15);
+        font-size: 11px; line-height: 1.5; color: #c8dced;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    ==========================================================================
+    CARDBOARD UI — six candidates for the avatar's appearance effect
+    ==========================================================================
+    Full design notes on all six approaches are in
+    src/alienFizzleProto.js's own header — read that first. Not integrated
+    anywhere yet; this page exists purely to compare the six and pick one.
+    src/dialProto.js's header is the cardboard UI's overall design doc.
+    ==========================================================================
+    -->
+    <div id="stage">
+      <canvas id="c"></canvas>
+    </div>
+
+    <div id="ui">
+      <h3>Duration</h3>
+      <label class="row">very quick <span id="durationV">0.50s</span></label>
+      <input id="duration" type="range" min="0.15" max="1.2" step="0.05" value="0.5" />
+
+      <h3>Play a candidate</h3>
+      <button id="play1"><b>1</b>Hard wipe + static band</button>
+      <button id="play2"><b>2</b>Glitch slices</button>
+      <button id="play3"><b>3</b>Scanline sweep</button>
+      <button id="play4"><b>4</b>Particle dissolve</button>
+      <button id="play5"><b>5</b>CRT flicker + jitter</button>
+      <button id="play6"><b>6</b>Organic threshold reveal</button>
+
+      <div id="label">—</div>
+
+      <div id="note">
+        Each one wipes bottom-to-top and is green — they differ only in how
+        the boundary itself reads (see each function's own comment in
+        alienFizzleProto.js for the idea behind it). None of these are
+        wired into the real target picker yet — tell me which one to use
+        there once you've compared them.
+      </div>
+    </div>
+
+    <script type="module" src="/src/alienFizzleProto.js"></script>
+  </body>
+</html>

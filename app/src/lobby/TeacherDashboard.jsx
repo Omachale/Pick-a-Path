@@ -325,10 +325,17 @@ function SessionPanel({ joinCode, onEndSession }) {
         const forks = Array.from({ length: SKY_PATH_N_FORKS }, () => letters[Math.random() < 0.5 ? 0 : 1]).join('');
         const words = assignForkWords(wordPairs, SKY_PATH_N_FORKS);
         const roundId = randomRoundId();
+        // The island-2 pickup, 2026-09-15 — Luke: "a very simple icon on the
+        // second island, picked up by the first player to reach the island.
+        // 50% chance of being the jetpack, 50% the abduction trigger."
+        // Decided HERE, once per group, for the same reason `words` is: every
+        // device in the group has to show the same item, and this is the one
+        // place that already broadcasts the round's shared facts.
+        const pickup = Math.random() < 0.5 ? 'jetpack' : 'abduction';
         channelRef.current?.send({
           type: 'broadcast',
           event: 'game-started',
-          payload: { groupId, forks, words, guideToken, roundId, roster },
+          payload: { groupId, forks, words, guideToken, roundId, roster, pickup },
         });
       }
     } catch (err) {
