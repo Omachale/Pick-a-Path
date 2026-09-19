@@ -8,9 +8,9 @@
       "port": 5181
     },
     {
-      "name": "blow-arena-review",
+      "name": "prototype-threejs",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", ".claude/worktrees/agent-a79f098398c058e71/prototype-threejs"],
+      "runtimeArgs": ["run", "dev", "--prefix", "prototype-threejs"],
       "port": 5180
     }
   ]
