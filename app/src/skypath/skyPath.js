@@ -5152,6 +5152,18 @@ export function mountSkyPath(container, options = {}) {
   const ABDUCT_AVATAR = { height: 224, centerY: 343 };
   const ABDUCT_TAG = { height: 49, centerY: 189 };
   const ABDUCT_ARROW = { size: 114, centerY: 350, inset: 267 };
+  // The team-name label — Luke, 2026-09-20: "increase the size of the text
+  // by 100%... it needs arrows on either side for cycling through teams.
+  // Move the team name to the right a bit and put a smaller version (30%
+  // size) of the arrows... either side of it." Sizes are panel-local px,
+  // same space as everything else here; ABDUCT_TEAM_ARROW_SCALE is applied
+  // to ABDUCT_ARROW's own size, not a separate guess, so "30% of the
+  // [avatar] arrows" stays true even if those are ever retuned.
+  const ABDUCT_TEAM_FONT_SIZE = 30; // was 15 — "100%" bigger
+  const ABDUCT_TEAM_BOX_HEIGHT = 70; // was 50 — grown to comfortably fit the bigger text
+  const ABDUCT_TEAM_TEXT_OFFSET_X = 30; // "move the team name to the right a bit"
+  const ABDUCT_TEAM_ARROW_SCALE = 0.3;
+  const ABDUCT_TEAM_ARROW_GAP = 10; // between an arrow and the team text
   // Target cluster group offset — Luke, 2026-09-19, next step toward the
   // ship-formation animation: "moving the avatar and arrows left and down
   // to make room for the Earth on the bottom right," from a mockup showing
@@ -5218,18 +5230,53 @@ export function mountSkyPath(container, options = {}) {
   // scale nudge applied uniformly to all five — see ABDUCT_SHIP_PATH_ADJUST
   // below for why a per-stop `scale` is gone; the same nudge maths still
   // applies at draw time in abductDrawShip, just baked to fixed values now
-  // instead of a slider).
-  const ABDUCT_SHIP_POSITIONS = [
+  // instead of a slider). These five are now KEYPOINTS a curve is fitted
+  // through, not the drawn positions themselves — see ABDUCT_SHIP_POSITIONS
+  // just below, 2026-09-20: "double the number of instances in the
+  // animation, and make it look like a curved path."
+  const ABDUCT_SHIP_KEYPOINTS = [
     { x: 847, y: 297 },
     { x: 885, y: 242 },
     { x: 842, y: 186 },
     { x: 743, y: 143 },
     { x: 629, y: 100 },
   ];
-  const ABDUCT_SHIP_WIDTH = 90; // same size at every stop — no more per-position `scale`
+  /** Catmull-Rom spline through `pts`, at global parameter t∈[0,1] across the WHOLE path (not one segment) — interpolates smoothly through every keypoint, unlike a single Bezier which would only pass through its own two endpoints. Clamps the neighbour lookups at the ends so the curve still reaches pts[0]/pts[last] exactly rather than needing phantom points past them. */
+  function abductCatmullRom(pts, t) {
+    const n = pts.length;
+    const scaled = t * (n - 1);
+    const seg = Math.min(n - 2, Math.floor(scaled));
+    const lt = scaled - seg;
+    const p0 = pts[Math.max(0, seg - 1)];
+    const p1 = pts[seg];
+    const p2 = pts[seg + 1];
+    const p3 = pts[Math.min(n - 1, seg + 2)];
+    const lt2 = lt * lt;
+    const lt3 = lt2 * lt;
+    const axis = (a, b, c, d) => 0.5 * (2 * b + (c - a) * lt + (2 * a - 5 * b + 4 * c - d) * lt2 + (3 * b - a - 3 * c + d) * lt3);
+    return { x: axis(p0.x, p1.x, p2.x, p3.x), y: axis(p0.y, p1.y, p2.y, p3.y) };
+  }
+  // "Double the number of instances" (was 5) — sampled evenly along the
+  // Catmull-Rom curve above, so doubling the count alone is what makes the
+  // path read as smoothly curved rather than a jagged 5-point hop: the
+  // JUMP-CUT style itself is unchanged (still no tweening BETWEEN whichever
+  // two of these are current — "a crude animation... shown in only five
+  // [now ten] positions" still holds), just twice as many, twice as close
+  // together, and lying on an actual curve instead of eyeballed points.
+  const ABDUCT_SHIP_POSITION_COUNT = 10;
+  const ABDUCT_SHIP_POSITIONS = Array.from({ length: ABDUCT_SHIP_POSITION_COUNT }, (_, i) =>
+    abductCatmullRom(ABDUCT_SHIP_KEYPOINTS, i / (ABDUCT_SHIP_POSITION_COUNT - 1))
+  );
+  const ABDUCT_SHIP_WIDTH = 90; // same size at every stop — no per-position `scale`
   // Luke's logged values, replacing the `?abductTune=1` sliders that found them.
   const ABDUCT_SHIP_PATH_ADJUST = { offsetX: 21, offsetY: -1, scale: 0.87 };
-  const ABDUCT_SHIP_POSITION_DURATION = 0.13;
+  // Halved from the original 0.13s — Luke asked to double the instance
+  // count, not double how long the whole sweep takes to play out, so the
+  // per-instance duration is halved to keep the total sweep time
+  // (instances × duration) the same as before (~0.65s) rather than silently
+  // doubling it as a side effect of just adding more steps. Flagging this
+  // as a judgment call rather than something he asked for directly.
+  const ABDUCT_SHIP_POSITION_DURATION = 0.065;
   const ABDUCT_SHIP_GAP_DURATION = 0.25;
   // The new avatar-highlight brackets — Luke: "I've decided to skip the
   // border around the planet, and add these images as brackets around the
@@ -5250,6 +5297,54 @@ export function mountSkyPath(container, options = {}) {
   const ABDUCT_SELECT_SRC = 'textures/abduct-select-left.png';
   const ABDUCT_SELECT_BRACKET = { height: 230, gap: -40 };
 
+  // The rune circle — Luke, 2026-09-20: "Time for the confirm button.
+  // Remove the existing confirm button. Add these icons in the place noted
+  // by the circle in the image provided... Ignore the colours (red and
+  // white) of the circle; put the runes onto the background without adding
+  // anything behind them." Position/size baked from the `?abductTune=1`
+  // panel's logged values (now removed).
+  const ABDUCT_RUNES_SRC = 'textures/abduct-runes.png';
+  const ABDUCT_RUNES = { centerX: 558, centerY: 274, size: 118 };
+  // "Add a thin green ring around them with two gaps in it, with those gaps
+  // at 135 degrees and 315 degrees, and short lines perpendicular to
+  // circumference of the circle... The ring should be quite close to the
+  // runes but should not touch any of them." Also baked from the tuner —
+  // `angleOffset` (-90°, i.e. the whole ring rotated a quarter-turn from
+  // plain canvas 135°/315°) is what actually matched Luke's own mental
+  // picture of where the two gaps should sit; see the ring-drawing
+  // function for the plain-canvas-angle convention this offset is applied
+  // on top of. "The rings should only appear when there is a selection" —
+  // 2026-09-20, correcting the first pass, which drew the ring always and
+  // only gated its SPIN on selection; now the whole ring (arcs + ticks) is
+  // skipped entirely while unselected, only the runes stay always-visible.
+  const ABDUCT_RUNE_RING = { radius: 76, lineWidth: 4, gapDeg: 15, tickLen: 12, angleOffset: (-90 * Math.PI) / 180 };
+  // "When the target is selected, this ring should start to rotate
+  // anti-clockwise at a rate of 2 revolutions per second" — then, 2026-09-20:
+  // "I was wrong about the speed, it's much too fast: reduce it to one third
+  // of what it is now" (2 -> 2/3). Negative because canvas angles increase
+  // clockwise, so a NEGATIVE rotation is what reads as anti-clockwise on screen.
+  const ABDUCT_RING_SPIN_RATE = -2 / 3; // revolutions/second
+  // "Could you also make both the runes and the Earth 'glow' subtly?" —
+  // then, on being asked to clarify: "the glow effect should only be
+  // active when a target is selected." A soft shadowBlur halo in the same
+  // established green (matches the glitch-slice tint/ship glow elsewhere in
+  // this section) rather than a second drawn layer — cheap, and reads as
+  // "glowing" without needing its own asset.
+  const ABDUCT_GLOW_COLOR = 'rgba(120, 255, 160, 0.9)';
+  const ABDUCT_GLOW_BLUR = 16;
+  // "Increase the brightness of the runes when there is a selection? Not
+  // the background but the runes themselves?" — distinct from the glow
+  // above (which halos the OUTSIDE of the shape): a canvas `filter`
+  // (same CSS filter syntax as an element's own `filter` style) applied
+  // just to a drawImage call brightens the actual pixels of that art, not
+  // anything around it. Standard Canvas2D API, well supported — nothing
+  // hacky about it. Also applied to Earth's own draw call, same day —
+  // Luke: "make the colour and brightness of the glow around the Earth
+  // [match] the selected runes" (the halo colour was already shared via
+  // ABDUCT_GLOW_COLOR; the runes' own pixel-brightness boost wasn't, which
+  // is what was actually reading as a mismatch between the two).
+  const ABDUCT_SELECTED_BRIGHTNESS = 'brightness(1.6)';
+
   // Every ROSTER character, not just 'ghost' — a target's real card art
   // (see the header above) needs the whole set on hand, keyed the same way
   // CHAR_TEX already is. 'ghost' is still IN this set (ROSTER carries it),
@@ -5264,10 +5359,11 @@ export function mountSkyPath(container, options = {}) {
     loadAbductImage(ABDUCT_EARTH_SRC),
     loadAbductImage(ABDUCT_SHIP_SRC),
     loadAbductImage(ABDUCT_SELECT_SRC),
+    loadAbductImage(ABDUCT_RUNES_SRC),
     Promise.all(ROSTER.map((c) => loadAbductImage(`textures/${c.tex}.${c.ext}`).then((img) => [c.key, img]))),
   ])
-    .then(([panel, iface, string, arrowLeft, arrowRight, earth, ship, select, charPairs]) => {
-      abductImgs = { panel, iface, string, arrowLeft, arrowRight, earth, ship, select, chars: new Map(charPairs) };
+    .then(([panel, iface, string, arrowLeft, arrowRight, earth, ship, select, runes, charPairs]) => {
+      abductImgs = { panel, iface, string, arrowLeft, arrowRight, earth, ship, select, runes, chars: new Map(charPairs) };
     })
     .catch((err) => console.error('[abductUI] asset load failed', err));
 
@@ -5459,6 +5555,61 @@ export function mountSkyPath(container, options = {}) {
     ctx.restore();
   }
 
+  /**
+   * The rune circle — see ABDUCT_RUNES/ABDUCT_RUNE_RING/ABDUCT_RING_SPIN_RATE/
+   * ABDUCT_SELECTED_BRIGHTNESS's own headers for the full ask. Runes are drawn
+   * plain (no backing shape — Luke: "put the runes onto the background
+   * without adding anything behind them"), always visible once interactive;
+   * the ring — two arcs with a gap centred on each of ABDUCT_RUNE_RING's two
+   * angles, plus four short radial tick marks at the gap edges, all rotated
+   * together as one unit — is drawn ONLY while `selected` ("the rings should
+   * only appear when there is a selection"). `selected` also gates the glow
+   * and brightness boost on the runes — Earth's own glow is applied at its
+   * own draw call, not here.
+   */
+  function abductDrawRunesAndRing(ctx, runesImg, selectedElapsed, selected) {
+    const { centerX: cx, centerY: cy, size } = ABDUCT_RUNES;
+
+    ctx.save();
+    if (selected) {
+      ctx.shadowColor = ABDUCT_GLOW_COLOR;
+      ctx.shadowBlur = ABDUCT_GLOW_BLUR;
+      ctx.filter = ABDUCT_SELECTED_BRIGHTNESS; // brightens the runes' OWN pixels — see that constant's header for why this is separate from the halo above
+    }
+    ctx.drawImage(runesImg, cx - size / 2, cy - size / 2, size, size);
+    ctx.restore();
+
+    if (!selected) return;
+
+    const spinAngle = selectedElapsed * ABDUCT_RING_SPIN_RATE * 2 * Math.PI;
+    const gapHalf = ((ABDUCT_RUNE_RING.gapDeg / 2) * Math.PI) / 180;
+    const gA = (135 * Math.PI) / 180 + ABDUCT_RUNE_RING.angleOffset;
+    const gB = (315 * Math.PI) / 180 + ABDUCT_RUNE_RING.angleOffset;
+    const r = ABDUCT_RUNE_RING.radius;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(spinAngle);
+    ctx.strokeStyle = '#33ff66';
+    ctx.lineWidth = ABDUCT_RUNE_RING.lineWidth;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, gA + gapHalf, gB - gapHalf);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, r, gB + gapHalf, gA + 2 * Math.PI - gapHalf);
+    ctx.stroke();
+    const half = ABDUCT_RUNE_RING.tickLen / 2;
+    for (const ang of [gA - gapHalf, gA + gapHalf, gB - gapHalf, gB + gapHalf]) {
+      const cos = Math.cos(ang);
+      const sin = Math.sin(ang);
+      ctx.beginPath();
+      ctx.moveTo(cos * (r - half), sin * (r - half));
+      ctx.lineTo(cos * (r + half), sin * (r + half));
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   /** Sizes/positions the (taller-than-its-viewport) canvas for the current window size — see this section's header for why the string is just a long fixed length. Cheap; called every frame rather than wired to a separate resize listener. */
   function abductLayout() {
     const vw = els.abductStage.clientWidth;
@@ -5476,26 +5627,43 @@ export function mountSkyPath(container, options = {}) {
     return { scale, cssLeft, startY, restY };
   }
 
-  /** Positions the placeholder team-box/confirm-button in real pixels — computed once the panel is at rest, from the same scale/offset abductLayout() just used, converting fixed panel-space rects into screen space. Percentages of #abductStage would drift while the canvas is mid-descent; see chrome.js's own comment. */
+  /** Positions the team name + its two cycling arrows in real pixels — computed once the panel is at rest, from the same scale/offset abductLayout() just used, converting fixed panel-space rects into screen space. Percentages of #abductStage would drift while the canvas is mid-descent; see chrome.js's own comment. */
   function abductPositionOverlayButtons(scale, cssLeft, restY) {
     const iface = abductFinalRect();
     const toScreen = (localX, localY) => ({
       x: cssLeft + localX * scale,
       y: restY + (ABDUCT_STRING_LEN + localY) * scale,
     });
-    const team = toScreen(iface.x + 40, iface.y + 25);
+    const teamX = iface.x + 40 + ABDUCT_TEAM_TEXT_OFFSET_X;
+    const teamY = iface.y + 25;
+    const team = toScreen(teamX, teamY);
     els.abductTeamBox.style.left = `${team.x}px`;
     els.abductTeamBox.style.top = `${team.y}px`;
-    els.abductTeamBox.style.width = `${180 * scale}px`;
-    els.abductTeamBox.style.height = `${50 * scale}px`;
-    els.abductTeamBox.style.fontSize = `${15 * scale}px`;
+    els.abductTeamBox.style.height = `${ABDUCT_TEAM_BOX_HEIGHT * scale}px`;
+    els.abductTeamBox.style.fontSize = `${ABDUCT_TEAM_FONT_SIZE * scale}px`;
 
-    const confirm = toScreen(iface.x + iface.w - 220, iface.y + iface.h - 70);
-    els.abductConfirmBtn.style.left = `${confirm.x}px`;
-    els.abductConfirmBtn.style.top = `${confirm.y}px`;
-    els.abductConfirmBtn.style.width = `${200 * scale}px`;
-    els.abductConfirmBtn.style.height = `${55 * scale}px`;
-    els.abductConfirmBtn.style.fontSize = `${15 * scale}px`;
+    const arrowSizeLocal = ABDUCT_ARROW.size * ABDUCT_TEAM_ARROW_SCALE;
+    const arrowSizePx = arrowSizeLocal * scale;
+    const arrowYLocal = teamY + (ABDUCT_TEAM_BOX_HEIGHT - arrowSizeLocal) / 2;
+    const leftXLocal = teamX - ABDUCT_TEAM_ARROW_GAP - arrowSizeLocal;
+    const left = toScreen(leftXLocal, arrowYLocal);
+    els.abductTeamLeft.style.left = `${left.x}px`;
+    els.abductTeamLeft.style.top = `${left.y}px`;
+    els.abductTeamLeft.style.width = `${arrowSizePx}px`;
+    els.abductTeamLeft.style.height = `${arrowSizePx}px`;
+
+    // The right arrow sits just after the team name's own REAL rendered
+    // width, measured from the DOM rather than guessed — "Team 12" and
+    // "Team 2" are different widths in a variable-width font, and the box
+    // itself is sized to its own text (no fixed width any more), so this
+    // is the only way the arrow actually sits right next to the text
+    // rather than at some average guessed offset.
+    const boxRect = els.abductTeamBox.getBoundingClientRect();
+    const gapPx = ABDUCT_TEAM_ARROW_GAP * scale;
+    els.abductTeamRight.style.left = `${boxRect.right + gapPx}px`;
+    els.abductTeamRight.style.top = `${team.y + (boxRect.height - arrowSizePx) / 2}px`;
+    els.abductTeamRight.style.width = `${arrowSizePx}px`;
+    els.abductTeamRight.style.height = `${arrowSizePx}px`;
   }
 
   function abductUpdateTeamBox() {
@@ -5540,8 +5708,40 @@ export function mountSkyPath(container, options = {}) {
       abductCtx.beginPath();
       abductCtx.rect(iface.x, iface.y, iface.w, iface.h);
       abductCtx.clip();
+      // Earth's own half of "make both the runes and the Earth glow subtly
+      // [only] when a target is selected" — the brightness boost the runes
+      // get too (see ABDUCT_SELECTED_BRIGHTNESS's header).
+      if (abductSelected) {
+        abductCtx.filter = ABDUCT_SELECTED_BRIGHTNESS;
+      }
       abductDrawEarthGlitch(abductCtx, abductImgs.earth, er, earthP);
       abductCtx.restore();
+
+      // Luke, 2026-09-20: "It should look the same colour and brightness as
+      // the rotating rings, but it's a lot dimmer." A shadowBlur cast FROM
+      // the earth image (the first attempt at this) is only ever as bright
+      // as the image's OWN edge pixels allow it to be, which is nothing
+      // like the ring's fully-opaque solid stroke — no amount of shadow
+      // alpha fixes that, since the shadow's source colour is the image,
+      // not a flat green. Matching "same colour and brightness" means
+      // literally reusing the ring's own stroke treatment — a solid
+      // ABDUCT_RUNE_RING-style glowing ring drawn along Earth's own visible
+      // edge — rather than trying to brighten a shadow that was never
+      // going to get there.
+      if (abductSelected) {
+        abductCtx.save();
+        abductCtx.beginPath();
+        abductCtx.rect(iface.x, iface.y, iface.w, iface.h); // same clip as Earth itself — cut by the border the same way
+        abductCtx.clip();
+        abductCtx.strokeStyle = '#33ff66';
+        abductCtx.lineWidth = ABDUCT_RUNE_RING.lineWidth + 1;
+        abductCtx.shadowColor = '#33ff66';
+        abductCtx.shadowBlur = ABDUCT_GLOW_BLUR;
+        abductCtx.beginPath();
+        abductCtx.arc(er.x + er.w / 2, er.y + er.h / 2, er.w / 2, 0, Math.PI * 2);
+        abductCtx.stroke();
+        abductCtx.restore();
+      }
 
       const target = abductTargets[abductIndex];
       let avatarRect = null; // hoisted so the selection-border block below (drawn on top of everything) can still reach it
@@ -5585,6 +5785,12 @@ export function mountSkyPath(container, options = {}) {
       abductCtx.drawImage(abductImgs.arrowLeft, left.x, left.y, left.w, left.h);
       abductCtx.drawImage(abductImgs.arrowRight, right.x, right.y, right.w, right.h);
 
+      // The rune circle — always visible once interactive (unlike the
+      // brackets/ship below, which only show once a target is selected).
+      // Spin and glow are gated on selection inside the function itself.
+      const ringElapsed = (revealNow - abductShipCycleStartedAt) / 1000;
+      abductDrawRunesAndRing(abductCtx, abductImgs.runes, ringElapsed, abductSelected);
+
       // Confirmation-dynamic highlight + ship loop — see this section's
       // "confirmation dynamic" header. Drawn last so both sit on top of the
       // avatar/arrows already drawn this frame, not under them.
@@ -5625,7 +5831,8 @@ export function mountSkyPath(container, options = {}) {
           abductRevealStartedAt = now;
           abductEarthRevealStartedAt = now; // see its own declaration — set once here, never reset by arrow presses
           els.abductTeamBox.style.visibility = 'visible';
-          els.abductConfirmBtn.style.visibility = 'visible';
+          els.abductTeamLeft.style.visibility = 'visible';
+          els.abductTeamRight.style.visibility = 'visible';
         }
       } else {
         abductDraw(abductGrowthTimeline().total, now);
@@ -5645,6 +5852,31 @@ export function mountSkyPath(container, options = {}) {
     abductIndex = (abductIndex + dir + abductTargets.length) % abductTargets.length;
     abductRevealStartedAt = performance.now(); // always restarts, interrupting any reveal in progress — see this section's header
     abductSelected = false; // Luke: "Clicking an arrow to move to the next target will also deselect."
+    abductUpdateTeamBox();
+  }
+
+  /**
+   * The team-name arrows — Luke, 2026-09-20: "it needs arrows on either
+   * side for cycling through teams." Cycles to the first target belonging
+   * to the NEXT (or previous) distinct team present in `abductTargets`
+   * (teams ordered by first appearance — there's no other natural order,
+   * since a team is just whatever `groupId`s happen to be in the list),
+   * rather than a separate "current team" concept of its own — there's
+   * only ever one real notion of "current" here, the target the avatar/tag/
+   * arrows are already showing. Same reset-on-change behaviour as
+   * abductStep, since this changes the current target exactly the same way.
+   * A no-op if every target is already on the same team — nothing to
+   * cycle to.
+   */
+  function abductStepTeam(dir) {
+    if (!abductAnim || abductAnim.phase !== 'interactive' || abductTargets.length === 0) return;
+    const teams = [...new Set(abductTargets.map((t) => t.groupId))];
+    if (teams.length <= 1) return;
+    const curTeamIdx = teams.indexOf(abductTargets[abductIndex].groupId);
+    const nextTeam = teams[(curTeamIdx + dir + teams.length) % teams.length];
+    abductIndex = abductTargets.findIndex((t) => t.groupId === nextTeam);
+    abductRevealStartedAt = performance.now();
+    abductSelected = false;
     abductUpdateTeamBox();
   }
 
@@ -5671,7 +5903,8 @@ export function mountSkyPath(container, options = {}) {
     abductIndex = 0;
     abductSelected = false;
     els.abductTeamBox.style.visibility = 'hidden';
-    els.abductConfirmBtn.style.visibility = 'hidden';
+    els.abductTeamLeft.style.visibility = 'hidden';
+    els.abductTeamRight.style.visibility = 'hidden';
     abductUpdateTeamBox();
     els.abductCanvas.width = ABDUCT_PANEL_SIZE.w;
     els.abductCanvas.height = ABDUCT_STRING_LEN + ABDUCT_PANEL_SIZE.h;
@@ -6370,15 +6603,15 @@ export function mountSkyPath(container, options = {}) {
       })
     : null;
 
-  // Three generations of `?abductTune=1` panel have now been through this
+  // Four generations of `?abductTune=1` panel have now been through this
   // same cycle and been removed once Luke logged final numbers: the
   // target-cluster/Earth placement tuner (see ABDUCT_TARGET_OFFSET/
   // ABDUCT_EARTH), the confirmation-dynamic's ship timing/path tuner (see
   // ABDUCT_SHIP_POSITION_DURATION/ABDUCT_SHIP_GAP_DURATION/
-  // ABDUCT_SHIP_PATH_ADJUST), and this one, the select-bracket size/gap
-  // tuner (see ABDUCT_SELECT_BRACKET). The flag is free for a fourth if a
-  // future abduction-UI pass needs one — see git history for any of the
-  // three if a look back at how it was tuned live would help.
+  // ABDUCT_SHIP_PATH_ADJUST), the select-bracket size/gap tuner (see
+  // ABDUCT_SELECT_BRACKET), and the rune circle's own position/size/ring
+  // geometry tuner (see ABDUCT_RUNES/ABDUCT_RUNE_RING). The flag is free
+  // for a fifth if a future abduction-UI pass needs one.
 
   // ---------------------------------------------------------------- controls
 
@@ -6400,7 +6633,8 @@ export function mountSkyPath(container, options = {}) {
     abductStage: $('abductStage'),
     abductCanvas: $('abductCanvas'),
     abductTeamBox: $('abductTeamBox'),
-    abductConfirmBtn: $('abductConfirmBtn'),
+    abductTeamLeft: $('abductTeamLeft'),
+    abductTeamRight: $('abductTeamRight'),
     abductCancel: $('abductCancel'),
     abductPrompt: $('abductPrompt'),
     abductPromptText: $('abductPromptText'),
@@ -6796,8 +7030,8 @@ export function mountSkyPath(container, options = {}) {
   els.abductGo?.addEventListener('click', () => resolveAbductPrompt('go'));
   // The picker itself — arrows are drawn ON the canvas (real hit-testing
   // against their own rects, converted from screen space into the tall
-  // canvas's own internal pixel space); the team box/confirm button are
-  // plain DOM elements laid over it — see abductPositionOverlayButtons().
+  // canvas's own internal pixel space); the team box is a plain DOM element
+  // laid over it — see abductPositionOverlayButtons().
   els.abductCanvas?.addEventListener('click', (e) => {
     const rect = els.abductCanvas.getBoundingClientRect();
     const scaleX = els.abductCanvas.width / rect.width;
@@ -6814,19 +7048,33 @@ export function mountSkyPath(container, options = {}) {
     const target = abductTargets[abductIndex];
     if (target && abductImgs) {
       const avatarImg = abductAvatarImg(target);
-      if (abductPointInRect(x, y, abductAvatarRect(avatarImg))) abductToggleSelect();
+      if (abductPointInRect(x, y, abductAvatarRect(avatarImg))) {
+        abductToggleSelect();
+        return;
+      }
+    }
+    // The rune circle IS the confirm button now — Luke, 2026-09-20: "Wire
+    // the runes up as the actual confirm button," replacing the old plain
+    // placeholder #abductConfirmBtn (removed earlier the same day). Only
+    // live while abductSelected — the ring/glow that make the circle look
+    // "armed" only show while selected too (see abductDrawRunesAndRing), so
+    // this only accepts a click exactly when it visually invites one.
+    // Hit region is a plain circle at the runes' own centre, out to the
+    // ring's own radius — everything the ring visually encloses.
+    if (abductSelected && target) {
+      const dx = x - ABDUCT_RUNES.centerX;
+      const dy = y - ABDUCT_RUNES.centerY;
+      if (Math.hypot(dx, dy) <= ABDUCT_RUNE_RING.radius) chooseAbductTarget(target);
     }
   });
-  els.abductConfirmBtn?.addEventListener('click', () => {
-    if (!abductAnim || abductAnim.phase !== 'interactive') return;
-    const t = abductTargets[abductIndex];
-    if (t) chooseAbductTarget(t);
-  });
-  // Switching teams isn't built yet — Luke: "Switch Team can be simply
-  // clicking on the team name window, for now" describes the INTENDED
-  // future behaviour; per his own "the whole process doesn't have to be
-  // complete," this is a placeholder with no click behaviour yet.
-  els.abductTeamBox?.addEventListener('click', () => {});
+  // Switching teams — Luke originally floated "Switch Team can be simply
+  // clicking on the team name window, for now," but then asked for actual
+  // arrows either side of the name instead (2026-09-20); those are the
+  // real control now (see abductStepTeam), so the name itself stays a
+  // plain, non-interactive label rather than also doing the same thing a
+  // second way.
+  els.abductTeamLeft?.addEventListener('click', () => abductStepTeam(-1));
+  els.abductTeamRight?.addEventListener('click', () => abductStepTeam(1));
 
   // Hold-to-advance: hold #advance to walk, release to freeze in place —
   // Luke, 2026-09-06: "they will also have to move their card forward by

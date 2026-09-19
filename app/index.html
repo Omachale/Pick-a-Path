@@ -9,6 +9,14 @@
   -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
   <title>Sky Path</title>
+  <!-- Orbitron — Luke, 2026-09-20, for the abduction UI's team-name label
+       (see chrome.js's #abductTeamBox). The only web font this project
+       loads; everywhere else uses system-ui on purpose. Preconnect first
+       since this is the one place a slow font fetch could show as a flash
+       of the fallback font on an otherwise-instant-loading page. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap" rel="stylesheet" />
 </head>
 <body>
   <div id="root"></div>

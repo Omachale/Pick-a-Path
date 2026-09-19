@@ -57,19 +57,31 @@ export const SKY_PATH_CHROME = `
      skyPath.js's "abduction targeting" / "abduction cardboard UI" sections.
      #abductMenu: the attacker's target picker, opened by #useAbduct — the
      cardboard panel lowers into #abductStage, which skyPath.js draws
-     avatar/name-tag/arrows onto directly; #abductTeamBox and
-     #abductConfirmBtn are plain placeholder DOM elements laid over it
-     (Luke: "include a placeholder team choice window... a confirmation
-     button" — deliberately not cardboard-rendered yet). #abductCancel
-     sits outside the panel so it's reachable regardless of panel size.
+     avatar/name-tag/arrows/runes onto directly; #abductTeamBox is a plain
+     text label laid over it (no background/border — Luke, 2026-09-20:
+     "remove the team name area and replace it with the team name written
+     in the same green (#33ff66) and bold Orbitron font. No background
+     needed"), with #abductTeamLeft/#abductTeamRight either side of it —
+     "it needs arrows on either side for cycling through teams" — wired to
+     abductStepTeam() in skyPath.js. The old
+     placeholder #abductConfirmBtn (plain white button) was removed
+     2026-09-20 — Luke: "Time for the confirm button... remove the existing
+     confirm button" — in favour of the rune-circle drawn directly on the
+     canvas (see skyPath.js's ABDUCT_RUNES/abductDrawRunesAndRing), which is
+     now the real confirm control ("wire the runes up as the actual confirm
+     button" — same day, once he'd seen the visual): a canvas click inside
+     the ring's own radius, while a target is selected, calls
+     chooseAbductTarget() directly. #abductCancel sits outside the panel so
+     it's reachable regardless of panel size.
      #abductPrompt: the TARGET's Resist / Go choice, shown when the aliens
      arrive on their next island — unrelated to the picker, unchanged.
      #notice: a short self-hiding message. All hidden until needed. -->
 <div id="abductMenu" class="hidden">
   <div id="abductStage">
     <canvas id="abductCanvas"></canvas>
-    <button id="abductTeamBox" title="Switch team — not built yet">Team –</button>
-    <button id="abductConfirmBtn">Confirm</button>
+    <button id="abductTeamLeft" class="abductTeamArrow" title="Previous team" aria-label="Previous team"></button>
+    <div id="abductTeamBox">Team –</div>
+    <button id="abductTeamRight" class="abductTeamArrow" title="Next team" aria-label="Next team"></button>
   </div>
   <button id="abductCancel" title="Cancel">✕</button>
 </div>
@@ -311,8 +323,8 @@ export const SKY_PATH_CSS = `
 
 /* The cardboard target picker (2026-09-18) — see skyPath.js's "abduction
    cardboard UI" section for what draws onto #abductCanvas and how
-   #abductTeamBox/#abductConfirmBtn are positioned (percentage-based, so
-   they scale with the canvas without a resize listener). Nearly opaque,
+   #abductTeamBox is positioned (in JS pixels, not CSS percentages — see its
+   own rule below for why). Nearly opaque,
    not blurred glass like #abductPrompt — Luke: this should be "in front
    of anything else on the screen," reading as a real object blocking the
    view, not a dialog floating over it. */
@@ -333,20 +345,44 @@ export const SKY_PATH_CSS = `
    moment it isn't at rest. */
 .skypath-surface #abductStage { position: absolute; inset: 0; overflow: hidden; }
 .skypath-surface #abductCanvas { position: absolute; top: 0; }
-.skypath-surface #abductTeamBox,
-.skypath-surface #abductConfirmBtn {
+/* Luke, 2026-09-20: "remove the team name area and replace it with the
+   team name written in the same green (#33ff66) and bold Orbitron font. No
+   background needed" — was a boxed white/red button (matching the old
+   placeholder confirm button's own styling); now plain text laid straight
+   over the cardboard, same green/font as everything else selected in this
+   UI (the rune ring, Earth's glow). A plain <div> now, not a <button> — the
+   arrows either side are the real "switch team" control (see
+   abductStepTeam in skyPath.js), so the name itself has nothing to click. */
+.skypath-surface #abductTeamBox {
   position: absolute;
   visibility: hidden; /* shown once the picker is actually interactive — see abductTick() */
-  border: 2px solid #7a2e2e;
-  border-radius: 8px;
-  background: #f4f7fa;
-  color: #7a2e2e;
-  font: 700 15px/1.2 system-ui, sans-serif;
-  cursor: pointer;
+  color: #33ff66;
+  font: 700 15px/1.2 'Orbitron', system-ui, sans-serif; /* font-size overridden per-frame in JS (ABDUCT_TEAM_FONT_SIZE) */
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  white-space: nowrap; /* sized to its own text (no fixed width) — see abductPositionOverlayButtons's own comment on why */
 }
+/* The team-cycling arrows — Luke: "it needs arrows on either side for
+   cycling through teams... a smaller version (30% size) of the arrows [used
+   for target avatars]." Same source art as those (see ABDUCT_ARROW_LEFT_SRC/
+   ABDUCT_ARROW_RIGHT_SRC), referenced directly as a CSS background image
+   here rather than drawn on the canvas — these live in the DOM, positioned
+   in JS pixels exactly like #abductTeamBox, since they need their own click
+   targets independent of the canvas's own hit-testing. */
+.skypath-surface .abductTeamArrow {
+  position: absolute;
+  visibility: hidden; /* shown once the picker is actually interactive — see abductTick() */
+  border: 0;
+  background-color: transparent;
+  background-position: center;
+  background-size: contain;
+  background-repeat: no-repeat;
+  padding: 0;
+  cursor: pointer;
+}
+.skypath-surface #abductTeamLeft { background-image: url('/textures/alien-arrow-left.png'); }
+.skypath-surface #abductTeamRight { background-image: url('/textures/alien-arrow-right.png'); }
 .skypath-surface #abductCancel {
   position: absolute;
   top: calc(env(safe-area-inset-top, 0px) + 10px);

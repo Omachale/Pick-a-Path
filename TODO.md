@@ -11,6 +11,16 @@
 
 ## Completed
 
+### Blow mechanic: merged into main 2026-09-19
+The standalone prototype below (built by an autonomous agent pass from
+`BLOW_SPEC.md`) has been reviewed, had a controls-visibility fix added (a
+collapse arrow on the demo panel — Luke: "the controls cover half the screen
+so I can't see the effects properly"), and merged into `main`. The agent's
+own worktree/branch have been deleted; the files now live at their normal
+paths in `prototype-threejs/` as described below. Still not integrated into
+the real game (turn logic, networking, the Cavern's actual consequence) —
+see that entry's own "Not done, left for later" line.
+
 ### Blow mechanic: standalone Rapier prototype (island, gust, recovery, off-edge event)
 - **Status**: ✓ Complete 2026-09-19, built from a self-contained spec (`BLOW_SPEC.md`, repo root) rather than an in-conversation request — see that file for the exact decisions this was built to and what's explicitly out of scope (turn logic, multiplayer networking, final art, the Cavern's actual game-over consequence).
 - **What it is**: a callable physics module for the "blow another player toward the island's edge" minigame — a flat circular island, one or more player cards, a `blow(handle, { direction, strength })` that gusts a card per `blow-trial.js`'s tuned multi-puff approach, and two distinct outcomes once the physics settles: landed upright somewhere on the island, or went off the edge.
