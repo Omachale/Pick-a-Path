@@ -73,8 +73,12 @@ export const SKY_PATH_CHROME = `
      the ring's own radius, while a target is selected, calls
      chooseAbductTarget() directly. #abductCancel sits outside the panel so
      it's reachable regardless of panel size.
-     #abductPrompt: the TARGET's Resist / Go choice, shown when the aliens
-     arrive on their next island — unrelated to the picker, unchanged.
+     #abductDefenseStage: the TARGET's defence screen, shown when the
+     aliens arrive on their next island — replaced the old plain Resist/Go
+     dialog (2026-09-23). Empty here on purpose: abductDefense.js builds
+     its own DOM into it (cardboard-track panel, keyboard, avatar, ship)
+     the same way the keyboard test harness does, rather than a static
+     template — see that file's own header for why.
      #notice: a short self-hiding message. All hidden until needed. -->
 <div id="abductMenu" class="hidden">
   <div id="abductStage">
@@ -85,15 +89,7 @@ export const SKY_PATH_CHROME = `
   </div>
   <button id="abductCancel" title="Cancel">✕</button>
 </div>
-<div id="abductPrompt" class="hidden">
-  <div class="panel">
-    <h3 id="abductPromptText">The aliens have come for you!</h3>
-    <div class="row">
-      <button id="abductResist">Resist</button>
-      <button id="abductGo" class="secondary">Go</button>
-    </div>
-  </div>
-</div>
+<div id="abductDefenseStage"></div>
 <div id="notice" class="hidden"></div>
 <!-- The temple-doors ending: opacity driven directly by updateTempleEntry()
      in skyPath.js, frame by frame — no CSS transition here, since the fade's
@@ -271,55 +267,19 @@ export const SKY_PATH_CSS = `
 }
 
 
-/* #abductPrompt keeps the original dimmed-glass dialog treatment (same as
-   #charSelect) — it's still a plain Resist/Go choice, unrelated to the
-   cardboard picker below. */
-.skypath-surface #abductPrompt {
+/* #abductDefenseStage — replaces the old #abductPrompt dialog (2026-09-23).
+   Same "nearly opaque, reads as a real object" treatment as #abductMenu
+   below, for the same reason. Empty/inert until abductDefense.js builds
+   into it; display is toggled by that module, not by a .hidden class, so
+   it can run its own lift-away animation before disappearing. */
+.skypath-surface #abductDefenseStage {
   position: absolute;
   inset: 0;
   z-index: 30;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: rgba(18, 33, 47, 0.72);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  overflow: hidden;
+  display: none;
 }
-.skypath-surface #abductPrompt.hidden,
 .skypath-surface #notice.hidden { display: none; }
-.skypath-surface #abductPrompt .panel {
-  width: min(360px, 100%);
-  max-height: 100%;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 18px;
-  border-radius: 16px;
-  background: var(--paper);
-  color: var(--ink);
-  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.45);
-}
-.skypath-surface #abductPrompt h3 {
-  margin: 0 0 4px;
-  font: 700 17px/1.3 system-ui, sans-serif;
-  text-align: center;
-}
-.skypath-surface #abductPrompt button {
-  min-height: 48px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 12px;
-  font: 700 15px/1.2 system-ui, sans-serif;
-  color: var(--ink);
-  background: #ffe9b8;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-}
-.skypath-surface #abductPrompt button.secondary { background: #cddbe8; }
-.skypath-surface #abductPrompt button:active { transform: translateY(1px); }
-.skypath-surface #abductPrompt .row { display: flex; gap: 10px; }
-.skypath-surface #abductPrompt .row button { flex: 1 1 0; text-align: center; min-height: 56px; }
 
 /* The cardboard target picker (2026-09-18) — see skyPath.js's "abduction
    cardboard UI" section for what draws onto #abductCanvas and how

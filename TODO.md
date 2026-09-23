@@ -242,6 +242,30 @@ see that entry's own "Not done, left for later" line.
 
 ## Pending
 
+### Fullscreen — DISABLED for playtesting (2026-09-24)
+
+**`armBestEffortFullscreen()` is turned off.** Luke: "it's very time-consuming playtesting things with the full-screen code, meaning I have to constantly exit full-screen to change tabs." Both the call and its import are commented out in `app/src/main.jsx` — nothing else touched, no other file changed.
+
+**To re-enable** (when Luke says something like "re-enable fullscreen mode"): in `app/src/main.jsx`, uncomment the `import { armBestEffortFullscreen } from './fullscreen.js';` line and the `armBestEffortFullscreen();` call right below it. That's the whole change, in both directions — `fullscreen.js` itself was never touched, only whether `main.jsx` calls it.
+
+### Orientation guard — DISABLED for playtesting (2026-09-25)
+
+**`<OrientationGuard>` is not wrapping the app.** Luke: the "Rotate your device" prompt (shown whenever the viewport is portrait — see `OrientationGuard.jsx`) "is getting in the way of my ability to check things on your browser," since a normal desktop browser window is portrait-ish/narrow often enough to trigger it while testing. In `app/src/main.jsx`, both the import and the `<OrientationGuard>`/`</OrientationGuard>` wrapper tags around `<App />` are commented out — `<App />` renders directly. Nothing in `OrientationGuard.jsx` itself was touched.
+
+**To re-enable** (when Luke says something like "re-enable the orientation guard/rotate prompt"): in `app/src/main.jsx`, uncomment the `import OrientationGuard from './OrientationGuard.jsx';` line and the two `<OrientationGuard>`/`</OrientationGuard>` tags around `<App />`. That's the whole change, in both directions.
+
+### Abduction defence keyboard — numeral art (2026-09-21) — INCOMPLETE, blocked on source art
+
+**Status: numbers are very much incomplete.** The keyboard itself (letters, backspace, space, the cardboard-panel overlay, the "Go"/"Replay" descent animation — `app/src/keyboard/CardboardKeyboard.jsx`, `KeyboardTestHarness.jsx`, `?debugKeyboard=1`) is built and working. The **digit cutout art for the output-text display** (0–9, matching the style of the existing `app/public/textures/letters/upper-v2`/`lower` letter set) is not — every attempt so far has been rejected on review, most recently for cutting the bottoms off several numerals plus other unspecified small issues. **All digit PNG attempts have been deleted** (see below); nothing usable currently exists. Numbers must fall back to plain text in the output display until this is picked up again.
+
+**The real error, so it isn't repeated:** the letters this format is meant to match (`upper-v2/A.png` etc.) have a **solid, fully-opaque alpha channel** — verified directly by extracting and viewing `A.png`'s own alpha channel, which is a plain filled letterform with no internal holes. The visible corrugated light/dark stripe pattern in these assets is *colour* painted onto that solid shape, not the transparency itself. My extraction method had this backwards: it derived alpha directly from per-pixel darkness (dark stripe = opaque, light stripe = transparent), which **perforated every digit with a row of holes** matching the light stripes of the corrugated texture, instead of producing a solid glyph. This was caught and fixed partway through this session (fix: threshold loosely, then `scipy.ndimage.binary_closing` with a kernel sized between the stripe period and the glyph stroke width to bridge the light-stripe gaps into one solid silhouette, *then* use that as the alpha mask — being careful not to also bridge across a digit's genuine enclosed counter, e.g. the holes in 8/9/0, which need to stay open). **Any future extraction from a photographed/rendered source in this cardboard-cutout style must build the alpha as a filled silhouette first, never per-pixel from raw luminance.**
+
+**What was still wrong even after that fix:** Luke's review of the last batch (extracted from "Try again.jpg", a plain-white-backdrop photo of the full 0–9 card) found several numerals with their bottoms cut off, plus other small issues not fully diagnosed before work stopped. Not root-caused — candidates worth checking first when this resumes: the crop bounds used to exclude a noisy speckle band along the bottom edge of that particular photo may have clipped into the glyphs themselves rather than stopping just above them (the crop was eyeballed against a downscaled preview, not measured against the actual glyph extents); worth verifying per-digit crop rectangles against the source pixels directly before batch-saving all 10, rather than only checking the final composited preview.
+
+**The broader pattern Luke flagged**: extracting individual assets from a supplied photo has gone poorly multiple times before this session, not just here — the alphabet set's clean result (genuine pre-existing alpha channel, no extraction needed) was likely an anomaly rather than evidence the method has improved. Treat "extract N things from one photo" as a task to be more skeptical of, and confirm a single extracted sample looks right before batch-processing the rest, rather than presenting a full batch as finished.
+
+**Next steps when revisited**: ideally get a source with genuine alpha transparency (ask what actually produced `upper-v2`'s real alpha — a background-removal step Luke may be able to repeat on new numeral art, per this session's discussion). If working from a flat photo/render again, verify one extracted digit against its exact source crop before doing the rest, and get Luke's sign-off on that single digit first.
+
 ### Stage 2 — the Lava Cavern (design agreed 2026-09-08, performance spike built 2026-09-09)
 
 - **Status**: The **performance spike is built and playable** at `?cavern=1`. Design is agreed down to the level below; the two things still genuinely open are what sits at the centre and how a question reaches a player. The cross-team visibility question has been reality-checked and an approach chosen, but nothing networked is built.

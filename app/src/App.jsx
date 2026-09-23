@@ -33,6 +33,7 @@ import RoundResults from './lobby/RoundResults.jsx';
 import SkyPath from './skypath/SkyPath.jsx';
 import LavaCavern from './cavern/LavaCavern.jsx';
 import TeacherDashboard from './lobby/TeacherDashboard.jsx';
+import KeyboardTestHarness from './keyboard/KeyboardTestHarness.jsx';
 
 const params = new URLSearchParams(location.search);
 
@@ -81,6 +82,7 @@ export default function App() {
 
   if (params.get('cavern') === '1') return <SoloLavaCavern />;
   if (params.get('solo') === '1') return <SoloSkyPath />;
+  if (params.get('debugKeyboard') === '1') return <KeyboardTestHarness />;
 
   if (teacherView) return <TeacherDashboard onExit={() => setTeacherView(false)} />;
 

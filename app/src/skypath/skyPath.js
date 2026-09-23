@@ -34,6 +34,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
 import { attachCrowdHarness } from './crowdHarness.js';
 import { buildAbduction } from './alienAbduction.js';
+import { createAbductDefense } from './abductDefense.js';
 import { attachBgTuner } from './bgTuner.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildIsland } from './islandGen.js';
@@ -5093,7 +5094,8 @@ export function mountSkyPath(container, options = {}) {
   // target that somehow can't be abducted when the request lands reports
   // 'fizzled' straight back rather than silently swallowing it.
   let pendingAbduction = null; // { byToken, byName } — armed on this device until its next arrival
-  let abductPromptOpen = false; // the Resist/Go choice is up — nothing else may move this player
+  let abductPromptOpen = false; // the defence screen is up — nothing else may move this player
+  let abductDefense = null; // created once `els.abductDefenseStage` exists — see the els block below
   let noticeTimer = null;
 
   function showNotice(text, ms = 4000) {
@@ -5952,10 +5954,14 @@ export function mountSkyPath(container, options = {}) {
 
   /** Called from onArrivedAtFork(): the armed abduction fires now, as a choice. */
   function triggerPendingAbduction() {
-    if (!pendingAbduction || abductPromptOpen) return;
+    if (!pendingAbduction || abductPromptOpen || !els.abductDefenseStage) return;
     abductPromptOpen = true;
-    if (els.abductPromptText) els.abductPromptText.textContent = `${pendingAbduction.byName} has sent the aliens for you!`;
-    els.abductPrompt?.classList.remove('hidden');
+    const rosterEntry = ROSTER.find((c) => c.key === characterKey) ?? ROSTER[0];
+    abductDefense.open({
+      avatarSrc: `/textures/${rosterEntry.tex}.${rosterEntry.ext}`,
+      onResist: () => resolveAbductPrompt('resist'),
+      onTimeout: () => resolveAbductPrompt('go'),
+    });
     refreshUI();
   }
 
@@ -5964,14 +5970,12 @@ export function mountSkyPath(container, options = {}) {
     const { byToken } = pendingAbduction;
     pendingAbduction = null;
     abductPromptOpen = false;
-    els.abductPrompt?.classList.add('hidden');
     if (choice === 'go') {
       startAbduction(); // the existing sequence, networked to teammates via `abducting`
       onGameEvent?.('abduct-result', { toToken: byToken, outcome: 'abducted', targetName: localDisplayName });
     } else {
-      // Resist — Luke: "We'll add that feature next." For now resisting
-      // simply calls the aliens off; the real resist mechanic replaces
-      // this branch.
+      // Resist — the defence screen already confirmed the typed word
+      // matched before calling this; nothing left to check here.
       onGameEvent?.('abduct-result', { toToken: byToken, outcome: 'resisted', targetName: localDisplayName });
     }
     refreshUI();
@@ -6636,13 +6640,12 @@ export function mountSkyPath(container, options = {}) {
     abductTeamLeft: $('abductTeamLeft'),
     abductTeamRight: $('abductTeamRight'),
     abductCancel: $('abductCancel'),
-    abductPrompt: $('abductPrompt'),
-    abductPromptText: $('abductPromptText'),
-    abductResist: $('abductResist'),
-    abductGo: $('abductGo'),
+    abductDefenseStage: $('abductDefenseStage'),
     notice: $('notice'),
     templeFade: $('templeFade'), // opacity driven by updateTempleEntry()
   };
+
+  if (els.abductDefenseStage) abductDefense = createAbductDefense(els.abductDefenseStage);
 
   // The role button always shows the current role. In a round it is assigned
   // by the session layer and the button is inert — disabled rather than
@@ -6797,6 +6800,15 @@ export function mountSkyPath(container, options = {}) {
         { token: 'debug-2', displayName: 'Milo', groupId: 2, island: 4, characterKey: 'monkey', colorHex: '#e74c3c' },
       ];
       resolvePickupClaim(myToken ?? 'me');
+      // Fires the defence screen directly on THIS device, standing in for
+      // the real flow (another team's attacker targets this player, who
+      // then reaches their next island) — solo play has no second device
+      // to be the attacker. Console-only, same spirit as
+      // window.__debugAbductTargets above.
+      window.__debugTriggerDefense = () => {
+        pendingAbduction = { byToken: 'debug-attacker', byName: 'A debug attacker' };
+        triggerPendingAbduction();
+      };
     }
     // Luke, 2026-09-13: "the guide should have no physical presence in the
     // game at any point... with one guide and three players [every device]
@@ -6999,7 +7011,7 @@ export function mountSkyPath(container, options = {}) {
     pickupClaimedBy = null;
     pendingAbduction = null;
     abductPromptOpen = false;
-    els.abductPrompt?.classList.add('hidden');
+    abductDefense?.forceClose();
     closeAbductMenu();
     startJourney();
     refreshUI();
@@ -7026,8 +7038,6 @@ export function mountSkyPath(container, options = {}) {
   // targeting" section.
   els.useAbduct?.addEventListener('click', () => openAbductMenu());
   els.abductCancel?.addEventListener('click', () => closeAbductMenu());
-  els.abductResist?.addEventListener('click', () => resolveAbductPrompt('resist'));
-  els.abductGo?.addEventListener('click', () => resolveAbductPrompt('go'));
   // The picker itself — arrows are drawn ON the canvas (real hit-testing
   // against their own rects, converted from screen space into the tall
   // canvas's own internal pixel space); the team box is a plain DOM element
@@ -8083,6 +8093,7 @@ export function mountSkyPath(container, options = {}) {
       clearTimeout(noticeTimer);
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (abductRafId !== null) cancelAnimationFrame(abductRafId);
+      abductDefense?.dispose();
       harness?.dispose();
       bgTuner?.dispose();
       rescueTuner?.dispose();
