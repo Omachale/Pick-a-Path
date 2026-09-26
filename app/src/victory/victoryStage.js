@@ -275,6 +275,12 @@ export function mountVictoryStage(container, options = {}) {
   } = options;
   const { roster, guideToken } = round;
 
+  // Maximum 6 total players (5 regular + 1 guide)
+  if (roster.length > 5) {
+    console.warn(`Victory stage: roster has ${roster.length} players, exceeds maximum of 5 (plus guide). Capping at 5.`);
+    roster.length = 5;
+  }
+
   // Ensure both score fonts are loaded before rendering
   document.fonts?.load("bold 120px 'Orbitron'");
   document.fonts?.load("bold 120px 'Sue Ellen Francisco'");
@@ -600,7 +606,7 @@ export function mountVictoryStage(container, options = {}) {
         // Lock to the accumulated value up to and including this stage
         displayValue = accumulatedValueThroughStage(seat.breakdown, stageIndex);
       }
-      const scoreInt = Math.floor(displayValue);
+      const scoreInt = Math.round(displayValue);
       if (scoreInt > 0 && scoreInt !== seat.lastScoreInt) {
         seat.lastScoreInt = scoreInt;
         if (seat.scoreMesh) seat.pedestalRoot.remove(seat.scoreMesh);
