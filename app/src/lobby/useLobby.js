@@ -148,6 +148,18 @@ export function useLobby(sessionCode) {
   const [participants, setParticipants] = useState([]); // flat presence entries, refreshed on every sync
   const [roundPhase, setRoundPhase] = useState('lobby'); // 'lobby' | 'assigning' | 'playing' | 'results'
   const [round, setRound] = useState(null); // { roundId, forks, role, guideToken, result }
+  // Every PLAYER token's own `round-ended` result for the CURRENT round,
+  // keyed by token — see the `round-ended` handler below. Unlike `round`'s
+  // own `.result` (only ever this device's own outcome, per that handler's
+  // header comment), this is aggregated the same passive way islandsRef/
+  // charByTokenRef already are: every device sees every `round-ended`
+  // broadcast regardless of whose it is, so this fills in identically on
+  // every device in the group — including the guide's, which has no
+  // `round-ended` of its own to trigger the old per-device transition at
+  // all. Reset to {} on this device's own `game-started` (a fresh round
+  // means fresh results), so a stale entry can never satisfy "the whole
+  // team is done" for a round that hasn't started yet.
+  const [roundResultsByToken, setRoundResultsByToken] = useState({});
 
   const channelRef = useRef(null);
   const forkChoiceHandlerRef = useRef(null);
@@ -284,6 +296,7 @@ export function useLobby(sessionCode) {
         guideByGroupRef.current.set(payload.groupId, payload.guideToken);
         for (const tok of payload.roster ?? []) islandsRef.current.set(tok, { forkIndex: 1, out: false });
         if (payload.groupId !== myGroupIdRef.current) return; // addressed to a different group
+        setRoundResultsByToken({}); // fresh round, fresh scoreboard — see this state's own comment above
         transition('playing', {
           roundId: payload.roundId,
           forks: payload.forks,
@@ -314,6 +327,13 @@ export function useLobby(sessionCode) {
         const sameGroup = myGroupIdRef.current !== null && sender.groupId === myGroupIdRef.current;
         switch (payload.kind) {
           case 'pickup-claim':
+          // The abduction-defence handshake between a targeted player and
+          // their own team's guide (see skyPath.js's "defence queue"
+          // section) — team-internal, and every teammate needs start/end
+          // too, for the "[Guide] is helping [Defender]" message.
+          case 'defence-request':
+          case 'defence-start':
+          case 'defence-end':
             if (!sameGroup) return;
             break;
           case 'abduct-target': // an attacker (any team) naming THIS device as their target
@@ -322,6 +342,18 @@ export function useLobby(sessionCode) {
           case 'abduct-result': // the target's device reporting back to THIS device, the attacker
             if (payload.toToken !== token) return;
             break;
+          // The guide's own chosen avatar, for the victory stage only — see
+          // skyPath.js's `finishCharacterSelect` for why this is a
+          // dedicated event rather than an ordinary player-state ping
+          // (that path is what used to leak a phantom guide rig into a
+          // live player's own game). Stored straight into the SAME
+          // session-wide table `getCharacter`/`getAbductionTargets` already
+          // read for everyone else — nothing in the live game needs to
+          // react to this, so it never reaches gameEventHandlerRef below.
+          case 'guide-character':
+            if (!sameGroup) return;
+            charByTokenRef.current.set(payload.token, { characterKey: payload.characterKey, colorHex: payload.colorHex });
+            return;
           default:
             return; // unknown kind — ignore rather than hand the game something it doesn't understand
         }
@@ -371,6 +403,14 @@ export function useLobby(sessionCode) {
         // — see islandsRef.
         const cur = islandsRef.current.get(payload.token);
         islandsRef.current.set(payload.token, { forkIndex: cur?.forkIndex ?? 1, out: true });
+        // The team scoreboard (see roundResultsByToken's own comment above)
+        // — filled in for EVERY reporting token, unconditionally, unlike the
+        // per-device phase transition below which only ever reacts to this
+        // device's own. Guarded on roundId so a late report from a round
+        // this device has already moved on from can't pollute a fresh one.
+        if (roundStateRef.current.round?.roundId === payload.roundId) {
+          setRoundResultsByToken((prev) => ({ ...prev, [payload.token]: payload.result }));
+        }
         // Luke, 2026-09-12: "when one player fell, all players got the same
         // ... screen." Same root cause as the fork-choice bug — `roundId`
         // is shared by the whole group (everyone in it started together),
@@ -477,6 +517,15 @@ export function useLobby(sessionCode) {
       });
   }, []);
 
+  /** A participant's lobby display name, or null — read live, so a late join/rename is picked up. */
+  const getDisplayName = useCallback((tok) => participantsRef.current.find((p) => p.token === tok)?.displayName ?? null, []);
+
+  /** A player's real character/colour, from the same session-wide table getAbductionTargets already reads — see charByTokenRef's own comment. Null for either field if no player-state ping has arrived from them yet (e.g. the victory screen's guide slot, who never sends one). */
+  const getCharacter = useCallback((tok) => {
+    const char = charByTokenRef.current.get(tok);
+    return { characterKey: char?.characterKey ?? null, colorHex: char?.colorHex ?? null };
+  }, []);
+
   /**
    * Reports a finished round (fall or arrival) up from Sky Path. This only
    * broadcasts; the actual `playing` -> `results` transition happens in the
@@ -502,6 +551,13 @@ export function useLobby(sessionCode) {
 
   const myGroupId = participants.find((p) => p.token === token)?.groupId ?? null;
 
+  // True once every PLAYER in this round's roster (guide excluded — they
+  // have no `round-ended` of their own) has a result in the scoreboard
+  // above. Checked here, not inside the channel handler, so it stays
+  // reactive to `round` changing too (e.g. this device's own `round.roster`
+  // only exists once its `game-started` has actually landed).
+  const teamComplete = !!round?.roster?.length && round.roster.every((tok) => tok in roundResultsByToken);
+
   return {
     token,
     hasRealSession,
@@ -512,6 +568,8 @@ export function useLobby(sessionCode) {
     myGroupId,
     roundPhase,
     round,
+    roundResultsByToken,
+    teamComplete,
     join,
     addPoint,
     sendForkChoice,
@@ -521,6 +579,8 @@ export function useLobby(sessionCode) {
     sendGameEvent,
     onGameEventReceived,
     getAbductionTargets,
+    getDisplayName,
+    getCharacter,
     reportRoundEnd,
     leaveGame,
     resetDevice,

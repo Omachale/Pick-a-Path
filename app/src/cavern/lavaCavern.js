@@ -176,6 +176,13 @@ export function mountLavaCavern(container, options = {}) {
     // be more than 50%."
     lavaRockHeight: 0.25,
     lavaRockScale: 1, // base size multiplier; individuals vary 0.65–1.5x on top
+    // Sky above the vent hole — see the "sky" section below for the geometry
+    // reasoning. All expressed relative to domeHeight/domeRadius, same reason
+    // as ringHeightFrac above: it tracks whichever dome is actually loaded.
+    skyHeightFrac: 0.5, // × domeHeight ABOVE the vent-hole rim — "a little above, just far enough that it doesn't look right next to the hole"
+    skySizeMult: 12, // × domeRadius — plane width; see the sky section for why this comfortably clears the worst-case viewing angle
+    cloudDropFrac: 0.08, // × domeHeight below the base sky layer
+    cloudSpeed: 1, // multiplies the base drift rate
   };
   let spokeCount = Math.max(1, Math.min(4, initialSpokes));
 
@@ -340,6 +347,56 @@ export function mountLavaCavern(container, options = {}) {
     islandTemplate = { scene: gltf.scene, scale: ISLAND_RADIUS / deckRadius };
   });
 
+  // ---------------------------------------------------------------- rim
+  //
+  // Luke, 2026-09-24: "add a glowing red line around the lip of the hole."
+  // Two prior attempts at GENERATING the ring's shape in code (a mesh-plane
+  // slice tracing the dome's actual opening, then a plain parametric circle
+  // with radius/height/thickness sliders) were both rejected — "that doesn't
+  // work" / "the shape is completely wrong." Replaced with Luke's own art:
+  // `models/rim.glb`, modelled directly against the same dome mesh this
+  // scene already loads, so it needed no placement adjustment at all. See
+  // its loader below (right after the dome's own).
+  //
+  // Colour scheme: per-vertex brightness combining two independent sine
+  // waves at different spatial frequency AND speed (the same layering the
+  // lava shader's own warp() uses) mixed between a dark-red base and a hot
+  // orange-red peak, so the glow reads as an uneven, organic flicker
+  // travelling around the ring rather than a uniform pulse. `phase` is each
+  // vertex's own angle around the dome's axis (atan2 of its WORLD x/z, so it
+  // still works regardless of whatever local origin/rotation the model's own
+  // export happens to use).
+  //
+  // A vertical-scale slider was tried here (twice — see git history) to
+  // make the band more noticeable, and both attempts made the shape worse
+  // rather than better, ending in Luke's "even worse than before... I've had
+  // enough of this." Reverted to the model's own base thickness, no
+  // vertical adjustment of any kind. `rimGlowSpeed` is likewise back to a
+  // plain constant, not a slider.
+  const RIM_GLOW_BASE = new THREE.Color(0x2a0400);
+  const RIM_GLOW_BRIGHT = new THREE.Color(0xff5522);
+  const RIM_GLOW_SPEED = 2.0;
+  const rimGlowParts = []; // [{ geometry, phases }] — one entry per mesh inside rim.glb
+
+  /** Per-frame flicker — see RIM_GLOW_BASE's own comment for the two-sine reasoning. Cheap: rim.glb is a thin ring, at most a few hundred vertices total. */
+  function updateRimGlow(t) {
+    for (const { geometry, phases } of rimGlowParts) {
+      const colorAttr = geometry.attributes.color;
+      for (let i = 0; i < phases.length; i++) {
+        const flicker =
+          0.5 + 0.5 * Math.sin(phases[i] * 3 + t * RIM_GLOW_SPEED) + 0.25 * Math.sin(phases[i] * 7 - t * RIM_GLOW_SPEED * 1.7);
+        const mixAmt = THREE.MathUtils.clamp(flicker / 1.25, 0, 1);
+        colorAttr.setXYZ(
+          i,
+          THREE.MathUtils.lerp(RIM_GLOW_BASE.r, RIM_GLOW_BRIGHT.r, mixAmt),
+          THREE.MathUtils.lerp(RIM_GLOW_BASE.g, RIM_GLOW_BRIGHT.g, mixAmt),
+          THREE.MathUtils.lerp(RIM_GLOW_BASE.b, RIM_GLOW_BRIGHT.b, mixAmt)
+        );
+      }
+      colorAttr.needsUpdate = true;
+    }
+  }
+
   const domeGroup = new THREE.Group();
   scene.add(domeGroup);
   gltfLoader.load('models/lava-dome-v4.glb', (gltf) => {
@@ -364,6 +421,110 @@ export function mountLavaCavern(container, options = {}) {
     const box = new THREE.Box3().setFromObject(gltf.scene);
     domeRadius = Math.max(box.max.x, box.max.z);
     domeHeight = box.max.y;
+  });
+
+  // The rim art itself — Luke's own model, built directly against the same
+  // dome mesh in the same Blender scene, so unlike the island/plank loaders
+  // above (which measure and rescale, since THEIR export scale isn't
+  // trustworthy) this is just loaded and added with no rescale. Confirmed
+  // live: lands exactly on the hole's edge with no adjustment needed. Added
+  // as a child of domeGroup, which itself carries no transform, so the
+  // model's own baked-in node position/scale is exactly what places it.
+  gltfLoader.load('models/rim.glb', (gltf) => {
+    gltf.scene.updateWorldMatrix(true, true);
+    const v = new THREE.Vector3();
+    gltf.scene.traverse((o) => {
+      if (!o.isMesh) return;
+      const old = o.material;
+      o.material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, fog: false });
+      old.dispose();
+
+      const pos = o.geometry.attributes.position;
+      const phases = new Float32Array(pos.count);
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+        phases[i] = Math.atan2(v.z, v.x);
+      }
+      o.geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3));
+      rimGlowParts.push({ geometry: o.geometry, phases });
+    });
+    domeGroup.add(gltf.scene);
+  });
+
+  // ---------------------------------------------------------------- sky
+  //
+  // Luke, 2026-09-24: "if the player looks up, they will see the hole at the
+  // top of the cavern, and nothing above it. I want to add some sky." Two
+  // flat, unlit planes (per CLAUDE.md's "everything unlit" rule) sitting high
+  // above the dome's vent hole — a base sky image, and a second, transparent
+  // cloud layer just below it that tiles and drifts.
+  //
+  // Both are ordinary PlaneGeometry(1,1) built at unit size and scaled/placed
+  // every frame from domeRadius/domeHeight (see tick()), the same "measure
+  // the loaded dome, don't hardcode it" approach domeRadius/domeHeight
+  // themselves already use — so a future dome swap needs no code change here
+  // either. DoubleSide because a flat plane's front-face winding isn't worth
+  // getting right for something always viewed from below, through a hole.
+  //
+  // Luke: "make it large enough that the players will never see the edge,
+  // even from the most acute angle they can obtain (which is probably only
+  // about 45 degrees)." The vent hole is small (radius β‰ˆ 0.2Γ—domeRadius, from
+  // the apex cut) and centred on the dome's own axis, so any ray that
+  // actually PASSES THROUGH it from inside the cavern is already constrained
+  // close to vertical — a grazing ray from off-axis hits the dome wall
+  // first, never the hole. Worst case (camera at the ring's outer wall,
+  // looking at the hole's far rim, at Luke's estimated 45°) puts the ray's
+  // horizontal reach at only a few hundred units past the axis; skySizeMult
+  // Γ— domeRadius gives a plane many times that (β‰ˆ1800-unit radius on the
+  // default 300-unit dome), so its edge stays far outside anything the hole
+  // can actually frame. Kept as a live TUNE slider anyway rather than a
+  // one-off constant, in case a bigger dome or a wider vent ever needs it
+  // re-checked.
+  const skyBaseMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, fog: false });
+  const skyBase = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), skyBaseMat);
+  skyBase.rotation.x = -Math.PI / 2;
+  scene.add(skyBase);
+  texLoader.load('textures/cavern-sky-base.jpg', (t) => {
+    // ONE static, untiled copy stretched across the whole plane — see the
+    // cloud layer's own comment below for why a repeated copy isn't used
+    // here either. At this scale (viewed only through a distant, narrow
+    // hole) the upscaling blur from a single stretched copy of a 1024Γ—559
+    // source isn't visible, so there's no tradeoff to make.
+    t.colorSpace = THREE.SRGBColorSpace;
+    skyBaseMat.map = t;
+    skyBaseMat.needsUpdate = true;
+  });
+
+  // Transparent, depthWrite off — a see-through layer meant to sit visually
+  // ON TOP of the opaque base below it, not compete with it for the depth
+  // buffer (same reasoning as any standard transparent-overlay setup).
+  const skyCloudMat = new THREE.MeshBasicMaterial({
+    side: THREE.DoubleSide,
+    fog: false,
+    transparent: true,
+    depthWrite: false,
+  });
+  const skyClouds = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), skyCloudMat);
+  skyClouds.rotation.x = -Math.PI / 2;
+  scene.add(skyClouds);
+  // "Cavern Sky Clouds.png" (the original source) turned out to be the real
+  // cause of the seam Luke spotted — a solid-blue swap of the BASE layer
+  // (which never had a repeat by that point) still showed the same lines,
+  // proving the base plane/geometry was never at fault; the clouds' own
+  // tiling was still repeat.set(6,6) throughout that test and never
+  // suspected until Luke checked the source art directly: "the clouds and
+  // tiling didn't go all the way to the edge of the image" — its content
+  // was inset from the canvas edge, so tiling it produced a real seam at
+  // every repeat boundary, nothing to do with viewing angle. Replaced with
+  // "Cavern Clouds.png", made to tile (content reaches the edges; sampled
+  // border pixels are near-zero alpha all the way around, so even a
+  // remaining mismatch stays invisible).
+  texLoader.load('textures/cavern-clouds.png', (t) => {
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(6, 6); // tiled, per Luke: "tile the clouds"
+    skyCloudMat.map = t;
+    skyCloudMat.needsUpdate = true;
   });
 
   // Loaded once and shared by every actor's card — one texture, N materials
@@ -1444,6 +1605,22 @@ export function mountLavaCavern(container, options = {}) {
       look.yaw += (look.tyaw - look.yaw) * Math.min(1, dt * 4);
       look.pitch += (look.tpitch - look.pitch) * Math.min(1, dt * 4);
 
+      // Sky — recomputed live every frame (cheap: two transforms) rather
+      // than only on buildWorld, so the tuner sliders above respond
+      // immediately, the same way ringY()/world.position.y already do.
+      const skyY = domeHeight * (1 + TUNE.skyHeightFrac);
+      skyBase.scale.setScalar(domeRadius * TUNE.skySizeMult);
+      skyBase.position.y = skyY;
+      skyClouds.scale.setScalar(domeRadius * TUNE.skySizeMult);
+      skyClouds.position.y = skyY - domeHeight * TUNE.cloudDropFrac;
+      if (skyCloudMat.map) {
+        // Two different, non-round rates so the drift reads as one
+        // direction rather than a mechanical diagonal.
+        skyCloudMat.map.offset.x += dt * 0.012 * TUNE.cloudSpeed;
+        skyCloudMat.map.offset.y += dt * 0.007 * TUNE.cloudSpeed;
+      }
+      updateRimGlow(t);
+
       const y = ringY();
       world.position.y = y;
 
@@ -1550,6 +1727,10 @@ export function mountLavaCavern(container, options = {}) {
       'lava relief': slider('lavaRelief', 0, 1, 0.02),
       'lava rock height %': slider('lavaRockHeight', 0.05, 0.5, 0.01),
       'lava rock scale': slider('lavaRockScale', 0.3, 2.5, 0.05),
+      'sky height %': slider('skyHeightFrac', 0.1, 1.5, 0.02),
+      'sky size ×dome': slider('skySizeMult', 3, 20, 0.5),
+      'cloud drop %': slider('cloudDropFrac', 0.01, 0.3, 0.01),
+      'cloud speed': slider('cloudSpeed', 0, 3, 0.05),
     },
     actions: [
       { label: 'rebuild (apply spacing/count)', onClick: () => buildWorld() },
@@ -1726,6 +1907,12 @@ export function mountLavaCavern(container, options = {}) {
       actors.length = 0;
       fallIconTexture.dispose();
       scene.remove(rocksGroup);
+      skyBase.geometry.dispose();
+      skyBaseMat.map?.dispose();
+      skyBaseMat.dispose();
+      skyClouds.geometry.dispose();
+      skyCloudMat.map?.dispose();
+      skyCloudMat.dispose();
       lavaDisc.geometry.dispose();
       lavaMat.uniforms.uLava1.value?.dispose();
       lavaMat.uniforms.uLavaDark.value?.dispose();

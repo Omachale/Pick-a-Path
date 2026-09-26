@@ -50,11 +50,11 @@ export default function GameRoom({
   sendGameEvent,
   onGameEventReceived,
   getAbductionTargets,
+  getDisplayName,
   onRoundEnd,
-  onLeave,
 }) {
   const gameRef = useRef(null);
-  const { forks, words, role, roster, pickup } = round;
+  const { forks, words, role, roster, pickup, guideToken } = round;
 
   useEffect(() => {
     onForkChoiceReceived((forkIndex, side) => {
@@ -92,27 +92,15 @@ export default function GameRoom({
         roster={roster}
         myToken={myToken}
         pickup={pickup}
+        guideToken={guideToken}
         gameRef={gameRef}
         onForkChoice={sendForkChoice}
         onRoundEnd={onRoundEnd}
         onPlayerState={sendPlayerState}
         onGameEvent={sendGameEvent}
         getAbductionTargets={getAbductionTargets}
+        getDisplayName={getDisplayName}
       />
-      <button
-        onClick={onLeave}
-        style={{
-          position: 'absolute',
-          top: 'calc(env(safe-area-inset-top, 0px) + 8px)',
-          left: 8,
-          zIndex: 20,
-          padding: '8px 12px',
-          border: 0,
-          borderRadius: 8,
-        }}
-      >
-        ← Back to lobby
-      </button>
     </div>
   );
 }

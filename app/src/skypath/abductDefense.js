@@ -115,6 +115,19 @@ const RED_BLINK_HALF_PERIOD_MS = 100;
 const TEXT_BORDER_MARGIN_FRACTION = 0.03;
 const TEXT_BORDER_SEED = 42;
 
+// The guide's mirror screen (2026-09-23) — "the same UI the defending
+// player uses... but no keyboard. Instead, instructions ('Read to your
+// teammate') above the same bordered box, showing the teammate's word."
+// Splits the same left column the player's text+keyboard occupy between a
+// header band (top) and the secret-word border box (rest), instead of
+// text-output+keyboard. Fractions are of that column's total available
+// height (panel height minus HOLE_CLEAR_FRACTION and this bottom margin),
+// same as GUIDE_HEADER_FRACTION_OF_REGION below.
+const GUIDE_REGION_BOTTOM_MARGIN_FRACTION = KEYBOARD_BOTTOM_MARGIN_FRACTION;
+const GUIDE_HEADER_FRACTION_OF_REGION = 0.26;
+const GUIDE_HEADER_GAP_FRACTION_OF_REGION = 0.04;
+const GUIDE_HEADER_TEXT = 'Read to your teammate';
+
 function el(tag, style) {
   const e = document.createElement(tag);
   if (style) Object.assign(e.style, style);
@@ -219,9 +232,16 @@ function mountKeyboard(container, onKey) {
   return { dispose: () => ro.disconnect() };
 }
 
-export function createAbductDefense(stageEl) {
-  stageEl.innerHTML = '';
-
+/**
+ * The chrome shared by both abduction screens — the defending player's own
+ * (`createAbductDefense`) and the guide's read-only mirror of it
+ * (`createAbductGuideView`): the cardboard track panel, the countdown
+ * lights, the avatar, the moving ship, and the lower-in/lift-away/countdown
+ * mechanics. Builds only that; each caller appends its own left-column
+ * content (keyboard+typed-text vs instructions+secret-word) to the returned
+ * `panel` and hooks `onMeasure` to redraw/resize it on every resize.
+ */
+function mountTrackChrome(stageEl) {
   const panel = el('div', { position: 'absolute' });
   stageEl.appendChild(panel);
 
@@ -229,46 +249,6 @@ export function createAbductDefense(stageEl) {
   panelImg.src = TRACK_PANEL_SRC;
   panelImg.draggable = false;
   panel.appendChild(panelImg);
-
-  // "Draw a border around the area where the text can be written" — Luke,
-  // 2026-09-24. A canvas the same size/position as textBox, painted just
-  // before it in DOM order so the border sits behind the letters, not over
-  // them. Redrawn on every measure() (resize), with a fixed seed so the
-  // wobble stays put rather than re-rolling on every resize.
-  const textBorderBox = el('div', {
-    position: 'absolute',
-    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
-    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
-    top: `${HOLE_CLEAR_FRACTION * 100}%`,
-    bottom: `${(KEYBOARD_COVER_FRACTION + KEYBOARD_BOTTOM_MARGIN_FRACTION) * 100}%`,
-  });
-  panel.appendChild(textBorderBox);
-  const textBorderCanvas = el('canvas', { position: 'absolute', inset: '0', width: '100%', height: '100%' });
-  textBorderBox.appendChild(textBorderCanvas);
-
-  const textBox = el('div', {
-    position: 'absolute',
-    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
-    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
-    top: `${HOLE_CLEAR_FRACTION * 100}%`,
-    bottom: `${(KEYBOARD_COVER_FRACTION + KEYBOARD_BOTTOM_MARGIN_FRACTION) * 100}%`,
-    display: 'flex',
-    flexWrap: 'wrap',
-    alignContent: 'center',
-    justifyContent: 'center',
-    padding: '0 4%',
-    overflow: 'hidden',
-  });
-  panel.appendChild(textBox);
-
-  const keyboardWrap = el('div', {
-    position: 'absolute',
-    left: `${KEYBOARD_LEFT_FRACTION * 100}%`,
-    width: `${KEYBOARD_WIDTH_FRACTION * 100}%`,
-    bottom: `${KEYBOARD_BOTTOM_MARGIN_FRACTION * 100}%`,
-    height: `${KEYBOARD_COVER_FRACTION * 100}%`,
-  });
-  panel.appendChild(keyboardWrap);
 
   const lightsBox = el('div', {
     position: 'absolute',
@@ -322,7 +302,18 @@ export function createAbductDefense(stageEl) {
   shipImg.draggable = false;
   panel.appendChild(shipImg);
 
+  function updateShipPosition(progress) {
+    const p = pointOnTrack(progress);
+    const shipWidthPct = SHIP_WIDTH_FRACTION * 100;
+    const shipHeightPct = shipWidthPct * (SHIP_SIZE.h / SHIP_SIZE.w) * (PANEL_SIZE.w / PANEL_SIZE.h);
+    shipImg.style.left = `${p.x - shipWidthPct * SHIP_ANCHOR.x}%`;
+    shipImg.style.top = `${p.y - shipHeightPct * SHIP_ANCHOR.y}%`;
+    shipImg.style.width = `${shipWidthPct}%`;
+    shipImg.style.height = `${shipHeightPct}%`;
+  }
+
   let box = { width: 0, height: 0, top: 0, left: 0 };
+  const measureListeners = [];
   const measure = () => {
     const vw = stageEl.clientWidth;
     const vh = stageEl.clientHeight;
@@ -334,23 +325,9 @@ export function createAbductDefense(stageEl) {
     panel.style.top = `${box.top}px`;
     panel.style.width = `${box.width}px`;
     panel.style.height = `${box.height}px`;
-    redrawTextBorder();
+    measureListeners.forEach((fn) => fn(box));
     applyTransform();
   };
-
-  function redrawTextBorder() {
-    const cssW = textBorderCanvas.clientWidth;
-    const cssH = textBorderCanvas.clientHeight;
-    if (!cssW || !cssH) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    textBorderCanvas.width = Math.round(cssW * dpr);
-    textBorderCanvas.height = Math.round(cssH * dpr);
-    const ctx = textBorderCanvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
-    const margin = box.height * TEXT_BORDER_MARGIN_FRACTION;
-    drawPencilBorder(ctx, { x: margin, y: margin, w: cssW - margin * 2, h: cssH - margin * 2 }, TEXT_BORDER_SEED);
-  }
   const resizeObserver = new ResizeObserver(measure);
   resizeObserver.observe(stageEl);
 
@@ -360,86 +337,8 @@ export function createAbductDefense(stageEl) {
     panel.style.transform = `translateY(${down ? 0 : hiddenOffset}px)`;
   }
 
-  const keyboard = mountKeyboard(keyboardWrap, (name) => handleKey(name));
-
-  let text = '';
-  let onResistCb = null;
-  let onTimeoutCb = null;
   let rafId = null;
-  let resolved = false;
-
-  // Renders `text` at a given letter height. Called up to twice per
-  // renderText() — once to measure, again at a smaller size if that
-  // measurement showed a wrap — so it's plain and side-effect-free beyond
-  // rebuilding textBox's own children.
-  function renderWords(letterHeight) {
-    textBox.innerHTML = '';
-    textBox.style.rowGap = `${letterHeight * LINE_GAP_RATIO}px`;
-    let index = 0;
-    for (const word of text.split(' ')) {
-      const wordEl = el('div', { display: 'flex', alignItems: 'flex-end', marginRight: `${letterHeight * 0.35}px` });
-      for (const ch of word) {
-        const isFirst = index === 0;
-        index += 1;
-        const src = letterImageSrc(ch, isFirst);
-        if (src) {
-          const img = el('img', { height: `${letterHeight}px`, width: 'auto', userSelect: 'none' });
-          img.src = src;
-          img.draggable = false;
-          wordEl.appendChild(img);
-        } else {
-          const span = el('span', { color: '#33ff66', font: `700 ${letterHeight * 0.8}px system-ui, sans-serif` });
-          span.textContent = ch;
-          wordEl.appendChild(span);
-        }
-      }
-      textBox.appendChild(wordEl);
-    }
-  }
-
-  function renderText() {
-    const baseLetterHeight = box.height * TEXT_REGION_FRACTION * LETTER_HEIGHT_FRACTION_OF_REGION;
-    renderWords(baseLetterHeight);
-    const words = [...textBox.children];
-    const wrapped = words.length > 1 && words[0].offsetTop !== words[words.length - 1].offsetTop;
-    if (wrapped) {
-      // "The letters fall outside the box when they go to two lines...
-      // reduce size more when the second line is triggered, so the text
-      // will always be contained" — Luke, 2026-09-25. Solve for the
-      // largest letter height where two lines, plus the gap between them,
-      // still fit inside the bordered area — rather than always using the
-      // one-line size and letting a second line overflow it.
-      const marginPx = box.height * TEXT_BORDER_MARGIN_FRACTION;
-      const availablePx = box.height * TEXT_REGION_FRACTION - marginPx * 2;
-      const twoLineHeight = Math.min(baseLetterHeight, availablePx / (2 + LINE_GAP_RATIO));
-      renderWords(twoLineHeight);
-    }
-  }
-
-  function handleKey(name) {
-    if (resolved) return;
-    if (name === 'BACKSPACE') text = text.slice(0, -1);
-    else if (name === 'SPACE') text += ' ';
-    else text += name;
-    renderText();
-    if (text.trim().toUpperCase() === TARGET_WORD) {
-      resolved = true;
-      stopCountdown();
-      liftAway(() => onResistCb?.());
-    }
-  }
-
-  function updateShipPosition(progress) {
-    const p = pointOnTrack(progress);
-    const shipWidthPct = SHIP_WIDTH_FRACTION * 100;
-    const shipHeightPct = shipWidthPct * (SHIP_SIZE.h / SHIP_SIZE.w) * (PANEL_SIZE.w / PANEL_SIZE.h);
-    shipImg.style.left = `${p.x - shipWidthPct * SHIP_ANCHOR.x}%`;
-    shipImg.style.top = `${p.y - shipHeightPct * SHIP_ANCHOR.y}%`;
-    shipImg.style.width = `${shipWidthPct}%`;
-    shipImg.style.height = `${shipHeightPct}%`;
-  }
-
-  function startCountdown(durationMs) {
+  function startCountdown(durationMs, onArrived) {
     shipImg.style.display = 'block';
     const startedAt = performance.now();
     const tick = (now) => {
@@ -448,17 +347,29 @@ export function createAbductDefense(stageEl) {
       updateLights(p, now - startedAt - LIGHT_ON_AT[LIGHT_ON_AT.length - 1] * durationMs);
       if (p < 1) {
         rafId = requestAnimationFrame(tick);
-      } else if (!resolved) {
-        resolved = true;
-        liftAway(() => onTimeoutCb?.());
+      } else {
+        rafId = null;
+        onArrived?.();
       }
     };
     rafId = requestAnimationFrame(tick);
   }
-
   function stopCountdown() {
     if (rafId != null) cancelAnimationFrame(rafId);
     rafId = null;
+  }
+
+  /** Lowers the panel into view (from hidden, forcing layout in between so the browser can't coalesce both style writes into one frame and skip the animation — see the original bug this avoided), calling `onSettled` once it's fully down. */
+  function lower(onSettled) {
+    down = false;
+    panel.style.transition = 'none';
+    applyTransform();
+    // eslint-disable-next-line no-unused-expressions
+    panel.offsetHeight;
+    down = true;
+    panel.style.transition = `transform ${LOWER_DURATION_MS}ms ${LOWER_EASING}`;
+    applyTransform();
+    onTransitionSettled(panel, LOWER_DURATION_MS, () => onSettled?.());
   }
 
   function liftAway(onDone) {
@@ -472,42 +383,359 @@ export function createAbductDefense(stageEl) {
   }
 
   return {
+    panel,
+    getBox: () => box,
+    onMeasure: (fn) => measureListeners.push(fn),
+    measure,
+    setAvatarSrc: (src) => {
+      avatarImg.src = src;
+    },
+    /** Hides the ship and turns all lights off — call before each `lower()`. */
+    resetShip: () => {
+      shipImg.style.display = 'none';
+      updateLights(0);
+    },
+    startCountdown,
+    stopCountdown,
+    lower,
+    liftAway,
+    forceClose: () => {
+      stopCountdown();
+      stageEl.style.display = 'none';
+    },
+    dispose: () => {
+      stopCountdown();
+      resizeObserver.disconnect();
+    },
+  };
+}
+
+/** Renders `text` as cardboard-cutout letters (letterImage.js's set, falling back to plain green text for anything it doesn't cover) into `container`, one flex row per word, at `letterHeight`. */
+function renderCardboardWords(container, text, letterHeight, lineGapRatio) {
+  container.innerHTML = '';
+  container.style.rowGap = `${letterHeight * lineGapRatio}px`;
+  let index = 0;
+  for (const word of text.split(' ')) {
+    const wordEl = el('div', { display: 'flex', alignItems: 'flex-end', marginRight: `${letterHeight * 0.35}px` });
+    for (const ch of word) {
+      const isFirst = index === 0;
+      index += 1;
+      const src = letterImageSrc(ch, isFirst);
+      if (src) {
+        const img = el('img', { height: `${letterHeight}px`, width: 'auto', userSelect: 'none' });
+        img.src = src;
+        img.draggable = false;
+        wordEl.appendChild(img);
+      } else {
+        const span = el('span', { color: '#33ff66', font: `700 ${letterHeight * 0.8}px system-ui, sans-serif` });
+        span.textContent = ch;
+        wordEl.appendChild(span);
+      }
+    }
+    container.appendChild(wordEl);
+  }
+}
+
+/**
+ * Renders `text` as cardboard-cutout letters into `container` (a flex-wrap
+ * box already sized/positioned by the caller), starting at `baseHeight` and
+ * shrinking only as far as needed to keep every line inside `availablePx`
+ * of vertical space — solved from the actual number of lines the wrap
+ * produces, rather than guessed up front. Same "measure the real wrap,
+ * don't just guess" approach as the defending player's own text box (see
+ * `renderText` below), generalized to any line count since the guide's
+ * fixed instruction line ("Read to your teammate") wraps to more than two.
+ */
+function fitCardboardWords(container, text, baseHeight, availablePx, lineGapRatio) {
+  renderCardboardWords(container, text, baseHeight, lineGapRatio);
+  const lines = new Set([...container.children].map((c) => c.offsetTop)).size;
+  if (lines > 1) {
+    const fitted = Math.min(baseHeight, availablePx / (lines + (lines - 1) * lineGapRatio));
+    renderCardboardWords(container, text, fitted, lineGapRatio);
+  }
+}
+
+export function createAbductDefense(stageEl) {
+  stageEl.innerHTML = '';
+
+  const rig = mountTrackChrome(stageEl);
+  const { panel } = rig;
+
+  // "Draw a border around the area where the text can be written" — Luke,
+  // 2026-09-24. A canvas the same size/position as textBox, painted just
+  // before it in DOM order so the border sits behind the letters, not over
+  // them. Redrawn on every measure() (resize), with a fixed seed so the
+  // wobble stays put rather than re-rolling on every resize.
+  const textBorderBox = el('div', {
+    position: 'absolute',
+    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
+    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
+    top: `${HOLE_CLEAR_FRACTION * 100}%`,
+    bottom: `${(KEYBOARD_COVER_FRACTION + KEYBOARD_BOTTOM_MARGIN_FRACTION) * 100}%`,
+  });
+  panel.appendChild(textBorderBox);
+  const textBorderCanvas = el('canvas', { position: 'absolute', inset: '0', width: '100%', height: '100%' });
+  textBorderBox.appendChild(textBorderCanvas);
+
+  const textBox = el('div', {
+    position: 'absolute',
+    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
+    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
+    top: `${HOLE_CLEAR_FRACTION * 100}%`,
+    bottom: `${(KEYBOARD_COVER_FRACTION + KEYBOARD_BOTTOM_MARGIN_FRACTION) * 100}%`,
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignContent: 'center',
+    justifyContent: 'center',
+    padding: '0 4%',
+    overflow: 'hidden',
+  });
+  panel.appendChild(textBox);
+
+  const keyboardWrap = el('div', {
+    position: 'absolute',
+    left: `${KEYBOARD_LEFT_FRACTION * 100}%`,
+    width: `${KEYBOARD_WIDTH_FRACTION * 100}%`,
+    bottom: `${KEYBOARD_BOTTOM_MARGIN_FRACTION * 100}%`,
+    height: `${KEYBOARD_COVER_FRACTION * 100}%`,
+  });
+  panel.appendChild(keyboardWrap);
+
+  function redrawTextBorder(box) {
+    const cssW = textBorderCanvas.clientWidth;
+    const cssH = textBorderCanvas.clientHeight;
+    if (!cssW || !cssH) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    textBorderCanvas.width = Math.round(cssW * dpr);
+    textBorderCanvas.height = Math.round(cssH * dpr);
+    const ctx = textBorderCanvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    const margin = box.height * TEXT_BORDER_MARGIN_FRACTION;
+    drawPencilBorder(ctx, { x: margin, y: margin, w: cssW - margin * 2, h: cssH - margin * 2 }, TEXT_BORDER_SEED);
+  }
+  rig.onMeasure(redrawTextBorder);
+
+  const keyboard = mountKeyboard(keyboardWrap, (name) => handleKey(name));
+
+  let text = '';
+  let onResistCb = null;
+  let onTimeoutCb = null;
+  let onWordMatchedCb = null;
+  let resolved = false;
+
+  function renderText() {
+    const box = rig.getBox();
+    const baseLetterHeight = box.height * TEXT_REGION_FRACTION * LETTER_HEIGHT_FRACTION_OF_REGION;
+    // "The letters fall outside the box when they go to two lines... reduce
+    // size more when the second line is triggered, so the text will always
+    // be contained" — Luke, 2026-09-25.
+    const marginPx = box.height * TEXT_BORDER_MARGIN_FRACTION;
+    const availablePx = box.height * TEXT_REGION_FRACTION - marginPx * 2;
+    fitCardboardWords(textBox, text, baseLetterHeight, availablePx, LINE_GAP_RATIO);
+  }
+
+  function handleKey(name) {
+    if (resolved) return;
+    if (name === 'BACKSPACE') text = text.slice(0, -1);
+    else if (name === 'SPACE') text += ' ';
+    else text += name;
+    renderText();
+    if (text.trim().toUpperCase() === TARGET_WORD) {
+      resolved = true;
+      rig.stopCountdown();
+      // Fired the INSTANT the word matches, before the panel even starts
+      // lifting — Luke, 2026-09-23: the green light "should be removed as
+      // soon as the defender successfully puts in the word", not once the
+      // whole close-and-repel sequence has played out. `onResist` (below)
+      // still waits for the lift animation, since that's what actually
+      // resolves the game state.
+      onWordMatchedCb?.();
+      rig.liftAway(() => onResistCb?.());
+    }
+  }
+
+  return {
     /** Opens the screen, lowers the panel, then starts the countdown once it's down. `avatarSrc` is the target player's own character art. */
-    open({ avatarSrc, durationMs = DEFAULT_SHIP_DURATION_MS, onResist, onTimeout }) {
+    open({ avatarSrc, durationMs = DEFAULT_SHIP_DURATION_MS, onResist, onTimeout, onWordMatched }) {
       text = '';
       resolved = false;
       onResistCb = onResist;
       onTimeoutCb = onTimeout;
-      avatarImg.src = avatarSrc;
-      shipImg.style.display = 'none';
-      updateLights(0);
-      renderText();
+      onWordMatchedCb = onWordMatched;
+      rig.setAvatarSrc(avatarSrc);
+      rig.resetShip();
       stageEl.style.display = 'block';
-      measure();
-      down = false;
-      panel.style.transition = 'none';
-      applyTransform();
-      // Force layout so the 'hidden' transform above actually applies
-      // before switching it back on with a transition — otherwise the
-      // browser can coalesce both style writes into one frame and skip
-      // the animation entirely.
-      // eslint-disable-next-line no-unused-expressions
-      panel.offsetHeight;
-      down = true;
-      panel.style.transition = `transform ${LOWER_DURATION_MS}ms ${LOWER_EASING}`;
-      applyTransform();
-      onTransitionSettled(panel, LOWER_DURATION_MS, () => startCountdown(durationMs));
+      rig.measure();
+      renderText();
+      rig.lower(() =>
+        rig.startCountdown(durationMs, () => {
+          if (resolved) return;
+          resolved = true;
+          rig.liftAway(() => onTimeoutCb?.());
+        }),
+      );
     },
     /** Hides immediately, no lift-away animation — for a restart/reset while the screen happens to be open, not the normal resist/timeout close. */
     forceClose() {
-      stopCountdown();
       resolved = true;
-      stageEl.style.display = 'none';
+      rig.forceClose();
     },
     dispose() {
-      stopCountdown();
-      resizeObserver.disconnect();
+      rig.dispose();
       keyboard.dispose();
+    },
+  };
+}
+
+/**
+ * The guide's own screen — Luke, 2026-09-23: "the same UI the defending
+ * player uses, with the track and the avatar and the moving spaceship on
+ * the right, but no keyboard. Rather, to the left... instructions...
+ * 'Read to your teammate'. Below that... the same border... enclosing the
+ * message their defending teammate has to write." Unlike the player's own
+ * screen, the guide is shown the word in full — this screen is read-only,
+ * nothing here ever calls back except when the ship arrives (or the caller
+ * force-closes it, e.g. once the real defence resolves).
+ */
+export function createAbductGuideView(stageEl) {
+  stageEl.innerHTML = '';
+
+  const rig = mountTrackChrome(stageEl);
+  const { panel } = rig;
+
+  const totalRegionFraction = 1 - HOLE_CLEAR_FRACTION - GUIDE_REGION_BOTTOM_MARGIN_FRACTION;
+  const headerHeightFraction = totalRegionFraction * GUIDE_HEADER_FRACTION_OF_REGION;
+  const headerGapFraction = totalRegionFraction * GUIDE_HEADER_GAP_FRACTION_OF_REGION;
+  const wordBoxHeightFraction = totalRegionFraction - headerHeightFraction - headerGapFraction;
+  const wordBoxTopFraction = HOLE_CLEAR_FRACTION + headerHeightFraction + headerGapFraction;
+
+  const headerBox = el('div', {
+    position: 'absolute',
+    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
+    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
+    top: `${HOLE_CLEAR_FRACTION * 100}%`,
+    height: `${headerHeightFraction * 100}%`,
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignContent: 'center',
+    justifyContent: 'center',
+    padding: '0 4%',
+    overflow: 'hidden',
+  });
+  panel.appendChild(headerBox);
+
+  // Same pencil border as the defending player's own text box — see
+  // pencilBorder.js's header, "the default... for any code-drawn border" —
+  // enclosing the word the teammate needs to type.
+  const wordBorderBox = el('div', {
+    position: 'absolute',
+    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
+    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
+    top: `${wordBoxTopFraction * 100}%`,
+    bottom: `${GUIDE_REGION_BOTTOM_MARGIN_FRACTION * 100}%`,
+  });
+  panel.appendChild(wordBorderBox);
+  const wordBorderCanvas = el('canvas', { position: 'absolute', inset: '0', width: '100%', height: '100%' });
+  wordBorderBox.appendChild(wordBorderCanvas);
+
+  const wordBox = el('div', {
+    position: 'absolute',
+    left: `${TEXT_AREA_LEFT_FRACTION * 100}%`,
+    width: `${TEXT_AREA_WIDTH_FRACTION * 100}%`,
+    top: `${wordBoxTopFraction * 100}%`,
+    bottom: `${GUIDE_REGION_BOTTOM_MARGIN_FRACTION * 100}%`,
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignContent: 'center',
+    justifyContent: 'center',
+    padding: '0 4%',
+    overflow: 'hidden',
+  });
+  panel.appendChild(wordBox);
+
+  let word = TARGET_WORD;
+
+  function redrawWordBorder(box) {
+    const cssW = wordBorderCanvas.clientWidth;
+    const cssH = wordBorderCanvas.clientHeight;
+    if (!cssW || !cssH) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    wordBorderCanvas.width = Math.round(cssW * dpr);
+    wordBorderCanvas.height = Math.round(cssH * dpr);
+    const ctx = wordBorderCanvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    const margin = box.height * TEXT_BORDER_MARGIN_FRACTION;
+    drawPencilBorder(ctx, { x: margin, y: margin, w: cssW - margin * 2, h: cssH - margin * 2 }, TEXT_BORDER_SEED);
+  }
+
+  function renderHeader(box) {
+    const baseHeight = box.height * headerHeightFraction * LETTER_HEIGHT_FRACTION_OF_REGION;
+    const availablePx = box.height * headerHeightFraction;
+    fitCardboardWords(headerBox, GUIDE_HEADER_TEXT, baseHeight, availablePx, LINE_GAP_RATIO);
+  }
+
+  function renderWord(box) {
+    const baseHeight = box.height * wordBoxHeightFraction * LETTER_HEIGHT_FRACTION_OF_REGION;
+    const marginPx = box.height * TEXT_BORDER_MARGIN_FRACTION;
+    const availablePx = box.height * wordBoxHeightFraction - marginPx * 2;
+    fitCardboardWords(wordBox, word, baseHeight, availablePx, LINE_GAP_RATIO);
+  }
+
+  rig.onMeasure((box) => {
+    redrawWordBorder(box);
+    renderHeader(box);
+    renderWord(box);
+  });
+
+  // Whether the panel is up (or on its way up/down) — so close() knows
+  // whether there's anything left to lift, since the ship reaching the
+  // avatar on THIS device's own clock may already have lifted it.
+  let isOpen = false;
+  let openSession = 0;
+
+  return {
+    /** Opens the screen and lowers the panel, mirroring the defending player's own screen. `word` is the actual target word, shown in full — unlike the player's screen, this one is allowed to reveal it. The ship arriving lifts the panel by itself; the defender's own device is still what decides the outcome (see close()). */
+    open({ avatarSrc, word: targetWord = TARGET_WORD, durationMs = DEFAULT_SHIP_DURATION_MS }) {
+      word = targetWord;
+      isOpen = true;
+      const session = ++openSession;
+      rig.setAvatarSrc(avatarSrc);
+      rig.resetShip();
+      stageEl.style.display = 'block';
+      rig.measure();
+      rig.lower(() => {
+        // Closed while still lowering — don't start a countdown on a panel that's already leaving.
+        if (session !== openSession) return;
+        rig.startCountdown(durationMs, () =>
+          rig.liftAway(() => {
+            isOpen = false;
+          }),
+        );
+      });
+    },
+    /** Lifts the panel away now (the defence resolved on the defender's device), then calls `onDone` — straight away if it's already gone. */
+    close(onDone) {
+      openSession++;
+      if (!isOpen) {
+        onDone?.();
+        return;
+      }
+      rig.stopCountdown();
+      rig.liftAway(() => {
+        isOpen = false;
+        onDone?.();
+      });
+    },
+    /** Hides immediately, no lift-away animation — for a restart/reset. */
+    forceClose() {
+      openSession++;
+      isOpen = false;
+      rig.forceClose();
+    },
+    dispose() {
+      rig.dispose();
     },
   };
 }

@@ -33,8 +33,9 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
 import { attachCrowdHarness } from './crowdHarness.js';
-import { buildAbduction } from './alienAbduction.js';
-import { createAbductDefense } from './abductDefense.js';
+import { buildAbduction, buildWaitingGlow, buildRepelledShip, REPEL_SHIP_DEFAULTS } from './alienAbduction.js';
+import { createResistWave, RESIST_WAVE_DEFAULTS } from './resistWave.js';
+import { createAbductDefense, createAbductGuideView } from './abductDefense.js';
 import { attachBgTuner } from './bgTuner.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildIsland } from './islandGen.js';
@@ -73,7 +74,7 @@ await RAPIER.init();
  * @param {'guide'|'player'} options.role   which layer of information to show
  * @param {boolean} options.canAct          whether this device shows the fork buttons
  * @param {(forkIndex: number, side: 'left'|'right') => void} options.onForkChoice
- * @param {(result: {success: boolean, forkIndex: number, correctCount: number}) => void} options.onRoundEnd
+ * @param {(result: {success: boolean, forkIndex: number, correctCount: number, totalForks: number, itemsCollected: number, resistCount: number, jetpackKeptAtFinish: boolean}) => void} options.onRoundEnd
  * @returns {{applyChoice: Function, reset: Function, dispose: Function}}
  */
 export function mountSkyPath(container, options = {}) {
@@ -139,6 +140,11 @@ export function mountSkyPath(container, options = {}) {
     // getAbductionTargets for the eligibility rules and the "abduction
     // targeting" section below for the menu it feeds. Null = solo: nobody.
     getAbductionTargets = null,
+    // This team's guide, and a live token -> lobby-name lookup — for the
+    // abduction-defence messages ("Listen to [Guide name]...", see the
+    // "defence queue" section). Both null/absent in solo play.
+    guideToken = null,
+    getDisplayName = null,
   } = options;
   // Declared here, not down near soloRoleToggle where it originally lived —
   // setCharacter() (called during initial setup, long before that point)
@@ -168,8 +174,6 @@ export function mountSkyPath(container, options = {}) {
 
   let disposed = false;
   let rafId = null;
-
-  const T_START = performance.now();
 
   // ---------------------------------------------------------------- journey shape
   //
@@ -402,6 +406,12 @@ export function mountSkyPath(container, options = {}) {
   // just a wrong picture, which is exactly the kind of thing to state here
   // rather than leave as a mystery.
   renderer.localClippingEnabled = true;
+
+  // The "aliens repelled" distortion — see resistWave.js. Owns the final
+  // render call (a plain renderer.render outside a wave). Its params object
+  // is live so the temporary tuning panel can write into it.
+  const resistWaveParams = { ...RESIST_WAVE_DEFAULTS };
+  const resistWave = createResistWave(renderer, resistWaveParams);
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
@@ -410,7 +420,16 @@ export function mountSkyPath(container, options = {}) {
   // path ahead is no longer this fog's job: that's the curtain props standing
   // at each junction (see makeCurtain), which is why there is no longer a
   // per-role near/far swap here.
-  scene.fog = new THREE.Fog(0xbcd8ea, 24, 260);
+  //
+  // Temporarily disabled, per Luke, 2026-09-24: "let's disable the fog for
+  // now." Still a real THREE.Fog object, not null — the day/night colour
+  // cycle below (fogScratch) and a debug hook both read scene.fog.color/
+  // near/far unconditionally — just pushed out past the camera's own
+  // 5000-unit far plane (see its own comment below) so nothing ever renders
+  // far enough to actually fog. Flip FOG_ENABLED back on to restore the real
+  // near/far.
+  const FOG_ENABLED = false;
+  scene.fog = new THREE.Fog(0xbcd8ea, FOG_ENABLED ? 24 : 100000, FOG_ENABLED ? 260 : 100001);
 
   // The far plane has to clear the whole backdrop rig with room to spare. It
   // clips at constant *view-space* depth, so an axis-aligned backdrop panel
@@ -3578,6 +3597,7 @@ export function mountSkyPath(container, options = {}) {
       if (entry) {
         disposeRig(entry.rig);
         entry.abduction?.dispose(); // a swapped/replaced rig mid-abduction — rare, but don't leak the saucer
+        entry.waitGlow?.dispose();
       }
       const seat = seatOffsets.get(token) ?? { offsetX: 0, tagSide: 'above', tagYStagger: 0 };
       entry = {
@@ -3593,6 +3613,7 @@ export function mountSkyPath(container, options = {}) {
         departStartedAt: 0, // set once this teammate's own engine detaches — see updateTeammate/updateTeammates
         departBaseY: 0,
         abduction: null, // a locally-built saucer instance while this teammate is being abducted — see updateTeammate's 'departing' handling
+        fallCamAnchor: null, // set lazily by updateWatchingCamera the first time this teammate is seen falling/being rescued — see its own comment
         // Fixed for the whole round — see the "island layout" section's
         // `seatOffsets` above; a token not in `roster` (shouldn't happen for
         // a real player, but keeps a stray/late report harmless) just sits
@@ -3615,12 +3636,25 @@ export function mountSkyPath(container, options = {}) {
 
   function updateTeammate(
     token,
-    { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, livePos, powerupKind: tPowerupKind, firing, detached, abducting }
+    { phase: tPhase, forkIndex: tForkIndex, characterKey: tCharacterKey, displayName: tName, colorHex, livePos, powerupKind: tPowerupKind, firing, detached, abducting, defending }
   ) {
     if (token == null || tForkIndex == null) return;
     const entry = ensureTeammateEntry(token, tCharacterKey, tName, colorHex);
     entry.pingCount++;
     entry.lastPingAt = Date.now();
+    // The green light a targeted teammate stands under while they wait for,
+    // then do, their abduction defence — see buildWaitingGlow's own header.
+    // Lit in the 'resting' branch below (a defender is always stopped, and
+    // that's where the rig gets positioned). A 'departing'+abducting report
+    // hands it over to the real sequence instead (the 'departing' branch),
+    // so it's only released here when the defence ended in a resist.
+    if (!defending && entry.waitGlow && !(tPhase === 'departing' && abducting)) {
+      entry.waitGlow.release();
+      // They repelled the aliens. The guide fires this itself once its own
+      // defence panel has lifted (see finishGuideDefence) — here it would
+      // play unseen behind that panel.
+      if (role !== 'guide') playRepelSequence(entry.rig.group.position);
+    }
     // Mirrors this teammate's own held power-up (jetpack OR abduction
     // device — the same single slot, see equipPowerUp's own header) plus
     // its flame/detach state onto their rig — see notifyPlayerState's own
@@ -3674,6 +3708,7 @@ export function mountSkyPath(container, options = {}) {
       entry.phase = 'departing';
       entry.forkIndex = tForkIndex; // the fork being LEFT
       entry.livePos = null; // clear any stale ping from a PREVIOUS departure — the rig holds where it is until a real one arrives
+      entry.fallCamAnchor = null; // this departure hasn't necessarily fallen yet — see updateWatchingCamera, which (re)computes it lazily the moment a quat'd livePos actually arrives
       entry.rig.group.visible = true;
       // Keyed by the fork being LEFT, not a single shared variable — see the
       // "guide camera" section's own comment on guideLastDepartedTokenByFork
@@ -3688,6 +3723,9 @@ export function mountSkyPath(container, options = {}) {
       // starts from rest, never mid-walk — see startAbduction's own guard),
       // so it's already the correct anchor with nothing extra to send.
       if (abducting && !entry.abduction) {
+        const glowPreLit = !!entry.waitGlow;
+        entry.waitGlow?.dispose();
+        entry.waitGlow = null;
         entry.abduction = buildAbduction({
           scene,
           textures: { ship: TEX.spaceship, beams: TEX.spaceshipBeams, string: TEX.string },
@@ -3697,22 +3735,37 @@ export function mountSkyPath(container, options = {}) {
           targetCard: entry.rig.group,
           cardHeight: FIGURE_H,
           cardWidth: FIGURE_H * FIGURE_ASPECT,
+          glowPreLit,
         });
       }
     } else if (tPhase === 'gone') {
       entry.phase = 'gone';
       entry.livePos = null;
+      entry.fallCamAnchor = null;
       entry.rig.group.visible = false;
       entry.abduction?.dispose(); // defensive — the per-frame check in updateTeammates normally disposes it first, once its own local playback finishes
       entry.abduction = null;
+      entry.waitGlow?.dispose();
+      entry.waitGlow = null;
     } else {
       entry.phase = 'resting';
       entry.forkIndex = tForkIndex;
       entry.livePos = null;
+      entry.fallCamAnchor = null;
       entry.rig.group.visible = true;
       entry.abduction?.dispose(); // defensive — shouldn't still exist by the time a 'resting' report arrives, but a new round's fresh 'resting' must never inherit a stray saucer
       entry.abduction = null;
       positionTeammateRig(entry); // also resets rotation outright, so a previous rescue's tilt can't linger
+      if (defending && !entry.waitGlow) {
+        const pos = entry.rig.group.position;
+        entry.waitGlow = buildWaitingGlow({
+          scene,
+          at: { x: pos.x, y: 0, z: pos.z },
+          card: entry.rig.group,
+          cardHeight: FIGURE_H,
+          cardWidth: FIGURE_H * FIGURE_ASPECT,
+        });
+      }
     }
   }
 
@@ -3878,6 +3931,13 @@ export function mountSkyPath(container, options = {}) {
       updateEngineFlame(entry.rig, dt);
       updateEngineSmoke(entry.rig, dt);
 
+      // This teammate is waiting on / in an abduction defence — see
+      // updateTeammate's `defending` handling.
+      if (entry.waitGlow && !entry.waitGlow.update(dt)) {
+        entry.waitGlow.dispose();
+        entry.waitGlow = null;
+      }
+
       // The detached engine flying off on its own — see updateTeammate's
       // own `detached` handling for how this starts. Runs regardless of
       // `entry.phase`: the sender's own phase can already have flipped to
@@ -4035,6 +4095,7 @@ export function mountSkyPath(container, options = {}) {
     guideSeenRestingIslands.clear();
     els.role.dataset.role = role;
     els.role.textContent = 'Watching';
+    initWatchPanel();
     refreshUI();
   }
 
@@ -4097,6 +4158,255 @@ export function mountSkyPath(container, options = {}) {
     }
   }
 
+  // ---------------------------------------------------------------- watch cycling
+  //
+  // Luke, 2026-09-24: "Rather than have an omniscient view, I want [a fallen
+  // player] to cycle through the view of the other players, with a display
+  // in the top left showing player avatars and name tags, and small arrows
+  // to the left and right." Scoped to this device's own team only — cross-
+  // team spectating would mean loading another team's whole island/fork
+  // layout into this scene, which nothing here does today; see TODO.md.
+  //
+  // `watchToken` steps through `roster` in its own fixed order (this team's
+  // token order, minus this device's own token — the same list seatOffsets
+  // is built from, so the cycle order matches the left-to-right seating
+  // everyone already reads), skipping anyone not currently viable — see
+  // watchActiveCandidates(). A token, not an index: the viable set can
+  // change shape frame to frame (someone finishes, someone else's first
+  // report finally arrives), and an index into a resizing list would
+  // silently start pointing at the wrong person.
+  // The camera itself reuses trailingCamPos/trailingCamLookAt, the exact
+  // maths the old auto-follow ("parked"/"following") branch above already
+  // used — this is genuinely the same "look over this player's shoulder"
+  // shot, just aimed by a manual choice instead of an automatic one.
+  const WATCH_ADVANCE_DELAY_MS = 3000;
+  let watchToken = null; // the actual teammate token currently shown — not an index, so a changing candidate list can't silently point it at someone else
+  let watchFacing = 0; // this device's own eased copy of the watched teammate's heading — see its use below for why a raw rig rotation isn't good enough
+  let watchFacingToken = null; // which token watchFacing is currently easing for — a switch snaps instead of spinning through the turn
+  let watchAdvanceTimer = null;
+  let watchAdvanceArmedFor = null; // token the pending auto-advance timer belongs to
+  let watchPanelShownFor = null; // token + name currently painted into the DOM — see refreshWatchPanel()
+  let watchPanelShownName = null;
+  let watchNameRequestId = 0; // guards buildNameTagCanvas's async resolve against a stale paint — see refreshWatchPanel()
+
+  function watchCandidates() {
+    return roster.filter((tok) => tok !== myToken);
+  }
+
+  /** A candidate is "active" once there's real data for them and their own round hasn't ended. */
+  function watchEntryActive(entry) {
+    return !!entry && entry.phase !== 'gone' && entry.rig.group.visible;
+  }
+
+  /**
+   * The teammates the ARROWS may step to — Luke, 2026-09-24: "non-viable
+   * options [must be] removed and only the viable are cycled through; if
+   * this means only one remaining, the arrows should do nothing." Someone
+   * still on character-select (no entry yet) or already finished is never
+   * a destination, though a just-finished person already ON screen stays
+   * there through their own grace period — see updateWatchingCamera, which
+   * reads `watchToken` directly rather than filtering through this list.
+   */
+  function watchActiveCandidates() {
+    return watchCandidates().filter((tok) => watchEntryActive(teammates.get(tok)));
+  }
+
+  /**
+   * The first active candidate strictly after `fromToken` in the fixed
+   * roster order, wrapping, walking backwards for `dir` -1 — never
+   * `fromToken` itself even if it's still active. Null if none are active.
+   * Shared by the manual arrows and auto-advance so both land on the same
+   * "next" person rather than two different ideas of it.
+   */
+  function nextActiveToken(fromToken, dir) {
+    const all = watchCandidates();
+    const active = watchActiveCandidates();
+    if (all.length === 0 || active.length === 0) return null;
+    const fromIdx = all.indexOf(fromToken); // -1 (not found) starts the search from the top of the list
+    for (let step = 1; step <= all.length; step++) {
+      const idx = (((fromIdx + dir * step) % all.length) + all.length) % all.length;
+      if (active.includes(all[idx])) return all[idx];
+    }
+    return null;
+  }
+
+  function clearWatchAdvanceTimer() {
+    clearTimeout(watchAdvanceTimer);
+    watchAdvanceTimer = null;
+    watchAdvanceArmedFor = null;
+  }
+
+  /** Shown once, from becomeSpectator() or a role:'watching' mount — picks a sensible starting player rather than whoever happens to be first in `roster`. */
+  function initWatchPanel() {
+    if (!els.watchPanel) return;
+    els.watchPanel.classList.remove('hidden');
+    watchToken = watchActiveCandidates()[0] ?? null;
+    clearWatchAdvanceTimer();
+    refreshWatchPanel();
+  }
+
+  /** Manual step — the arrow buttons. A no-op with one or zero viable candidates: nothing else to cycle to. */
+  function stepWatch(dir) {
+    if (watchActiveCandidates().length <= 1) return;
+    const next = nextActiveToken(watchToken, dir);
+    if (next === null || next === watchToken) return;
+    watchToken = next;
+    clearWatchAdvanceTimer(); // a manual choice always overrides whatever auto-advance was waiting on
+    refreshWatchPanel();
+  }
+
+  /**
+   * Per frame, only while role === 'watching' — see its call in tick().
+   * `t` (the same elapsed-time clock tick() already has) is only for
+   * matching the active player's own small camera bob below.
+   */
+  function updateWatchingCamera(dt, t) {
+    // Nothing has ever been viable, or `watchToken` pointed at someone who
+    // has since vanished outright (removeTeammate, not just finished) —
+    // grab whatever's active now if anything is.
+    if (watchToken === null || !teammates.has(watchToken)) {
+      const active = watchActiveCandidates();
+      if (active.length > 0) watchToken = active[0];
+    }
+    const token = watchToken;
+    const entry = token ? teammates.get(token) : null;
+    if (entry && entry.rig.group.visible && entry.livePos?.quat) {
+      // Falling, or a jetpack rescue — a physics-driven, TUMBLING transform,
+      // not a walk. Luke, 2026-09-24: "The camera should follow the player
+      // as they fall, just as it does in that player's own view." The
+      // trailing-shot branch below reads `entry.rig.group.rotation.y` as a
+      // heading, which is exactly what broke this: a tumbling body's Euler-Y
+      // component isn't a meaningful facing direction at all (it's coupled
+      // to the X/Z tumble), so the trailing camera span wildly instead of
+      // holding still. The active player's own fall camera (see `falling`
+      // in tick()) never trails at all — it eases to a FIXED anchor beside
+      // the edge they fell from, then just looks at the falling figure. This
+      // reproduces that: `entry.fallCamAnchor` is computed once, lazily, the
+      // first frame a quat'd livePos is seen for this teammate (using their
+      // last known WALKING heading, `watchFacing`, since the real per-device
+      // `choiceSide` lean isn't networked), then held fixed exactly like
+      // `fallCamAnchor` is for the local player — see startFall's own
+      // comment for the same FALL_CAM_* constants reused here.
+      const p = entry.rig.group.position;
+      if (!entry.fallCamAnchor) {
+        const side = forward(watchFacing + Math.PI / 2, FALL_CAM_SIDE);
+        const ahead = forward(watchFacing, FALL_CAM_FORWARD);
+        entry.fallCamAnchor = new THREE.Vector3(p.x + side.x + ahead.x, FALL_CAM_HEIGHT, p.z + side.z + ahead.z);
+      }
+      camera.position.lerp(entry.fallCamAnchor, Math.min(1, dt * FALL_CAM_EASE));
+      camera.lookAt(p.x, p.y, p.z);
+    } else if (entry && entry.rig.group.visible) {
+      // The SAME shot the active player's own camera uses (trailingCamPos/
+      // trailingCamLookAt, a direct position `.set()`, no lerp) — Luke,
+      // 2026-09-24: "It should be exactly the same as what the player being
+      // watched sees." The one real gap: the active player's own camera
+      // eases its heading (`facing`) toward their walking direction on its
+      // own curve, at two speeds (fast while moving, slower once stopped)
+      // — reproduced here as `watchFacing`, easing toward the teammate's
+      // CURRENT rig heading, rather than reading that raw heading directly.
+      // Skipping that was the actual bug behind "moves around in odd
+      // ways": the rig's own heading is already a network-smoothed replica
+      // (see updateTeammates' LIVE_POS_SMOOTH lerp), so easing camera
+      // POSITION again on top of it (the old `camera.position.lerp` here)
+      // was a second, redundant layer of lag stacked on the first, while
+      // the actually-missing smoothing (heading) was skipped entirely.
+      // Not reproduced: the walking case's special-cased straightening for
+      // a branch's final hop into an island (see that code's own comment)
+      // — it keys off the active player's own `leg` state, which isn't
+      // networked and would need a new field just for this.
+      const p = entry.rig.group.position;
+      const rawHeading = entry.rig.group.rotation.y;
+      if (watchFacingToken !== token) {
+        watchFacing = rawHeading; // just switched onto them — snap, don't spin through the turn
+        watchFacingToken = token;
+      } else {
+        let delta = rawHeading - watchFacing;
+        delta = ((delta + Math.PI) % (Math.PI * 2)) - Math.PI; // shortest angular distance
+        const ease = entry.phase === 'departing' ? 2.5 : 20; // same two speeds as the active player's own `facing`
+        watchFacing += delta * Math.min(1, dt * ease);
+      }
+      const target = trailingCamPos(p.x, p.z, watchFacing, CAM_BACK);
+      target.x += look.x;
+      target.y += look.y;
+      camera.position.set(target.x, target.y + Math.sin(t * 0.6) * 0.05, target.z);
+      camera.lookAt(trailingCamLookAt(p.x, p.z, watchFacing));
+    } else {
+      // Nobody at all to show yet (e.g. solo dev testing with no real
+      // teammates) — TEMPORARY fallback to the old auto-following camera
+      // so this doesn't just show a frozen, aimless view. Luke, 2026-09-24:
+      // "keep it for now in case this doesn't work, but mark it as ready
+      // for deletion once this has been implemented" — delete this branch,
+      // updateGuideCamera's own watching-era comments, and the role check
+      // in tick() that still routes 'watching' here at all, once the cycle
+      // above has been played with for real and holds up.
+      updateGuideCamera(dt);
+    }
+
+    // Auto-advance once the currently-watched player's OWN round has
+    // genuinely finished — "make sure the final action is fully finished,
+    // and then add a delay of 3s" (Luke, 2026-09-24). `!entry.abduction`
+    // is what "fully finished" means for an abduction specifically: the
+    // local replica saucer (built in updateTeammate's 'departing' handling)
+    // disposes itself once its OWN scripted animation ends, which in the
+    // ordinary case happens before 'gone' ever arrives over the network —
+    // see that dispose call's own comment. A fall/rescue has no equivalent
+    // scripted tail: the last streamed transform is already where they
+    // ended up by the time 'gone' arrives, nothing further to wait out.
+    const justEnded = !!entry && entry.phase === 'gone' && !entry.abduction;
+    if (justEnded) {
+      if (watchAdvanceArmedFor !== token) {
+        clearWatchAdvanceTimer();
+        watchAdvanceArmedFor = token;
+        watchAdvanceTimer = setTimeout(() => {
+          watchAdvanceTimer = null;
+          watchAdvanceArmedFor = null;
+          const next = nextActiveToken(token, 1);
+          if (next !== null) watchToken = next; // else: nobody left active — stays on the finished player, showing the fallback view above until someone else arrives
+        }, WATCH_ADVANCE_DELAY_MS);
+      }
+    } else if (watchAdvanceArmedFor === token) {
+      // They un-ended somehow (shouldn't happen — 'gone' is terminal — but
+      // cheap to guard) or the slot moved on without us; don't fire stale.
+      clearWatchAdvanceTimer();
+    }
+
+    refreshWatchPanel();
+  }
+
+  /**
+   * Paints the top-left panel from the currently-selected watch candidate —
+   * a no-op once it already shows the same token+name, so this is cheap to
+   * call every frame. The name tag is the SAME cardboard-cutout canvas the
+   * player's own in-world tag uses (buildNameTagCanvas, nameTag.js) — Luke,
+   * 2026-09-24: "a real, cardboard nametag next to them, the same as they
+   * do in the game. Not a name written in a font below them." Building one
+   * is async (it loads letter images), so `watchNameRequestId` guards
+   * against painting a stale result if the watcher cycles away before it
+   * resolves — same idea as attachNameTag's own `isCurrent()` guard.
+   */
+  function refreshWatchPanel() {
+    if (!els.watchPanel) return;
+    const token = watchToken;
+    const entry = token ? teammates.get(token) : null;
+    const name = entry?.displayName ?? null;
+    if (watchPanelShownFor === token && watchPanelShownName === name) return;
+    watchPanelShownFor = token;
+    watchPanelShownName = name;
+    if (els.watchAvatar) els.watchAvatar.src = entry ? avatarSrcFor(entry.characterKey) : '';
+    const requestId = ++watchNameRequestId;
+    if (els.watchName) els.watchName.innerHTML = '';
+    if (els.watchName && name && entry) {
+      const glowColor = `#${(entry.colorHex ?? 0xffe9b8).toString(16).padStart(6, '0')}`;
+      buildNameTagCanvas(name, { glowColor })
+        .then(({ canvas }) => {
+          if (requestId !== watchNameRequestId) return; // a later request already superseded this one
+          els.watchName.innerHTML = '';
+          els.watchName.appendChild(canvas);
+        })
+        .catch(() => {}); // same "never let a name-tag build fail loudly" stance as attachNameTag's own callers
+    }
+  }
+
   function removeTeammate(token) {
     const entry = teammates.get(token);
     if (!entry) return;
@@ -4146,7 +4456,14 @@ export function mountSkyPath(container, options = {}) {
     const firing = !!rig.powerup?.flame;
     const detached = !!rescue?.detached;
     const abducting = !!abduction;
-    window.__lastPlayerState = { phase, livePos, powerupKind, firing, detached, abducting, at: Date.now() }; // debug only — see e.g. window.__teammates for the receiving-side equivalent
+    // Targeted and waiting for (or in) the abduction defence — teammates
+    // light the same green glow on this player's rig; see updateTeammate.
+    // `abductPromptOpen` alone stays true through the whole close-and-repel
+    // sequence (it also blocks movement — see requestChoice), but the light
+    // itself has to go the instant the word is confirmed correct, well
+    // before that — see `resistConfirmedEarly`'s own comment.
+    const defending = abductPromptOpen && !resistConfirmedEarly;
+    window.__lastPlayerState = { phase, livePos, powerupKind, firing, detached, abducting, defending, at: Date.now() }; // debug only — see e.g. window.__teammates for the receiving-side equivalent
     onPlayerState?.({
       phase,
       forkIndex,
@@ -4158,6 +4475,7 @@ export function mountSkyPath(container, options = {}) {
       firing,
       detached,
       abducting,
+      defending,
     });
   }
 
@@ -4941,11 +5259,17 @@ export function mountSkyPath(container, options = {}) {
     // replica (see updateTeammate) never had this bug, since it already
     // anchors on the teammate's real RENDERED position.
     const seatNow = currentSeatLateral();
+    // Lost the defence: the green light they've been standing under becomes
+    // the sequence's own, with no dip — see buildWaitingGlow.
+    const glowPreLit = !!localWaitGlow;
+    localWaitGlow?.dispose();
+    localWaitGlow = null;
     abduction.start({
       at: { x: walker.x + seatNow.x, y: walker.y, z: walker.z + seatNow.z },
       targetCard: figure,
       cardHeight: FIGURE_H,
       cardWidth: FIGURE_H * FIGURE_ASPECT,
+      glowPreLit,
     });
     // Luke, 2026-09-13: "being abducted by aliens" is one of the movements
     // everyone else should be able to see. An abduction starts from rest,
@@ -5054,6 +5378,7 @@ export function mountSkyPath(container, options = {}) {
     disposePickupMesh();
     const mine = token === (myToken ?? 'me');
     if (mine) {
+      itemsCollected++; // points system: 0.5 for obtaining either item — see emitRoundEnd
       equipPowerUp(rig, pickupKind);
       // Teammates learn about the new item from this report's own
       // powerupKind flag — same route the test #addJetpack button uses.
@@ -5067,6 +5392,9 @@ export function mountSkyPath(container, options = {}) {
     if (kind === 'pickup-claim') resolvePickupClaim(payload.token);
     else if (kind === 'abduct-target') receiveAbductionTarget(payload);
     else if (kind === 'abduct-result') receiveAbductionResult(payload);
+    else if (kind === 'defence-request') receiveDefenceRequest(payload);
+    else if (kind === 'defence-start') receiveDefenceStart(payload);
+    else if (kind === 'defence-end') receiveDefenceEnd(payload);
   }
 
   // ---------------------------------------------------------------- abduction targeting
@@ -5094,16 +5422,68 @@ export function mountSkyPath(container, options = {}) {
   // target that somehow can't be abducted when the request lands reports
   // 'fizzled' straight back rather than silently swallowing it.
   let pendingAbduction = null; // { byToken, byName } — armed on this device until its next arrival
-  let abductPromptOpen = false; // the defence screen is up — nothing else may move this player
+  let abductPromptOpen = false; // targeted and in the defence (waiting for the guide, or the screen is up) — nothing else may move this player
+  // True from the instant a resist is confirmed correct until this defence
+  // fully ends — Luke, 2026-09-23: the green light "should be removed as
+  // soon as the defender successfully puts in the word", not once the
+  // whole close-and-repel sequence has played out. `abductPromptOpen`
+  // itself has to stay true that whole time (it's also the movement lock),
+  // so this is a second flag purely for notifyPlayerState()'s `defending`
+  // — see its own comment.
+  let resistConfirmedEarly = false;
   let abductDefense = null; // created once `els.abductDefenseStage` exists — see the els block below
+  let abductGuideView = null; // the guide's mirror of it — created once `els.abductGuideStage` exists, same spot
   let noticeTimer = null;
 
+  /** `ms = null` keeps it up until hideNotice(). */
   function showNotice(text, ms = 4000) {
     if (!els.notice) return;
     els.notice.textContent = text;
     els.notice.classList.remove('hidden');
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => els.notice?.classList.add('hidden'), ms);
+    if (ms != null) noticeTimer = setTimeout(() => els.notice?.classList.add('hidden'), ms);
+  }
+
+  function hideNotice() {
+    clearTimeout(noticeTimer);
+    els.notice?.classList.add('hidden');
+  }
+
+  // The hand-held paper message (Luke, 2026-09-23) — the abduction-defence
+  // messages only; everything else still uses #notice. Lowers from the top
+  // of the screen (PAPER_SLIDE_MS, matching chrome.js's transition), stays
+  // for `ms` once fully down (null = until hidePaperMessage()), then lifts.
+  const PAPER_SLIDE_MS = 600;
+  const PAPER_FONT_MAX = 0.085; // × the paper's width — shrunk from here until the text fits
+  let paperTimer = null;
+
+  function fitPaperMessageText() {
+    const box = els.paperMessageText;
+    const w = els.paperMessage.clientWidth;
+    if (!w) return;
+    let size = w * PAPER_FONT_MAX;
+    box.style.fontSize = `${size}px`;
+    while ((box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth) && size > 8) {
+      size *= 0.92;
+      box.style.fontSize = `${size}px`;
+    }
+  }
+
+  function showPaperMessage(text, ms = null) {
+    if (!els.paperMessage) return;
+    els.paperMessageText.textContent = text;
+    fitPaperMessageText();
+    // font-display: swap — the first message can arrive before the font has,
+    // and fallback cursive measures differently; refit once it's in.
+    document.fonts?.load("16px 'Sue Ellen Francisco'").then(fitPaperMessageText, () => {});
+    els.paperMessage.classList.add('shown');
+    clearTimeout(paperTimer);
+    if (ms != null) paperTimer = setTimeout(hidePaperMessage, PAPER_SLIDE_MS + ms);
+  }
+
+  function hidePaperMessage() {
+    clearTimeout(paperTimer);
+    els.paperMessage?.classList.remove('shown');
   }
 
   // ---------------------------------------------------------------- abduction cardboard UI
@@ -5952,17 +6332,156 @@ export function mountSkyPath(container, options = {}) {
     pendingAbduction = { byToken: payload.token, byName: payload.byName ?? 'Someone' };
   }
 
-  /** Called from onArrivedAtFork(): the armed abduction fires now, as a choice. */
+  // ---------------------------------------------------------------- defence queue
+  //
+  // Luke, 2026-09-23: the defence is a guide + defender job now. The moment
+  // a targeted player reaches their next island they're frozen there (no
+  // moving on) under the green light, told "Aliens are coming for you!
+  // Listen to [Guide] to resist them.", and ask their guide for help. The
+  // guide — for whom this "takes priority over everything" — gets "[Player]
+  // is being abducted by aliens! Help them resist.", and shortly after
+  // (MESSAGE_DISPLAY_MS reading it, STAGE_GAP_MS paused, below) both panels
+  // drop together. If the guide is already busy with a teammate, the
+  // new defender simply keeps their message up until it's their turn ("they
+  // will wait their turn" — no queue messaging, it's expected to be rare).
+  // Everyone else on the team sees "[Guide] is helping [Defender] resist
+  // alien abduction." All of these are shown on the hand-held paper graphic
+  // (showPaperMessage — Luke, 2026-09-23), lowered from the top of the screen.
+  //
+  // Three team-scoped relayed events (see useLobby's `game-event` routing):
+  //   'defence-request' {targetName, characterKey} — defender → team; the
+  //     guide queues it (sender = the `token` every relayed event carries).
+  //   'defence-start'   {targetToken, targetName, guideName} — guide → team,
+  //     when it's that defender's turn.
+  //   'defence-end'     {targetToken, targetName, outcome} — defender → team,
+  //     'resisted' | 'abducted'. The DEFENDER's device decides the outcome
+  //     (it has the keyboard); the guide's panel mirrors, and closes on this.
+  //
+  // Solo play has no relay and no guide: the defender's own device runs the
+  // same intro and drops its panel by itself.
+  // "Display for 2s" — how long the intro message itself stays down before
+  // it retracts, on its own clock (unrelated to STAGE_GAP_MS below).
+  const MESSAGE_DISPLAY_MS = 2000;
+  // Every distinct beat of the sequence is separated by a pause on its own
+  // — Luke, 2026-09-23/24, after the first pass had each beat start the
+  // instant the previous one's ANIMATION began rather than once it had
+  // actually finished and been seen: "I want a delay between each stage...
+  // they seem very short" (raised from an initial 0.5s to 1s). Used for:
+  // message-retracted → UI-drops-down, UI-retracted → ship-starts, and
+  // wave-hits → result-message-drops. Deliberately NOT inserted between the
+  // ship arriving and the wave firing — those are meant to read as the same
+  // instant, the wave hitting the ship, not two separate beats.
+  const STAGE_GAP_MS = 1000;
+  const DEFENCE_RESULT_MS = 2000;
+  // A result message's full round trip (down, read, back up) — the guide
+  // waits this out before lowering the next queued defender's message.
+  const DEFENCE_RESULT_TOTAL_MS = PAPER_SLIDE_MS * 2 + DEFENCE_RESULT_MS;
+  let defenceResultTimer = null;
+
+  // A ship prop per in-flight repel sequence (below), not a single shared
+  // one — two different teammates could conceivably resist within moments
+  // of each other, each on their own island, and each needs its own ship.
+  // Pruned as each finishes playing; see tick()'s own update loop.
+  const activeRepelShips = [];
+  // playRepelSequence's own two setTimeouts (ship-start, then wave-trigger)
+  // — tracked so resetDefenceState() can cancel a still-pending one on a
+  // restart/dispose that happens to land inside that delay, same as every
+  // other defence timer here.
+  const pendingRepelTimers = [];
+
+  /**
+   * "After the cardboard UI goes back up, I want the ship to be lowered
+   * quickly towards player and then blown away with the repulsion wave" —
+   * Luke, 2026-09-23. `pos` is the player's rig/figure centre. The ship
+   * (buildRepelledShip, alienAbduction.js) starts its own descend
+   * STAGE_GAP_MS after this is called; the wave fires
+   * REPEL_SHIP_DEFAULTS.descendDur after THAT, timed to land the instant
+   * the ship arrives, so the knockback reads as the wave actually hitting
+   * it rather than two unrelated animations. `onWaveTrigger`, if given,
+   * fires at that same moment — callers hang their own post-wave delay
+   * (e.g. before the "resisted" message) off it rather than guessing at
+   * the ship's timing themselves.
+   */
+  function playRepelSequence(pos, onWaveTrigger) {
+    const startTimer = setTimeout(() => {
+      const ship = buildRepelledShip({ scene, textures: { ship: TEX.spaceship } });
+      ship.start(pos);
+      activeRepelShips.push(ship);
+      const waveTimer = setTimeout(() => {
+        resistWave.trigger(pos);
+        onWaveTrigger?.();
+      }, REPEL_SHIP_DEFAULTS.descendDur * 1000);
+      pendingRepelTimers.push(waveTimer);
+    }, STAGE_GAP_MS);
+    pendingRepelTimers.push(startTimer);
+  }
+
+  // Guide-side safety net only: if a defender's device vanishes mid-defence
+  // (closed tab, dead battery) its 'defence-end' never comes, and the rest
+  // of the queue would wait forever. Comfortably longer than intro + ship.
+  const DEFENCE_STALL_MS = 45000;
+
+  let localWaitGlow = null; // this device's own green light while targeted — see buildWaitingGlow
+  let defenceIntroTimer = null; // defender side: the 2s between 'defence-start' and the panel dropping
+  let helpingNoticeFor = null; // teammate side: whose "[Guide] is helping…" message is up
+  const guideDefenceQueue = []; // guide side: [{ token, name, characterKey }] waiting their turn
+  let guideActiveDefence = null; // guide side: the one being worked on, + its timers
+
+  function defenceGuideName() {
+    return (guideToken && getDisplayName?.(guideToken)) || 'your guide';
+  }
+
+  function avatarSrcFor(key) {
+    const entry = ROSTER.find((c) => c.key === key) ?? ROSTER[0];
+    return `/textures/${entry.tex}.${entry.ext}`;
+  }
+
+  /** Called from onArrivedAtFork(): the armed abduction fires now — freeze here, light up, ask the guide for help. */
   function triggerPendingAbduction() {
     if (!pendingAbduction || abductPromptOpen || !els.abductDefenseStage) return;
-    abductPromptOpen = true;
-    const rosterEntry = ROSTER.find((c) => c.key === characterKey) ?? ROSTER[0];
-    abductDefense.open({
-      avatarSrc: `/textures/${rosterEntry.tex}.${rosterEntry.ext}`,
-      onResist: () => resolveAbductPrompt('resist'),
-      onTimeout: () => resolveAbductPrompt('go'),
+    abductPromptOpen = true; // blocks moving on from here — see requestChoice's own guard
+    resistConfirmedEarly = false;
+    closeAbductMenu();
+    const seatNow = currentSeatLateral();
+    localWaitGlow = buildWaitingGlow({
+      scene,
+      at: { x: walker.x + seatNow.x, y: walker.y, z: walker.z + seatNow.z },
+      card: figure,
+      cardHeight: FIGURE_H,
+      cardWidth: FIGURE_H * FIGURE_ASPECT,
     });
+    notifyPlayerState(); // teammates light the same glow on this rig
+    helpingNoticeFor = null; // this message replaces any teammate's "helping" one
+    showPaperMessage(`Aliens are coming for you! Listen to ${defenceGuideName()} to resist them.`);
+    if (onGameEvent) onGameEvent('defence-request', { targetName: localDisplayName, characterKey });
+    else beginDefenceIntro(); // solo — no guide to wait for
     refreshUI();
+  }
+
+  /** It's this device's turn: hold the message MESSAGE_DISPLAY_MS, retract it, pause STAGE_GAP_MS, then drop the panel. */
+  function beginDefenceIntro() {
+    if (!abductPromptOpen || defenceIntroTimer) return;
+    defenceIntroTimer = setTimeout(() => {
+      if (!abductPromptOpen) {
+        defenceIntroTimer = null;
+        return;
+      }
+      hidePaperMessage();
+      defenceIntroTimer = setTimeout(() => {
+        defenceIntroTimer = null;
+        if (!abductPromptOpen) return;
+        abductDefense.open({
+          avatarSrc: avatarSrcFor(characterKey),
+          onResist: () => resolveAbductPrompt('resist'),
+          onTimeout: () => resolveAbductPrompt('go'),
+          onWordMatched: () => {
+            resistConfirmedEarly = true;
+            localWaitGlow?.release(); // fades out, then updateLocalWaitGlow disposes it
+            notifyPlayerState(); // defending: false — teammates fade theirs too, right now, not once the panel finishes lifting
+          },
+        });
+      }, PAPER_SLIDE_MS + STAGE_GAP_MS);
+    }, MESSAGE_DISPLAY_MS);
   }
 
   function resolveAbductPrompt(choice) {
@@ -5970,15 +6489,136 @@ export function mountSkyPath(container, options = {}) {
     const { byToken } = pendingAbduction;
     pendingAbduction = null;
     abductPromptOpen = false;
+    const outcome = choice === 'go' ? 'abducted' : 'resisted';
+    onGameEvent?.('defence-end', { targetToken: myToken, targetName: localDisplayName, outcome });
     if (choice === 'go') {
-      startAbduction(); // the existing sequence, networked to teammates via `abducting`
-      onGameEvent?.('abduct-result', { toToken: byToken, outcome: 'abducted', targetName: localDisplayName });
+      startAbduction(); // the existing sequence, networked to teammates via `abducting` — takes over localWaitGlow itself
     } else {
       // Resist — the defence screen already confirmed the typed word
-      // matched before calling this; nothing left to check here.
-      onGameEvent?.('abduct-result', { toToken: byToken, outcome: 'resisted', targetName: localDisplayName });
+      // matched before calling this, and already released the green light
+      // and told teammates (onWordMatched, above — see resistConfirmedEarly's
+      // own comment for why that couldn't just reuse abductPromptOpen).
+      // Nothing left to do here but the repel itself.
+      resistCount++; // points system: 0.5 per successful resist — see emitRoundEnd
+      playRepelSequence(figure.getWorldPosition(new THREE.Vector3()), () => {
+        defenceResultTimer = setTimeout(() => showPaperMessage('You resisted the aliens!', DEFENCE_RESULT_MS), STAGE_GAP_MS);
+      });
     }
+    onGameEvent?.('abduct-result', { toToken: byToken, outcome, targetName: localDisplayName });
     refreshUI();
+  }
+
+  /** Per frame, from tick(). */
+  function updateLocalWaitGlow(dt) {
+    if (localWaitGlow && !localWaitGlow.update(dt)) {
+      localWaitGlow.dispose();
+      localWaitGlow = null;
+    }
+  }
+
+  // ---- guide side
+
+  function receiveDefenceRequest(payload) {
+    if (role !== 'guide') return; // 'watching' is a fallen player, not the guide
+    const token = payload.token;
+    if (guideActiveDefence?.token === token || guideDefenceQueue.some((q) => q.token === token)) return;
+    guideDefenceQueue.push({ token, name: payload.targetName ?? 'Your teammate', characterKey: payload.characterKey });
+    if (!guideActiveDefence) startNextGuideDefence();
+  }
+
+  function startNextGuideDefence() {
+    const next = guideDefenceQueue.shift();
+    if (!next) return;
+    closeAbductMenu(); // "priority over everything"
+    guideActiveDefence = { ...next, introTimer: null, stallTimer: null };
+    onGameEvent?.('defence-start', { targetToken: next.token, targetName: next.name, guideName: localDisplayName });
+    showPaperMessage(`${next.name} is being abducted by aliens! Help them resist.`);
+    guideActiveDefence.introTimer = setTimeout(() => {
+      hidePaperMessage();
+      guideActiveDefence.introTimer = setTimeout(() => {
+        abductGuideView?.open({ avatarSrc: avatarSrcFor(next.characterKey) });
+      }, PAPER_SLIDE_MS + STAGE_GAP_MS);
+    }, MESSAGE_DISPLAY_MS);
+    guideActiveDefence.stallTimer = setTimeout(() => finishGuideDefence(next.token, 'abducted'), DEFENCE_STALL_MS);
+  }
+
+  function finishGuideDefence(token, outcome) {
+    const active = guideActiveDefence;
+    if (!active || active.token !== token) return;
+    clearTimeout(active.introTimer);
+    clearTimeout(active.stallTimer);
+    guideActiveDefence = null;
+    hidePaperMessage(); // in case it ended before the intro did
+    abductGuideView?.close(() => {
+      if (outcome === 'resisted') {
+        // On 'abducted' the panel just lifts and the guide watches it
+        // happen (Luke, 2026-09-23).
+        const showResultMessage = () => {
+          defenceResultTimer = setTimeout(() => {
+            showPaperMessage(`${active.name} resisted the aliens!`, DEFENCE_RESULT_MS);
+            defenceResultTimer = setTimeout(() => {
+              defenceResultTimer = null;
+              if (!guideActiveDefence) startNextGuideDefence();
+            }, DEFENCE_RESULT_TOTAL_MS);
+          }, STAGE_GAP_MS);
+        };
+        const rigEntry = teammates.get(token);
+        // No rig entry (shouldn't happen for a real teammate, but keeps a
+        // stray/late report harmless): nothing to play the ship/wave
+        // against, so just show the message on its own delay.
+        if (rigEntry) playRepelSequence(rigEntry.rig.group.position, showResultMessage);
+        else showResultMessage();
+      } else {
+        startNextGuideDefence();
+      }
+    });
+  }
+
+  // ---- routing, every role
+
+  function receiveDefenceStart(payload) {
+    if (payload.targetToken === myToken) {
+      beginDefenceIntro();
+      return;
+    }
+    // A teammate's turn. Not shown to the guide (they have their own
+    // message) or to anyone waiting on their own defence (theirs stays up).
+    if (role === 'guide' || abductPromptOpen) return;
+    helpingNoticeFor = payload.targetToken;
+    showPaperMessage(`${payload.guideName ?? 'Your guide'} is helping ${payload.targetName ?? 'a teammate'} resist alien abduction.`);
+  }
+
+  function receiveDefenceEnd(payload) {
+    if (role === 'guide') {
+      finishGuideDefence(payload.token, payload.outcome);
+      return;
+    }
+    if (helpingNoticeFor && helpingNoticeFor === payload.token) {
+      helpingNoticeFor = null;
+      hidePaperMessage();
+    }
+  }
+
+  /** Restart/dispose: drop every defence timer and light, on every side. */
+  function resetDefenceState() {
+    clearTimeout(paperTimer);
+    clearTimeout(defenceResultTimer);
+    defenceResultTimer = null;
+    clearTimeout(defenceIntroTimer);
+    defenceIntroTimer = null;
+    localWaitGlow?.dispose();
+    localWaitGlow = null;
+    resistConfirmedEarly = false;
+    helpingNoticeFor = null;
+    guideDefenceQueue.length = 0;
+    if (guideActiveDefence) {
+      clearTimeout(guideActiveDefence.introTimer);
+      clearTimeout(guideActiveDefence.stallTimer);
+      guideActiveDefence = null;
+    }
+    abductGuideView?.forceClose();
+    for (const s of activeRepelShips.splice(0)) s.dispose();
+    for (const timer of pendingRepelTimers.splice(0)) clearTimeout(timer);
   }
 
   /** 'abduct-result' — THIS device sent the aliens; here's what happened. */
@@ -6117,14 +6757,41 @@ export function mountSkyPath(container, options = {}) {
   }
 
   function updateWordSigns() {
-    // A guide (or a fallen player in Watch mode, sharing the same camera —
-    // see role checks elsewhere) has no walker of its own any more since
-    // fork-choice broadcasts were scoped to the chooser alone (2026-09-12):
-    // `forkIndex` never advances for it, so the word signs would otherwise
-    // stay frozen on fork 1 forever. `guideIsland` — the guide camera's own
-    // reference point — is what actually tracks progress for these roles.
-    const sec = isSpectatorRole(role) ? sections[guideIsland - 1] : sections[forkIndex - 1];
-    const showCurrent = !leg && !finished && !falling && !abduction && !templeEntry && !rescue && sec?.words;
+    // A guide has no walker of its own any more since fork-choice broadcasts
+    // were scoped to the chooser alone (2026-09-12): `forkIndex` never
+    // advances for it, so the word signs would otherwise stay frozen on
+    // fork 1 forever. `guideIsland` — the guide camera's own reference
+    // point — is what actually tracks progress for that role.
+    //
+    // A fallen player in Watch mode (2026-09-24) is its OWN case, not just
+    // "shares the guide's camera" any more, now that watching cycles
+    // through teammates one at a time instead of riding guideIsland — see
+    // updateWatchingCamera. Luke: "I'd like watching players to see the two
+    // words at each island... a watching player should still see the same
+    // order they would have seen if they were alive." That's true for
+    // free: each device rolls its own left/right placement once, for every
+    // fork, when it first builds its OWN journey (see buildFork's
+    // `aOnLeft`) — `sections` is never rebuilt just because role flips to
+    // 'watching' (becomeSpectator changes nothing about the running scene),
+    // so this device's own `sections[k].words` is still sitting there
+    // exactly as it was while this device was still playing. Showing the
+    // CURRENTLY-WATCHED teammate's fork's words from THIS device's own
+    // `sections` is therefore already "the order they'd have seen alive" —
+    // nothing has to be re-decided or synchronised for that to be true.
+    // Gated on `entry.phase === 'resting'`, the same "awaiting a decision"
+    // idea `!leg` captures for an actual active player — `finished`/
+    // `falling`/etc. all describe THIS device's OWN (long since ended)
+    // round, not the teammate being watched, so they don't apply here.
+    let sec;
+    let showCurrent;
+    if (role === 'watching') {
+      const entry = watchToken ? teammates.get(watchToken) : null;
+      sec = entry ? sections[entry.forkIndex - 1] : null;
+      showCurrent = !!entry && entry.phase === 'resting' && !!sec?.words;
+    } else {
+      sec = isSpectatorRole(role) ? sections[guideIsland - 1] : sections[forkIndex - 1];
+      showCurrent = !leg && !finished && !falling && !abduction && !templeEntry && !rescue && sec?.words;
+    }
     if (!showCurrent) {
       wordSigns.left.visible = false;
       wordSigns.right.visible = false;
@@ -6172,6 +6839,12 @@ export function mountSkyPath(container, options = {}) {
   let finished = false;
   let finishedSuccess = false;
   let correctCount = 0;
+  // Raw per-round facts for the points system — see emitRoundEnd's own
+  // comment for why these are reported as-is rather than converted to a
+  // score here: "a game mode never accumulates or reads a running total
+  // itself; it only ever emits what happened this round" (handoff doc).
+  let itemsCollected = 0; // pickups this device actually claimed (jetpack OR abduction device — see resolvePickupClaim)
+  let resistCount = 0; // successful abduction resists this round — see resolveAbductPrompt
   // Role comes from the caller now, not from a URL parameter read by a
   // Supabase-importing sibling module. `soloRoleToggle` keeps the old
   // one-device convenience of previewing both perspectives, but only when
@@ -6623,7 +7296,6 @@ export function mountSkyPath(container, options = {}) {
     advance: $('advance'),
     reset: $('reset'),
     role: $('role'),
-    hud: $('hud'),
     charSelect: $('charSelect'),
     charList: $('charList'),
     paletteList: $('paletteList'),
@@ -6641,17 +7313,27 @@ export function mountSkyPath(container, options = {}) {
     abductTeamRight: $('abductTeamRight'),
     abductCancel: $('abductCancel'),
     abductDefenseStage: $('abductDefenseStage'),
+    abductGuideStage: $('abductGuideStage'),
+    paperMessage: $('paperMessage'),
+    paperMessageText: $('paperMessageText'),
+    // Watch mode's own top-left cycle panel — see the "watch cycling" section.
+    watchPanel: $('watchPanel'),
+    watchAvatar: $('watchAvatar'),
+    watchName: $('watchName'),
+    watchLeft: $('watchLeft'),
+    watchRight: $('watchRight'),
     notice: $('notice'),
     templeFade: $('templeFade'), // opacity driven by updateTempleEntry()
   };
 
   if (els.abductDefenseStage) abductDefense = createAbductDefense(els.abductDefenseStage);
+  if (els.abductGuideStage) abductGuideView = createAbductGuideView(els.abductGuideStage);
 
   // The role button always shows the current role. In a round it is assigned
   // by the session layer and the button is inert — disabled rather than
   // hidden, so it still reads as confirmation of which role this device has.
   els.role.dataset.role = role;
-  els.role.textContent = role === 'guide' ? 'Guide view' : 'Player view';
+  els.role.textContent = role === 'guide' ? 'Guide view' : role === 'watching' ? 'Watching' : 'Player view';
   if (!soloRoleToggle) {
     els.role.disabled = true;
     els.role.title = 'Role is assigned by the lobby for this round';
@@ -6809,6 +7491,15 @@ export function mountSkyPath(container, options = {}) {
         pendingAbduction = { byToken: 'debug-attacker', byName: 'A debug attacker' };
         triggerPendingAbduction();
       };
+      // Same idea, for the guide's own mirror screen (createAbductGuideView,
+      // abductDefense.js) — not yet wired to a real cross-device trigger (see
+      // TODO.md's "Guide's abduction-defence view" entry), so this is the
+      // only way to see it today. Console-only.
+      window.__debugTriggerGuideView = () => {
+        if (!abductGuideView) return;
+        const rosterEntry = ROSTER.find((c) => c.key === characterKey) ?? ROSTER[0];
+        abductGuideView.open({ avatarSrc: `/textures/${rosterEntry.tex}.${rosterEntry.ext}` });
+      };
     }
     // Luke, 2026-09-13: "the guide should have no physical presence in the
     // game at any point... with one guide and three players [every device]
@@ -6822,6 +7513,16 @@ export function mountSkyPath(container, options = {}) {
     // player's screen. Watch mode is excluded for the same reason: a fallen
     // player has no more position to report either.
     if (!isSpectatorRole(role)) notifyPlayerState();
+    // Luke, 2026-09-25: "the guide chooses an avatar. This avatar is not
+    // displayed in the round that they are guiding, but is chosen and
+    // retained. It should be displayed on this [victory] screen." Can't
+    // reuse notifyPlayerState for this — that's exactly the call the
+    // comment just above this exists to withhold from the guide, since it's
+    // what used to leak a phantom guide rig into a live player's own game.
+    // This is a separate, narrower event: useLobby.js stores it straight
+    // into its own session-wide character table without ever reaching
+    // updateTeammate(), so it can't cause that bug to come back.
+    if (role === 'guide') onGameEvent?.('guide-character', { characterKey: pickedCharacter, colorHex: pickedColorHex });
   }
   els.charStart.addEventListener('click', () => {
     finishCharacterSelect();
@@ -6894,7 +7595,14 @@ export function mountSkyPath(container, options = {}) {
   function emitRoundEnd(success) {
     if (roundEndEmitted) return;
     roundEndEmitted = true;
-    if (onRoundEnd) onRoundEnd({ success, forkIndex, correctCount, totalForks: N_FORKS });
+    // Luke, 2026-09-25: "1 bonus point if they reach the final island with a
+    // jetpack still on" — only meaningful on the SUCCESS path (a fall/
+    // abduction never reaches the final island at all), and reads the
+    // jetpack as of right now rather than some earlier moment: one rescue
+    // already consumes it (see resolveRescue), so this is naturally false
+    // for anyone who used it to survive a wrong answer earlier in the round.
+    const jetpackKeptAtFinish = success && rig.powerup?.kind === 'jetpack';
+    if (onRoundEnd) onRoundEnd({ success, forkIndex, correctCount, totalForks: N_FORKS, itemsCollected, resistCount, jetpackKeptAtFinish });
   }
 
   // The whole journey — every fork's islands and both its bridges — is
@@ -6950,7 +7658,7 @@ export function mountSkyPath(container, options = {}) {
    * that reintroduces divergence — see TODO.md.
    */
   function requestChoice(side) {
-    if (leg || finished || falling || !canAct || abductPromptOpen) return; // Resist/Go must be answered first — see triggerPendingAbduction
+    if (leg || finished || falling || !canAct || abductPromptOpen) return; // frozen from the moment they're targeted, through any wait for the guide, until the defence ends — see the "defence queue" section
     if (onForkChoice) onForkChoice(forkIndex, side);
     else applyChoice(side); // no owner listening: solo play, decide it here
   }
@@ -6973,6 +7681,8 @@ export function mountSkyPath(container, options = {}) {
     finishedSuccess = false;
     falling = false;
     correctCount = 0;
+    itemsCollected = 0;
+    resistCount = 0;
     choiceSide = null;
     holdingForward = false;
     templeEntry = null;
@@ -7012,6 +7722,9 @@ export function mountSkyPath(container, options = {}) {
     pendingAbduction = null;
     abductPromptOpen = false;
     abductDefense?.forceClose();
+    resetDefenceState();
+    hideNotice();
+    hidePaperMessage();
     closeAbductMenu();
     startJourney();
     refreshUI();
@@ -7085,6 +7798,9 @@ export function mountSkyPath(container, options = {}) {
   // second way.
   els.abductTeamLeft?.addEventListener('click', () => abductStepTeam(-1));
   els.abductTeamRight?.addEventListener('click', () => abductStepTeam(1));
+
+  els.watchLeft?.addEventListener('click', () => stepWatch(-1));
+  els.watchRight?.addEventListener('click', () => stepWatch(1));
 
   // Hold-to-advance: hold #advance to walk, release to freeze in place —
   // Luke, 2026-09-06: "they will also have to move their card forward by
@@ -7183,10 +7899,6 @@ export function mountSkyPath(container, options = {}) {
 
   // ---------------------------------------------------------------- loop
 
-  let fps = 0;
-  let frames = 0;
-  let fpsClock = performance.now();
-  let loadMs = null;
 
   manager.onLoad = async () => {
     if (disposed) return; // see manager.onProgress above
@@ -7218,7 +7930,6 @@ export function mountSkyPath(container, options = {}) {
     // has finished loading by the time this callback fires, by construction
     // of what manager.onLoad means.
     startJourney();
-    loadMs = Math.round(performance.now() - T_START);
     $('loader').classList.add('done');
     if (role === 'watching') {
       // A fallen player's Watch mode already picked a character/colour
@@ -7226,6 +7937,7 @@ export function mountSkyPath(container, options = {}) {
       // again would be a confusing, meaningless extra step, so skip straight
       // past the screen to the same end state Start would have reached.
       finishCharacterSelect();
+      initWatchPanel();
     } else {
       // The guide goes through the exact same screen as a normal player —
       // Luke, 2026-09-13: "we should in fact have the guide pick an avatar,
@@ -7557,6 +8269,16 @@ export function mountSkyPath(container, options = {}) {
     }
 
     updateTeammates(dt);
+    updateLocalWaitGlow(dt);
+    for (let i = activeRepelShips.length - 1; i >= 0; i--) {
+      const s = activeRepelShips[i];
+      s.update(dt);
+      s.facePoint(camera.position);
+      if (!s.playing) {
+        s.dispose();
+        activeRepelShips.splice(i, 1);
+      }
+    }
     updateNameTags();
     updatePickup(t);
 
@@ -7665,10 +8387,14 @@ export function mountSkyPath(container, options = {}) {
     // view in the same way that active players do").
     look.x += (look.tx - look.x) * Math.min(1, dt * 4);
     look.y += (look.ty - look.y) * Math.min(1, dt * 4);
-    if (isSpectatorRole(role)) {
-      // 'watching' is a fallen player's Watch mode — Luke, 2026-09-12:
-      // "they will then share the guide's view" — so it rides the exact
-      // same camera state machine as the guide, not a second copy of it.
+    if (role === 'watching') {
+      // A fallen player's Watch mode (2026-09-24) — cycles through this
+      // team's own other players one at a time, rather than sharing the
+      // guide's own auto-following camera. See the "watch cycling" section,
+      // up near the teammates code, for the full design (and its TEMPORARY
+      // fallback onto updateGuideCamera, still marked for deletion there).
+      updateWatchingCamera(dt, t);
+    } else if (isSpectatorRole(role)) {
       // The guide has no walker/figure of its own to trail (see
       // figure.visible in setCharacter) — an entirely separate camera
       // state machine owns its view instead. See the "guide camera"
@@ -7751,30 +8477,7 @@ export function mountSkyPath(container, options = {}) {
     // role that has no discrete refresh trigger of its own.
     updateWordSigns();
 
-    renderer.render(scene, camera);
-
-    frames++;
-    const now = performance.now();
-    if (now - fpsClock >= 500) {
-      fps = Math.round((frames * 1000) / (now - fpsClock));
-      frames = 0;
-      fpsClock = now;
-      // Temporary diagnostic (2026-09-13), so a real multi-device test can
-      // be read off the screen instead of guessed at: one line per teammate
-      // this device knows about — phase, total reports received, and how
-      // long since the last one. Remove once the tracking work is settled.
-      const teammateLines = Array.from(teammates.entries())
-        .map(([tok, e]) => {
-          const age = e.lastPingAt ? `${Math.round((Date.now() - e.lastPingAt) / 100) / 10}s ago` : 'never';
-          const kind = e.livePos ? (e.livePos.quat ? 'xyz+rot' : 'xz') : '—';
-          return `<br>${e.displayName ?? tok.slice(-4)}: <b>${e.phase}</b> · ${e.pingCount} msgs · last ${age} · ${kind}`;
-        })
-        .join('');
-      els.hud.innerHTML =
-        `<b>${fps}</b> fps · ${surfaceWidth()}×${surfaceHeight()} @${renderer.getPixelRatio().toFixed(1)}x` +
-        (loadMs === null ? '' : ` · loaded <b>${loadMs}</b> ms`) +
-        teammateLines;
-    }
+    resistWave.render(scene, camera);
 
     rafId = requestAnimationFrame(tick);
   }
@@ -7957,6 +8660,18 @@ export function mountSkyPath(container, options = {}) {
     // target, a result) without a second device — same as
     // __testUpdateTeammate for player-state.
     window.__testGameEvent = (kind, payload) => applyGameEvent(kind, payload);
+    window.__repelState = () => ({
+      waveActive: resistWave.active,
+      localWaitGlowExists: !!localWaitGlow,
+      ships: activeRepelShips.map((s) => ({
+        phase: s.phase,
+        pos: s.ship.position.toArray().map((v) => +v.toFixed(2)),
+        opacity: +s.ship.material.opacity.toFixed(2),
+        visible: s.ship.visible,
+      })),
+      figurePos: figure.getWorldPosition(new THREE.Vector3()).toArray().map((v) => +v.toFixed(2)),
+      camPos: camera.position.toArray().map((v) => +v.toFixed(2)),
+    });
     window.__abductUIState = () => ({
       phase: abductAnim?.phase ?? 'closed',
       index: abductIndex,
@@ -8041,6 +8756,7 @@ export function mountSkyPath(container, options = {}) {
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    resistWave.setSize();
   }
 
   const resizeObserver = new ResizeObserver(resize);
@@ -8091,9 +8807,13 @@ export function mountSkyPath(container, options = {}) {
       disposed = true;
       document.removeEventListener('visibilitychange', onTagDebugVisibility); // temporary — see tagDebugLog's own comment
       clearTimeout(noticeTimer);
+      clearWatchAdvanceTimer();
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (abductRafId !== null) cancelAnimationFrame(abductRafId);
+      resetDefenceState();
+      resistWave.dispose();
       abductDefense?.dispose();
+      abductGuideView?.dispose();
       harness?.dispose();
       bgTuner?.dispose();
       rescueTuner?.dispose();

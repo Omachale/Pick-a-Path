@@ -30,6 +30,7 @@ import { useLobby } from './lobby/useLobby.js';
 import Lobby from './lobby/Lobby.jsx';
 import GameRoom from './lobby/GameRoom.jsx';
 import RoundResults from './lobby/RoundResults.jsx';
+import VictoryStage from './victory/VictoryStage.jsx';
 import SkyPath from './skypath/SkyPath.jsx';
 import LavaCavern from './cavern/LavaCavern.jsx';
 import TeacherDashboard from './lobby/TeacherDashboard.jsx';
@@ -75,12 +76,57 @@ function SoloLavaCavern() {
   );
 }
 
+/**
+ * Dev-only, `?victory=1[&players=N]` — mounts the victory stage directly
+ * against made-up scores, no lobby/Supabase/real round needed. Same
+ * reasoning as `?solo=1`/`?cavern=1`: this scene's own look/layout/timing
+ * is what's being iterated on, not the round lifecycle that would normally
+ * feed it.
+ */
+function SoloVictoryStage() {
+  const n = Math.max(1, Math.min(6, Number(params.get('players')) || 4));
+  const roster = Array.from({ length: n }, (_, i) => `p${i + 1}`);
+  const guideToken = 'guide';
+  const names = { p1: 'Zara', p2: 'Milo', p3: 'Indy', p4: 'Bea', p5: 'Sam', p6: 'Kit', guide: 'Ms Frost' };
+  const characters = {
+    p1: { characterKey: 'alien', colorHex: 0xff8844 },
+    p2: { characterKey: 'robot', colorHex: 0x66ccff },
+    p3: { characterKey: 'indy', colorHex: 0xffe066 },
+    p4: { characterKey: 'wizard', colorHex: 0x9b6bff },
+    p5: { characterKey: 'ghost', colorHex: 0x88ffcc },
+    p6: { characterKey: 'monkey', colorHex: 0xff6699 },
+    // The guide picks a character too (character-select runs for every
+    // role) — it's just never shown as a live in-world card during their
+    // own round. Included here so this dev harness actually exercises that
+    // path instead of silently having no data for it.
+    guide: { characterKey: 'woman1', colorHex: 0xffd166 },
+  };
+  const results = {
+    p1: { correctCount: 6, totalForks: 6, itemsCollected: 1, resistCount: 1, jetpackKeptAtFinish: true },
+    p2: { correctCount: 3, totalForks: 6, itemsCollected: 0, resistCount: 0, jetpackKeptAtFinish: false },
+    p3: { correctCount: 6, totalForks: 6, itemsCollected: 1, resistCount: 0, jetpackKeptAtFinish: false },
+    p4: { correctCount: 5, totalForks: 6, itemsCollected: 0, resistCount: 2, jetpackKeptAtFinish: false },
+    p5: { correctCount: 2, totalForks: 6, itemsCollected: 0, resistCount: 0, jetpackKeptAtFinish: false },
+    p6: { correctCount: 6, totalForks: 6, itemsCollected: 1, resistCount: 1, jetpackKeptAtFinish: true },
+  };
+  return (
+    <VictoryStage
+      round={{ roundId: 'solo-victory', roster, guideToken }}
+      roundResultsByToken={results}
+      getDisplayName={(tok) => names[tok] ?? tok}
+      getCharacter={(tok) => characters[tok] ?? { characterKey: null, colorHex: null }}
+      onBackToLobby={() => console.log('[victory] back to lobby')}
+    />
+  );
+}
+
 export default function App() {
   const [sessionCode, setSessionCode] = useState(params.get('join') ?? null);
   const [teacherView, setTeacherView] = useState(false);
   const lobby = useLobby(sessionCode);
 
   if (params.get('cavern') === '1') return <SoloLavaCavern />;
+  if (params.get('victory') === '1') return <SoloVictoryStage />;
   if (params.get('solo') === '1') return <SoloSkyPath />;
   if (params.get('debugKeyboard') === '1') return <KeyboardTestHarness />;
 
@@ -108,6 +154,27 @@ export default function App() {
   // `game-started` broadcast as everyone else and returns to a fresh
   // 'playing' round normally, which DOES need (and gets) a real remount,
   // since the fork sequence and words actually are different.
+  // Points system + victory screen, 2026-09-25: once every player in the
+  // round has reported their own round-ended (see useLobby's
+  // `teamComplete`/`roundResultsByToken`), EVERY device in the group —
+  // including the guide's, which has no `round-ended` of its own and would
+  // otherwise just sit on the live `GameRoom` canvas forever — swaps to the
+  // team-wide victory screen. Checked before the 'playing'/'failed' branch
+  // below so it pre-empts both that live canvas (the guide's case) and an
+  // individual player's own already-shown `RoundResults` (the case where
+  // this device finished before its teammates and was waiting).
+  if (lobby.teamComplete && lobby.round) {
+    return (
+      <VictoryStage
+        round={lobby.round}
+        roundResultsByToken={lobby.roundResultsByToken}
+        getDisplayName={lobby.getDisplayName}
+        getCharacter={lobby.getCharacter}
+        onBackToLobby={lobby.leaveGame}
+      />
+    );
+  }
+
   const failed = lobby.roundPhase === 'results' && lobby.round?.result && !lobby.round.result.success;
   if ((lobby.roundPhase === 'playing' || failed) && lobby.round) {
     return (
@@ -123,8 +190,8 @@ export default function App() {
         sendGameEvent={lobby.sendGameEvent}
         onGameEventReceived={lobby.onGameEventReceived}
         getAbductionTargets={lobby.getAbductionTargets}
+        getDisplayName={lobby.getDisplayName}
         onRoundEnd={lobby.reportRoundEnd}
-        onLeave={lobby.leaveGame}
       />
     );
   }

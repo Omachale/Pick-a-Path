@@ -36,16 +36,18 @@ export default function SkyPath({
   roster = [],
   myToken = null,
   pickup = null,
+  guideToken = null,
   onForkChoice,
   onRoundEnd,
   onPlayerState,
   onGameEvent,
   getAbductionTargets,
+  getDisplayName,
   gameRef,
 }) {
   const containerRef = useRef(null);
-  const callbacks = useRef({ onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets });
-  callbacks.current = { onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets };
+  const callbacks = useRef({ onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets, getDisplayName });
+  callbacks.current = { onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets, getDisplayName };
 
   useEffect(() => {
     const handle = mountSkyPath(containerRef.current, {
@@ -59,6 +61,7 @@ export default function SkyPath({
       roster,
       myToken,
       pickup,
+      guideToken,
       // Only forward a handler if the parent actually supplied one — the game
       // treats a missing onForkChoice as "solo, decide it yourself".
       onForkChoice: onForkChoice
@@ -69,6 +72,7 @@ export default function SkyPath({
       // Same "missing = solo, settle it locally" contract as onForkChoice.
       onGameEvent: onGameEvent ? (kind, data) => callbacks.current.onGameEvent?.(kind, data) : null,
       getAbductionTargets: getAbductionTargets ? () => callbacks.current.getAbductionTargets?.() ?? [] : null,
+      getDisplayName: (tok) => callbacks.current.getDisplayName?.(tok) ?? null,
     });
     if (gameRef) gameRef.current = handle;
     return () => {
@@ -76,7 +80,7 @@ export default function SkyPath({
       if (gameRef) gameRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland, roster, myToken, pickup]);
+  }, [forks, words, role, canAct, crowd, displayName, initialGuideIsland, roster, myToken, pickup, guideToken]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
 }

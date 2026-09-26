@@ -613,7 +613,8 @@ export function buildAbduction({ scene, textures, params = {} }) {
    * glow mark (see below) — everything else about the card is happy with just
    * its height.
    */
-  function start({ at, targetCard = null, cardHeight = 0, cardWidth = 0 }) {
+  function start({ at, targetCard = null, cardHeight = 0, cardWidth = 0, glowPreLit = false }) {
+    state.glowPreLit = glowPreLit;
     anchor.set(at.x, at.y + p.hoverHeight, at.z);
     card = targetCard;
     cardHalfH = cardHeight / 2;
@@ -758,7 +759,12 @@ export function buildAbduction({ scene, textures, params = {} }) {
     // ---- eerie glow
     // In: a fixed, near-instant ramp from t=0 — the first thing to happen in
     // the whole sequence, on purpose (see the header comment).
-    const glowIn = smooth(THREE.MathUtils.clamp(state.time / Math.max(1e-6, p.glowFadeInDur), 0, 1));
+    // glowPreLit: the target already has buildWaitingGlow()'s identical mark
+    // on them (they waited out the defence with it lit) — start at full so
+    // the hand-off from that glow to this one is invisible, not a dip.
+    const glowIn = state.glowPreLit
+      ? 1
+      : smooth(THREE.MathUtils.clamp(state.time / Math.max(1e-6, p.glowFadeInDur), 0, 1));
     // Out: anchored to the START OF THE LIFT PHASE — the instant the card
     // begins to rise — not a fixed time or a fraction of the beam's own
     // extension (both tried first; see ABDUCTION_DEFAULTS' own comment for
@@ -867,6 +873,178 @@ export function buildAbduction({ scene, textures, params = {} }) {
     dispose,
     get duration() {
       return totalDuration(p);
+    },
+  };
+}
+
+/**
+ * The same two green marks buildAbduction() lights at t=0, on their own,
+ * with no ship — Luke, 2026-09-23: "while this new introduction message is
+ * being displayed, show the green light that currently begins the abduction
+ * sequence. This light will stay on until the player is actually abducted
+ * ... or until the aliens are repelled." A queued defender can sit under it
+ * for a long time (waiting for their guide), so it's its own object rather
+ * than a paused abduction. On abduction, dispose this and start the real
+ * sequence with `glowPreLit: true` so the light never dips; on a resist,
+ * `release()` fades it out and `update()` reports when it's done.
+ */
+export function buildWaitingGlow({ scene, at, card = null, cardHeight = 0, cardWidth = 0, params = {} }) {
+  const p = { ...ABDUCTION_DEFAULTS, ...params };
+  const matBase = {
+    color: p.glowColor,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    fog: false,
+  };
+  const groundGlow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ ...matBase, map: glowTexture() }));
+  groundGlow.rotation.x = -Math.PI / 2;
+  groundGlow.renderOrder = 2;
+  groundGlow.scale.setScalar(p.groundGlowRadius * 2);
+  groundGlow.position.set(at.x, at.y + 0.02, at.z);
+  scene.add(groundGlow);
+
+  const cardGlow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ ...matBase, map: glowTextureSoft() }));
+  cardGlow.position.z = 0.02;
+  cardGlow.renderOrder = 2;
+  if (card && cardWidth > 0 && cardHeight > 0) {
+    cardGlow.scale.set(cardWidth * p.cardGlowScale, cardHeight * p.cardGlowScale, 1);
+    card.add(cardGlow);
+  }
+
+  let level = 0; // 0..1, before easing
+  let releasing = false;
+
+  /** Advances the fade; returns false once a released glow has fully faded (caller should dispose). */
+  function update(dt) {
+    if (releasing) level = Math.max(0, level - dt / Math.max(1e-6, p.glowFadeOutDur));
+    else level = Math.min(1, level + dt / Math.max(1e-6, p.glowFadeInDur));
+    const o = smooth(level);
+    groundGlow.material.opacity = o;
+    cardGlow.material.opacity = o * p.cardGlowOpacity;
+    return !(releasing && level === 0);
+  }
+
+  function dispose() {
+    for (const m of [groundGlow, cardGlow]) {
+      m.parent?.remove(m);
+      m.geometry.dispose();
+      m.material.dispose();
+    }
+  }
+
+  return {
+    update,
+    release: () => {
+      releasing = true;
+    },
+    dispose,
+  };
+}
+
+/**
+ * A short "the ship makes a run at them, then gets blown away" beat for a
+ * successful resist — Luke, 2026-09-23: "after the cardboard UI goes back
+ * up, I want the ship to be lowered quickly towards player and then blown
+ * away with the repulsion wave." Two phases, no beam/string/card (a resist
+ * never reaches the real abduction's beam stage): a fast descend to just
+ * above the player, then a knockback straight up — the resist wave (see
+ * resistWave.js) travels dead vertical by design, so the ship is flung the
+ * same way, along it, tumbling and shrinking as it recedes rather than
+ * arcing off to a side the wave never touched.
+ *
+ * Its own tiny state machine rather than reusing buildAbduction()'s
+ * PHASES/phaseAt: that machine is built around the beam/card choreography
+ * this doesn't have, and bending it to skip straight to a two-beat
+ * descend-then-blow would be more contortion than the two easing lines
+ * this needs on its own.
+ */
+export const REPEL_SHIP_DEFAULTS = {
+  shipWidth: ABDUCTION_DEFAULTS.shipWidth / 2, // "make the ship half as big" — Luke, 2026-09-23
+  hoverHeight: 3.2, // above the player's feet — lower than a real abduction's hover; this is a quick tease, not the full descent
+  descendDistance: 7, // world units above the hover point it starts from
+  descendDur: 0.7, // "lower down at half the speed" — Luke, 2026-09-23; was 0.35 (double the duration over the same descendDistance)
+  blowDistance: 14, // world units it's flung upward before dispose()
+  blowDur: 0.85,
+  spin: 720, // degrees of roll over the whole knockback
+  bobAmp: 0.04, // same suspended-on-a-string drift as the real abduction, while it hovers
+  bobFreq: 0.6,
+};
+
+export function buildRepelledShip({ scene, textures, params = {} }) {
+  const p = { ...REPEL_SHIP_DEFAULTS, ...params };
+  const shipH = p.shipWidth / SHIP_ASPECT;
+  const ship = new THREE.Mesh(
+    new THREE.PlaneGeometry(p.shipWidth, shipH),
+    new THREE.MeshBasicMaterial({ map: textures.ship, transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
+  );
+  ship.visible = false;
+  scene.add(ship);
+
+  const anchor = new THREE.Vector3();
+  let phase = 'idle'; // 'descend' | 'blow' | 'idle'
+  let t = 0;
+
+  function start(at) {
+    anchor.set(at.x, at.y + p.hoverHeight, at.z);
+    ship.position.set(anchor.x, anchor.y + p.descendDistance, anchor.z);
+    ship.rotation.z = 0;
+    ship.scale.setScalar(1);
+    ship.material.opacity = 1;
+    ship.visible = true;
+    phase = 'descend';
+    t = 0;
+  }
+
+  /** Yaws to face `point` (the camera) — same billboard-toward-viewer idea as buildAbduction()'s facePoint, yaw only. */
+  function facePoint(point) {
+    ship.rotation.y = Math.atan2(point.x - ship.position.x, point.z - ship.position.z);
+  }
+
+  function update(dt) {
+    if (phase === 'idle') return;
+    t += dt;
+    if (phase === 'descend') {
+      const u = Math.min(1, t / p.descendDur);
+      ship.position.y = anchor.y + p.descendDistance * (1 - easeOut(u));
+      ship.position.y += Math.sin(t * p.bobFreq * Math.PI * 2) * p.bobAmp;
+      if (u >= 1) {
+        phase = 'blow';
+        t = 0;
+      }
+    } else if (phase === 'blow') {
+      const u = Math.min(1, t / p.blowDur);
+      const e = easeIn(u);
+      ship.position.y = anchor.y + p.blowDistance * e;
+      ship.rotation.z = THREE.MathUtils.degToRad(p.spin) * e;
+      ship.scale.setScalar(1 - 0.5 * e);
+      ship.material.opacity = 1 - Math.max(0, (u - 0.6) / 0.4); // holds fully opaque, then fades over the last 40%
+      if (u >= 1) {
+        phase = 'idle';
+        ship.visible = false;
+      }
+    }
+  }
+
+  function dispose() {
+    scene.remove(ship);
+    ship.geometry.dispose();
+    ship.material.dispose();
+  }
+
+  return {
+    start,
+    update,
+    facePoint,
+    dispose,
+    ship,
+    get playing() {
+      return phase !== 'idle';
+    },
+    get phase() {
+      return phase;
     },
   };
 }

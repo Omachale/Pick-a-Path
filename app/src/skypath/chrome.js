@@ -28,7 +28,22 @@ export const SKY_PATH_CHROME = `
   <button id="charStart">Start</button>
 </div>
 
-<div id="hud">—</div>
+<!-- #watchPanel: Watch mode's own top-left HUD (2026-09-24) — Luke, replacing
+     the old auto-following "omniscient" camera for a FALLEN player with a
+     manual cycle through their own team's other players, one at a time.
+     Empty/hidden except in role="watching" — see updateWatchingCamera() and
+     stepWatch() in skyPath.js, which own everything inside it. The old
+     parked/following camera (updateGuideCamera) still backs this up when
+     there's no one to actually show (see that function's own TODO note —
+     it's flagged for deletion once this is proven solid). -->
+<div id="watchPanel" class="hidden">
+  <button id="watchLeft" class="watchArrow watchArrowLeft" title="Previous player" aria-label="Previous player"></button>
+  <div id="watchCard">
+    <img id="watchAvatar" alt="" draggable="false" />
+    <div id="watchName"></div>
+  </div>
+  <button id="watchRight" class="watchArrow watchArrowRight" title="Next player" aria-label="Next player"></button>
+</div>
 <button id="role" data-role="guide">Guide view</button>
 
 <!-- Temporary manual trigger for the alien abduction event (Luke, 2026-09-02:
@@ -79,6 +94,11 @@ export const SKY_PATH_CHROME = `
      its own DOM into it (cardboard-track panel, keyboard, avatar, ship)
      the same way the keyboard test harness does, rather than a static
      template — see that file's own header for why.
+     #abductGuideStage: the GUIDE's own mirror of that screen (2026-09-23)
+     — "the same UI the defending player uses... but no keyboard", showing
+     the guide the word to read out instead of letting them type. Same
+     empty-on-purpose treatment; createAbductGuideView() in
+     abductDefense.js builds into it.
      #notice: a short self-hiding message. All hidden until needed. -->
 <div id="abductMenu" class="hidden">
   <div id="abductStage">
@@ -90,6 +110,12 @@ export const SKY_PATH_CHROME = `
   <button id="abductCancel" title="Cancel">✕</button>
 </div>
 <div id="abductDefenseStage"></div>
+<div id="abductGuideStage"></div>
+<!-- #paperMessage: the abduction-defence messages (2026-09-23) — Luke's
+     hand-held paper graphic, text written on it in Sue Ellen Francisco,
+     lowered from the top of the screen and raised again. Driven by
+     showPaperMessage()/hidePaperMessage() in skyPath.js. -->
+<div id="paperMessage"><img src="/textures/paper-message.png" alt="" draggable="false" /><div id="paperMessageText"></div></div>
 <div id="notice" class="hidden"></div>
 <!-- The temple-doors ending: opacity driven directly by updateTempleEntry()
      in skyPath.js, frame by frame — no CSS transition here, since the fade's
@@ -117,22 +143,94 @@ export const SKY_PATH_CSS = `
 }
 .skypath-surface canvas { display: block; touch-action: none; }
 
-.skypath-surface #hud {
+/* #watchPanel — see the markup note above. Sits where the old FPS/debug
+   #hud used to (top-left), shown only for role="watching". */
+.skypath-surface #watchPanel {
   position: absolute;
   top: calc(env(safe-area-inset-top, 0px) + 8px);
   left: 8px;
   z-index: 10;
-  font: 500 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  color: var(--paper);
-  background: rgba(10, 20, 30, 0.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  padding: 7px 10px;
-  border-radius: 8px;
-  pointer-events: none;
-  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
-.skypath-surface #hud b { font-weight: 700; }
+.skypath-surface #watchPanel.hidden { display: none; }
+/* Fixed width, Luke 2026-09-24: "the player avatars aren't all even width
+   it seems, and so when cycling through, the arrows move... place the
+   arrows at a fixed width... and then keep the arrows there." The actual
+   varying element turned out to be the NAME TAG, not the avatar — every
+   figure texture in ROSTER is the same ~0.71 aspect ratio (checked
+   directly), but a name tag's width depends on how many letters are in it
+   (a 3-letter name is under half the width of a 10-letter one at the same
+   height). Rather than key this off the avatar's own (already-constant)
+   width, #watchCard gets a flat fixed width generous enough for most
+   names at full height, with both children constrained to shrink-to-fit
+   inside it (never grow past it) — see #watchAvatar/#watchName canvas
+   below — so the slot truly never changes size regardless of which
+   teammate or how long their name is. */
+.skypath-surface #watchCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  width: 84px;
+  flex: 0 0 84px;
+}
+.skypath-surface #watchAvatar {
+  /* "big should only mean the same size as they are normally in the game"
+     — Luke, 2026-09-24: not blown up like the character-select preview. */
+  max-height: 72px;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+  user-select: none;
+}
+/* #watchName holds the SAME cardboard-cutout name-tag canvas the player's
+   own in-world tag uses (buildNameTagCanvas, nameTag.js) — Luke, 2026-09-24:
+   "a real, cardboard nametag next to them, the same as they do in the game.
+   Not a name written in a font below them." refreshWatchPanel() in
+   skyPath.js appends the built <canvas> here; this just sizes it — capped
+   to the fixed #watchCard width above rather than a flat height, so a long
+   name shrinks to fit instead of stretching the slot (see that rule's own
+   comment). */
+.skypath-surface #watchName canvas {
+  display: block;
+  max-height: 26px;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.4));
+}
+/* The two cycle arrows — Luke: "make these arrows look vaguely cardboard,
+   but quite simple." Rather than hand-cutting new PNG assets (this
+   project's numeral-art attempts went badly trying exactly that — see
+   TODO.md), each arrow is a plain triangle cut from the SAME photographed
+   cardboard texture the keyboard panel already uses (cardboard-panel.png),
+   via clip-path — no pixel editing at all, and easy to re-aim at a
+   different patch of the source photo later by nudging background-position
+   if this patch reads wrong once seen live. */
+.skypath-surface .watchArrow {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  background-color: transparent;
+  background-image: url('/textures/cardboard-panel.png');
+  background-size: 420% 420%;
+  cursor: pointer;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+}
+.skypath-surface .watchArrowLeft {
+  clip-path: polygon(100% 0%, 100% 100%, 0% 50%);
+  background-position: 30% 40%;
+}
+.skypath-surface .watchArrowRight {
+  clip-path: polygon(0% 0%, 0% 100%, 100% 50%);
+  background-position: 60% 55%;
+}
 
 .skypath-surface #role {
   position: absolute;
@@ -279,7 +377,53 @@ export const SKY_PATH_CSS = `
   overflow: hidden;
   display: none;
 }
+/* #abductGuideStage — same treatment as #abductDefenseStage above, its own
+   stacking context (both stay display:none until opened, so they never
+   actually show at once in practice). */
+.skypath-surface #abductGuideStage {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  overflow: hidden;
+  display: none;
+}
 .skypath-surface #notice.hidden { display: none; }
+
+/* The hand-held paper message. The image is cropped so the arm runs off its
+   top edge, so parked at top:0 it reads as being held down from above the
+   screen; hidden = translated fully above it. Above the defence panels
+   (z 30) so it stays readable while one is lowering as the paper lifts. The
+   text box sits over the paper only (it fills the image's lower half — rows
+   299-593 of 595), starting below the thumb. Font size is set in JS to fit
+   — see fitPaperMessageText(). */
+.skypath-surface #paperMessage {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(92vw, 560px, 110vh);
+  z-index: 32;
+  transform: translate(-50%, -105%);
+  transition: transform 600ms cubic-bezier(0.33, 1, 0.68, 1);
+  pointer-events: none;
+  user-select: none;
+}
+.skypath-surface #paperMessage.shown { transform: translate(-50%, 0); }
+.skypath-surface #paperMessage img { display: block; width: 100%; height: auto; }
+.skypath-surface #paperMessageText {
+  position: absolute;
+  left: 7%;
+  right: 7%;
+  top: 59%;
+  bottom: 5%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-family: 'Sue Ellen Francisco', cursive;
+  line-height: 1.1;
+  color: #2c2a26;
+  overflow: hidden;
+}
 
 /* The cardboard target picker (2026-09-18) — see skyPath.js's "abduction
    cardboard UI" section for what draws onto #abductCanvas and how
