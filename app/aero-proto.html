@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Aerodynamics shape comparison</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #16324a; overflow: hidden; touch-action: none; }
+      /* pointer-events:none on panels + auto on their own controls — see
+         paper-plane-proto.html's note; the same "panel silently eats input"
+         trap applies here even though there's no drawing phase in this tool. */
+      #controls, #readouts {
+        position: absolute; z-index: 10; font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.7); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px;
+        pointer-events: none;
+      }
+      #controls * , #readouts * { pointer-events: auto; }
+      #controls { top: 10px; left: 10px; width: 240px; }
+      #readouts { top: 10px; right: 10px; width: 240px; max-height: 96vh; overflow-y: auto; }
+      h3 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #8fb4d4; }
+      h3:first-child { margin-top: 0; }
+      label { display: block; margin-bottom: 6px; }
+      .row { display: flex; justify-content: space-between; }
+      input[type=range] { width: 100%; }
+      button {
+        display: block; width: 100%; margin-top: 6px; border: 0; border-radius: 6px; padding: 7px;
+        font: 700 12px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+      button.secondary { background: #3a5674; color: #eaf2f8; }
+      .plane-readout { border-top: 1px solid rgba(255,255,255,0.15); padding-top: 6px; margin-top: 6px; }
+      .plane-readout .name { font-weight: 700; margin-bottom: 2px; }
+      .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+    </style>
+  </head>
+  <body>
+    <div id="controls">
+      <h3>Launch</h3>
+      <label class="row">angle <span id="angleV"></span>&deg;
+        <input id="angle" type="range" min="5" max="85" step="1" value="45" />
+      </label>
+      <label class="row">power <span id="powerV"></span>
+        <input id="power" type="range" min="2" max="12" step="0.1" value="6" />
+      </label>
+      <h3>Wind</h3>
+      <label class="row">direction <span id="windDirV"></span>&deg;
+        <input id="windDir" type="range" min="0" max="359" step="1" value="0" />
+      </label>
+      <label class="row">strength <span id="windStrengthV"></span>
+        <input id="windStrength" type="range" min="0" max="6" step="0.1" value="0" />
+      </label>
+      <h3>Aero tuning</h3>
+      <label class="row">lift coef <span id="liftCoefV"></span>
+        <input id="liftCoef" type="range" min="0" max="0.2" step="0.002" value="0.05" />
+      </label>
+      <label class="row">drag coef <span id="dragCoefV"></span>
+        <input id="dragCoef" type="range" min="0" max="0.15" step="0.002" value="0.03" />
+      </label>
+      <label class="row">wind coef <span id="windCoefV"></span>
+        <input id="windCoef" type="range" min="0" max="0.2" step="0.002" value="0.04" />
+      </label>
+      <h3>Launch</h3>
+      <button id="launchAll">Launch all three</button>
+      <button id="launchGlider" class="secondary">Launch glider only</button>
+      <button id="launchMiddle" class="secondary">Launch middle only</button>
+      <button id="launchDart" class="secondary">Launch dart only</button>
+      <button id="resetAll" class="secondary">Reset all</button>
+    </div>
+    <div id="readouts"></div>
+    <script type="module" src="/src/aeroProto.js"></script>
+  </body>
+</html>

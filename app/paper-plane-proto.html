@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Paper plane fold diagnostic</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #16324a; overflow: hidden; touch-action: none; }
+      /* pointer-events:none on panels + auto on their own controls only —
+         otherwise a panel silently eats any fold swipe that passes over its
+         strip of the screen (found 2026-09-27: a swipe landing on a panel
+         never reached the canvas at all). */
+      #diag {
+        position: absolute; top: 10px; left: 10px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.7); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 260px;
+        max-height: 96vh; overflow-y: auto;
+        pointer-events: none;
+      }
+      #diag * { pointer-events: auto; }
+      #diag h3 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #8fb4d4; }
+      #diag h3:first-child { margin-top: 0; }
+      #diagSelected { font-weight: 700; margin-bottom: 6px; }
+      #diagNone { opacity: 0.7; }
+      #diag label { display: block; margin-bottom: 6px; }
+      #diag .row { display: flex; justify-content: space-between; }
+      #diag input[type=range] { width: 100%; }
+      #diag button {
+        display: block; width: 100%; margin-top: 6px; border: 0; border-radius: 6px; padding: 7px;
+        font: 700 12px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+      #diag button.active { background: #ffce3a; }
+      #diag button.danger { background: #e2554f; color: #fff; }
+      #flaggedList { list-style: none; margin: 4px 0 0; padding: 0; font-size: 11px; }
+      #flaggedList li { padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.12); }
+
+      #hint {
+        position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+        z-index: 10; font: 700 16px system-ui, sans-serif; color: #eaf2f8;
+        text-shadow: 0 2px 6px rgba(0,0,0,0.6); pointer-events: none; text-align: center;
+        max-width: 80vw;
+      }
+      #stepPanel {
+        position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+        z-index: 10; display: none; text-align: center; color: #eaf2f8;
+        font: 12px system-ui, sans-serif; background: rgba(10,20,30,0.7); padding: 10px 16px; border-radius: 10px;
+        pointer-events: none;
+      }
+      #stepPanel * { pointer-events: auto; }
+      #stepPanel button {
+        display: block; margin: 8px auto 0; border: 0; border-radius: 8px; padding: 8px 16px;
+        font: 700 13px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hint"></div>
+    <div id="stepPanel">
+      <div id="stepText">Drag to orbit, right-drag to pan, scroll to zoom</div>
+      <button id="stepContinueBtn">Continue</button>
+    </div>
+    <div id="diag">
+      <h3>Selected face</h3>
+      <div id="diagNone">Click a face to inspect it.</div>
+      <div id="diagSelected" style="display:none"></div>
+      <div id="diagFoldControls" style="display:none">
+        <div id="diagFoldName" style="opacity:0.8;margin-bottom:4px;"></div>
+        <label class="row">angle <span id="lockedAngleV"></span>&deg;
+          <input id="lockedAngle" type="range" min="-360" max="360" step="1" value="0" />
+        </label>
+        <button id="freeRotateToggle">Grab to fold: OFF</button>
+        <div style="opacity:0.6;margin-top:4px;font-size:11px;">When on, drag the selected face itself to fold it — always around this same crease axis.</div>
+      </div>
+      <div id="diagStaticNote" style="display:none;opacity:0.7;margin-bottom:6px;">Static piece — no fold to rotate.</div>
+      <button id="flagBtn" style="display:none">Flag as wrong / extra</button>
+      <h3>Flagged faces</h3>
+      <ul id="flaggedList"></ul>
+      <h3>&nbsp;</h3>
+      <button id="startOverBtn">Start over</button>
+    </div>
+    <script type="module" src="/src/paperPlaneProto.js"></script>
+  </body>
+</html>
