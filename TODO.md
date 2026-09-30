@@ -1072,3 +1072,173 @@ Luke: ran repeated flights at two different wind strengths, swept `windCoef` acr
 - **Root cause, confirmed with the headless tool before touching anything**: `aeroPhysics.js` computed the side force's driving term as `relVel.dot(axes.lateral)`. But `axes.lateral` is built perpendicular to `axes.forward`, and `axes.forward` IS `normalize(relVel)` by construction — so `relVel`'s own component along its own perpendicular axis is mathematically zero, always, regardless of wind. `windCoef` was faithfully multiplying an always-~0 quantity, which is exactly "does nothing, regardless of value."
 - **Fix**: the term driving side force is now `wind.dot(axes.lateral)` — how much of the WIND ITSELF blows across the current direction of travel — which does NOT self-cancel, since the wind vector is generally not parallel to `relVel`.
 - **Verified two ways**: the headless tool (`node scripts/aeroSim.mjs`) now shows lateral displacement scaling cleanly with `windCoef` at fixed wind strength (2.06 -> 2.73 -> 6.88 -> 13.6 across 0/0.02/0.1/0.2) where it was flat before; live in the prototype, dart's landing distance under a strong 90° crosswind went from ~11.3 (no wind) to 18.07 with `windCoef` maxed, visibly displaced sideways on screen.
+- Luke's follow-up (2026-09-29): "I think we will likely go with a high wind coefficient. I don't see any reason to not just have wind strength producing a strong effect." Carried into the redesign below as the principle that wind should matter a lot.
+
+### Island Throw: autonomous redesign of the whole minigame (2026-09-29)
+Luke's brief (switched to Opus, asked for an autonomous attempt): players stand on the edge of the temple island once they reach it and throw planes at smaller islands nearby. The islands vary in distance and in height above or below the start, with wind shown by a neutral flag or windsock. Players read the conditions, choose a plane, and throw. It's a separate instance from players still on Sky Path, and no full world is built, just the same ground and cloud visuals. "Worry a lot less about realism... make it clean, with the plane types meaningfully different... be modular... build it with levers that can change how things work."
+
+**Where it lives** (URL: `http://localhost:5181/throw-game.html`). Its own page by design: per the brief it IS a separate scene, not a stand-in for the game world. It reuses the real Sky Path assets throughout, rather than approximating them.
+- `app/src/throwGame/flightModel.js`: the new physics, the plane stats and every lever.
+- `app/src/throwGame/course.js`: the 7 challenges, the seeded random-course generator, collision and scoring. Pure maths, no meshes.
+- `app/src/throwGame/skyBackdrop.js`: Sky Path's land/sea floor, curved sky, wind-cloud sheets (including the hole-punch shader) and far cloud decks. **COPIED from skyPath.js, not imported**: those builders are closures inside `mountSkyPath()`. **Follow-up if this ships:** extract them into one shared module that both use, rather than keeping two copies.
+- `app/src/throwGame/windFlag.js`: the neutral flag.
+- `app/src/throwGame/throwWorld.js`: temple island (`temple-island.glb`, Sky Path's own scaling), course islands (`island-basic-v2.glb` plus `island-circle` deck, measured the same way skyPath.js does), target rings and beacon, trails.
+- `app/src/throwGameProto.js` plus `app/throw-game.html`: input, camera, UI, and the temporary levers panel.
+- `app/scripts/throwSim.mjs`: headless validator. For every challenge x plane it brute-forces ~23k throws and reports hit counts and which plane each course favours. Accepts a lever-override JSON. Run with `node scripts/throwSim.mjs` from `app/`.
+- `app/scripts/throwFindAim.mjs`: finds a bullseye aim for a challenge and plane. Used to confirm the browser game and the headless model agree exactly.
+
+**The flight model: a point mass with explicit per-plane stats, NOT geometry-derived profiles.** Every attempt to tune the profile-area model (entries above) ran into a geometric side effect. Here each plane is speedMin/Max, lift, drag, windPush and guideSeconds, all directly tunable. Key decisions:
+- **Lift is perpendicular to the airflow (default).** A force perpendicular to velocity does no work, so lift can bend a path but never add energy. The old "never lands at max lift" runaway is impossible by construction, not merely unlikely.
+- **Luke's vertical-profile idea is kept as a lever**: lift scales with cos(flight-path angle)^n, so steep climbs and dives present less wing.
+- **Swoop damping (`stability`)** was added after the validator showed an undamped phugoid. A glider thrown faster than its glide speed porpoised, wasting most of its launch energy, and its landing point jumped non-monotonically with tiny changes of pitch (e.g. 155 vs 200 vs 135 units across pitch -15/0/20). The fix adds `stability * dV/dt` to lift; linearising the glide puts the damping ratio at about stability/2.8. With it, glider range rises smoothly with power and pitch.
+- **Wind "push" had a real bug, found by the validator**: the first version was a constant acceleration, so over a 12 s glider flight a modest tailwind added ~170 units of drift. Push now only acts until the plane's velocity along the wind matches the wind speed. That gives crosswinds a terminal drift speed, and tailwinds nothing once the plane outruns them.
+- **`launchWithWind` (default on)**: a real but unhelpful finding from the stricter air-relative model. Throwing with a tailwind lowers airspeed at release, so the glider lost its zoom climb and landed SHORTER in a tailwind than in calm air (111 -> 93). The launch now adds the wind's component along the throw, so tailwinds always help. The crosswind component is deliberately not added, so sideways drift still depends on each plane's windPush.
+
+**Plane identities (default stats), as they came out of tuning:**
+- Dart: fastest launch (11-20), low lift, high drag, windPush 0.2, longest aim guide (1.6 s). Calm range ~50. Best for crosswinds, headwinds and high ground (reaching UP is a launch-energy problem, so the fastest throw climbs best).
+- All-rounder: range ~72, windPush 0.55. Best in medium-range moderate crosswinds.
+- Glider: slow launch (7-16), lift 0.06, glide ratio 12, windPush 1.0, shortest guide (0.45 s). Range ~115 and more with a tailwind. Best for far targets, useless in strong wind.
+- Also found: the glider has a **glide floor**. With a high glide ratio it overshoots close, low targets, since it can't get down fast enough. That's kept as a real tradeoff; near-and-low is dart territory.
+
+**Course design, validated rather than eyeballed.** Each challenge was positioned (reach limits, wind) until the headless validator confirmed its intended plane has the most hits: **7/7**. Hit counts per plane are the forgiveness measure. Glider-only courses are the hardest (73-207 hits of ~23k throws); open courses run ~4000.
+
+**Lever robustness** (validator re-run under each alternative):
+- Still 7/7: stability off, wind mode `air` only, wind mode `push` only, and profile effect off.
+- `launchWithWind` off: 6/7 (the tailwind course breaks, as predicted).
+- Vertical lift with a cap below 1 g: 5/7. The glider's range falls to 85, so the far courses would need moving.
+
+**UI and flow**:
+- Aim with the mouse: x sets bearing ±45°, y sets pitch -25..70°.
+- Hold the left button (or Space) to charge power. The power meter can fill or ping-pong, as a lever.
+- Release to throw. Right-drag orbits the view, the wheel zooms, R resets it.
+- Choose a plane with the cards or 1/2/3. Each card's bars (range, wind grip, aim guide) are computed from the live stats, so they stay honest while tuning.
+- The aim guide is a dashed predicted path, its length set per plane, and it ignores wind by default so the flag has to be read.
+- Chase camera during flight (a lever: chase or fixed). Persistent coloured trails and landing markers.
+- Scoring: 3 points in the inner quarter, 2 within 60% of the radius, 1 on the deck, with best-per-course and a challenge total.
+- Random courses are seeded.
+- The cloud sheets drift WITH the course's wind: a second wind cue, and a lever.
+- Time of day is a lever. It defaults to dusk, since Sky Path's day cycle reaches the temple at sunP = 1.
+- "Copy settings" puts the full lever and stat JSON on the clipboard for baking in.
+
+**Verified**:
+- The page loads with Sky Path's real sky, clouds, floor, temple-island paving and island models.
+- The flag hangs limp on the calm course and streams flat out in the 6.5 crosswind.
+- The game and the headless model agree exactly: "First throw" bullseye 0.8 from centre in 1.6 s in both, and "The far island" glider bullseye 0.1 from centre in 7.6 s in both.
+- The levers panel builds 35 controls that apply live.
+- Fixed during verification: the plane in hand covered the target (camera moved up-left), the flag stood in front of targets (moved to the left edge), and the controls hint overlapped the course panel (moved above the aim readout, and it now fades after the first throw).
+
+**Not done / open**:
+- No player figure: the plane is shown at hand height.
+- No sound.
+- Island collision uses a disc-plus-cone approximation of the real mesh. It's fine at gameplay distances, but it's not the mesh.
+- The temple billboard itself isn't placed, only its island underfoot, since the player faces away from it.
+- (Superseded the same day. See "Island Throw: input redesign" below: aim-with-the-mouse and hold-to-charge were replaced.)
+- Latent bug in the SUPERSEDED aero prototype, noticed while writing this one's orientation code: `aeroPhysics.js`'s `basisQuaternionFromForward` builds a basis `(cross(forward, up), up, forward)` with determinant -1. That's a reflection, so the quaternion it produces is not a proper rotation, and panel normals in `aero-proto.html` may have been subtly wrong. Moot unless that model is revived; the new game uses `orientAlong()` in throwGameProto.js, which builds a proper rotation.
+
+### Island Throw: input redesign, angle sweep + swipe (2026-09-29)
+Luke on the first version: "you've got the player selecting their destination by placing a 3D coordinate. This is too easy, as it does too much of the work for the player." Wanted: upward angle as ONE decision made before launch, by pressing while a value rises and falls ("so that it's hard to choose exactly the value desired"). Lateral direction and power as a SEPARATE decision at launch, by swiping: direction = left/right, length = power.
+- **Phase flow** (`throwGameProto.js`): `angle` (a needle sweeps angleMin..angleMax; tap/click/Space locks it) -> `swipe` (waiting for the swipe) -> `swiping` (press-drag, with yaw and power following the pointer live) -> release throws -> `flying` -> `result`.
+  - A tap with no movement in the swipe phase does nothing, so double-tapping the angle can't fire a zero-power throw.
+  - A swipe that doesn't go up the screen isn't a throw, and toasts "Swipe away from you".
+  - "Re-pick angle" (button, Backspace or A) goes back to the sweep.
+  - Works with mouse drag or touch: OrbitControls' one-finger touch is disabled so a swipe can't spin the camera; look-around is two fingers.
+- **Swipe mapping**: direction measured from straight up the screen maps 1:1 onto throw direction (clamped ±maxYawDeg). Length / (swipeFullPower x the screen's shorter side) = power. That's length only, not speed, as asked.
+- **Angle gauge**: a side-on protractor on the right (the left of the view belongs to the flag). It shows the live value and turns gold with "locked". The plane in hand and the 3D arrow also tilt with the sweep.
+- **New input levers** (panel section "Input"): sweep time (1.2 s min->max default), sweep shape (triangle = constant speed; sine = lingers at the ends, making extremes easier than middle angles), angle range (-10..70 default), swipe length for full power (0.45), and max left/right (50°). The old power-meter lever was removed, since power now comes from the swipe.
+- **Guide default changed to 'arrow'** (launch direction only, and it grows with swipe power). The trajectory guides ('plane'/'full') are still levers but now draw only DURING the swipe. Left as the default, a live trajectory would let players slide the swipe until the line lands on the island, which does the same work Luke objected to. The card's "Aim guide" bar only shows in 'plane' mode.
+- **Verified live with real pointer events**:
+  - The needle sweeps (sampled 58 -> 69 -> 59 -> 27°), and a click locks it (52°).
+  - A drag up-left read "23° left · Power 73%" mid-swipe, with the swipe line, power bar and arrow all tracking.
+  - Release threw with yaw -23.2°, pitch 51.8°, power 0.73.
+  - The still tap, the downward swipe and re-pick all behave as above.
+- **Not re-validated**: the headless validator still searches a perfect grid of aims. Physics and courses are unchanged, so its "which plane suits which course" results still hold, but it doesn't model how much harder the imprecise angle makes a course. A possible next step: sample the locked angle with timing error and measure how many 3-pointers survive.
+- **Follow-up, same day: centred launch point, and no numbers on the angle gauge.** Luke: the swipe angle "seems to be based on a launch point to the right of centre, so that the player has to ask what the angle would be from that point of view." Cause: the home camera had been offset left (x = -1.8) to keep the plane in hand off the target, which put the hand, and the direction arrow, right of centre. The camera is now directly behind the throw point (0, 4.6, 7.2). Extra height, not a sideways offset, keeps the plane below the targets. A stroke slightly left of straight up now shows an arrow leaning slightly left from a centred hand (verified: "11° left" and "9° right" strokes). Knock-ons:
+  - The flag moved to (-3.4, 0, -0.6) to stay in the centred view.
+  - The prompt, swipe readout and power bar moved up into the sky below the course panel, since at the bottom they now covered the centred plane.
+  - "Re-pick angle" moved under the gauge, since centre screen now put it on the target.
+  - The gauge lost its tick labels and live value, per Luke ("remove numbers"). It shows the needle and "Locked" only.
+
+### Island Throw: hold-to-choose launch and softer direction (2026-09-29)
+Luke picked the "softer swipe direction" forgiveness idea, and asked for the instant swipe to become hold-to-choose: press and hold, see the direction and length of an arrow representing the launch vector (left/right angle and power), release to throw, "enabling them to control the launch more precisely".
+- **Softer direction** (new levers `yawSensitivity` 0.6 and `yawDeadzoneDeg` 4): the drag's angle from straight-up maps onto throw direction as `sign * max(0, |angle| - deadzone) * sensitivity`, clamped to `maxYawDeg` (50). Within 4 degrees of straight up is exactly straight, and a fully sideways drag still reaches the maximum (0.6 x 86 = 51.6 -> 50). Verified: a 30 degree drag gives 15.6, 3 degrees gives 0, an ~88 degree drag gives 50.
+- **Hold-to-choose**: press anywhere and hold; the launch arrow follows the drag and release throws. The arrow is now the main readout:
+  - Its direction is the softened left/right throw direction, so it differs from the raw finger path on purpose.
+  - Its length is power (1.6 to 11 units; the range is long because the arrow points away from the camera and perspective squashes it).
+  - A dotted gold ghost continues from the tip to the full-power length, so reserve power is visible without any number.
+  - It goes gold when releasing would throw and grey when releasing would cancel.
+  - It now shows in every guide mode except 'off'; the trajectory guides ('plane'/'full') draw in addition to it.
+- **Cancelling**: releasing after pulling back to within 24 px of the start, after dragging downward (with a "Drag away from you" toast), or after a still tap does not throw. The readout says "Releasing now cancels" while that's the case.
+- **A real precision bug fixed**: the old release re-read the pointer position from the release event itself. On a touchscreen the finger drifts as it lifts off the glass, changing the throw after the player had set it by eye. A release now throws with the aim shown at the last MOVE. Verified by releasing with a pointerup reporting a position 300+ px away: the throw used the held aim exactly (13.5 degrees right, power 0.71).
+- **Pointer robustness**: events only steer the hold if they come from the pointer that started it (id AND type), and a mouse moving with no button down abandons the hold, since that means the release was missed (let go outside the window). `setPointerCapture` failing is no longer fatal. All three came from a test artifact: the pane's real mouse hover, which shares pointer id 1 with the synthetic touch events, once steered a test hold to the wrong place.
+- **Camera raised** slightly again ((0, 5.8, 8.2), was (0, 4.6, 7.2)) so a level-angle arrow spreads over more of the screen.
+- **Test-method note**: synthetic pointer ids other than 1 make `setPointerCapture` throw (no such active pointer), which silently stops a hold from starting. Use id 1 in scripted tests.
+- **Still open**: the readout under the prompt still shows numbers for the player's OWN setting ("14 degrees right, Power 71%"). That's not feedback on how far wrong a throw is, but it can be removed if Luke wants the arrow to be the only cue.
+
+### Island Throw: collapsing plane picker, fast-resolved misses, power shown by the arrow (2026-09-29)
+Luke: remove the numbers from the readout; have the plane menu collapse after a choice and sit on the left out of the way; resolve a throw faster once it has clearly failed to hit an island; remove the power gauge and show power by the arrow getting longer and larger.
+- **Readout**: the words-and-numbers line ("14 degrees right, Power 71%") is gone. The only text left in it is "Releasing now cancels".
+- **Power gauge removed** (bar, its CSS and JS). Power is now shown by the launch arrow alone: longer (1.6 to 11 units) AND thicker (3 to 13 px, in screen pixels so perspective can't squash it) with a bigger head (0.7x to 2.4x). The dotted ghost still shows the reserve. Verified visually: a ~25% pull is a thin arrow with a small head and a long dotted tail, and a 95% pull is a fat arrow with a big head.
+- **Plane picker**: moved to the bottom-left. It starts OPEN, so a new player sees the three options, and any choice collapses it to a small chip ("Glider · tap to change"). Choices by card, by keys 1/2/3, or by tapping the scene all behave as expected:
+  - The chip reopens it.
+  - Tapping the scene tucks it away, and the tap carries on as normal.
+  - A tap on a card doesn't leak through to lock the angle.
+  - The stack is dart, all-rounder, glider from the top down.
+- **Fast-resolve for misses** (new lever `failSpeedup`, default 5x, 1 = off). Flights are deterministic, so at launch the throw is simulated ahead with the game's own stepper (same seed, same 1/120 s step). If it won't land on any island (or crash into one), the last moment the plane was within reach of an island is found (horizontal distance under rim + 6, and not well below the rock). Playback multiplies from 0.5 s after that, and never before 1.2 s of flight, so a near miss is still watched at normal speed until it has gone by. Landings and crashes are left alone; they resolve themselves.
+  - Measured: a full-power glider that overshot ran at ~1.5 sim-s per real second until 3.2 s, then ~7.7, and resolved in ~4.3 s of real time instead of ~13.
+  - A known bullseye got speedupAt = Infinity (no speed-up). An overshoot passing over the target sped up at 2.3 s; a wild throw to the left at 3.0 s, after passing a decoy island there.
+- Also: the 20-second timeout message said "Blown away" even for a plane that simply glided on out of range. It now says "Out of sight, it sailed on past everything".
+- **Not done**: the hold-to-choose arrow still has no numbers by design. The wind flag is hidden behind the picker while it's open; that seemed acceptable since it collapses on the first choice or tap.
+
+### Island Throw: one arrow, colour ramp, slow-motion, arrow length (2026-09-29)
+Luke, from a screenshot: two direction indicators were showing, and the smaller lower one wasn't wanted; the dotted line past the end of the big arrow wasn't wanted either. Also asked for: a slider to slow the flight without affecting the result (max 60% slower); the arrow fatter with power and changing from white toward reddish orange at maximum; a slider for the arrow's length.
+- **Removed the second indicator**: the on-screen line (with its start ring) that traced the raw finger drag. It duplicated the world arrow and disagreed with it, since the arrow shows the softened direction. Its SVG layer, CSS and all the JS that drove it are gone.
+- **Removed the dotted ghost line** past the arrow's tip.
+- **Slow-motion slider**: "Slow the flight (%)", 0 to 60 in steps of 5, default 0. 60 means 40% of normal speed. It scales only how fast the fixed-step simulation is CONSUMED, so it can't change a result. It stacks with the base playback speed (1.5x default) and the miss speed-up. Verified with the game loop driven by virtual time: the same bullseye aim gave the identical result ("0.8 from the centre, 1.6 s in the air") at 0% and at 60%, with frames taken rising 69 -> 172 (exactly 1/0.4) and simulated time per frame dropping to 40%.
+- **Arrow colour and thickness**: white at no power, warm orange (0xffb347) at ~55%, reddish orange (0xff4a1c) at full; grey when releasing would cancel. Width goes 4 to 24 px (was 3 to 13, which Luke didn't feel grew enough). Verified at 26% (pale peach), 57% (orange) and 100% (red-orange).
+- **Arrow length slider**: "Launch arrow length", 4 to 22, default 11. It sets the length at full power; the idle and zero-power lengths are fixed fractions of it. Verified: at 6 the full-power arrow stops short of the target island, and at 11 it reached past it.
+- **Two fixes that came out of doing this**:
+  - Head sizing: with the shaft now 24 px wide at full power, the world-sized head came out NARROWER than the shaft (the head shrinks with distance and the shaft doesn't). The head is now sized in screen pixels, at 2.2x the shaft's width plus 6 px, so it is always wider.
+  - Legibility: a white arrow on pale cloud was nearly invisible at low power. Added a soft dark outline behind both shaft and head (the head via an inverted hull), and the arrow now draws as an overlay, ignoring depth, in a fixed order. The white-to-red colours are unchanged.
+- **Where the sliders live**: both new sliders are in the temporary levers panel (View section), not on the main screen. If the slow-motion control is meant for players, it should move somewhere visible in the final UI.
+- **Test-method note for later**: when this pane's frame loop crawls, take over the loop. Replace `window.requestAnimationFrame` with a function that stores the callback, then call the stored callback yourself with increasing timestamps. That gives deterministic, real-time-independent stepping (used for the slow-motion check).
+
+### Island Throw: plain arrow, and the levers panel wheel (2026-09-29)
+Luke: the mouse wheel over the levers window zoomed the game instead of scrolling the panel, so the lower sliders were unreachable; and the power arrow's look: "a completely normal, standard arrow shape. No rounded head."
+- **Wheel bug**: `#levers` inherited `pointer-events: none` from `.panel`, with `auto` only on its controls, so the wheel over anywhere else in the panel fell through to the canvas and OrbitControls' dolly-zoom. The panel is a scroll container, so `#levers` now takes all pointer input over its area (`pointer-events: auto`), plus `overscroll-behavior: contain` so a wheel at either end doesn't chain onward. Verified with the real wheel: the panel scrolled to the bottom and the scene behind didn't zoom; everything down to the plane stats and the Copy/Reset buttons is reachable. The other panels (course bar, expanded picker) are unchanged and still pass the wheel to the camera in their gaps, which seems fine since none of them scrolls.
+- **Plain arrow**: the round look came from two things: the 3D `Line2` shaft has round end caps, and the 3D cone head reads as a round blob from behind. The arrow is now a screen-space shape instead: an SVG polygon (`#arrowShape`) in a full-screen layer, with a flat-ended rectangular shaft and a sharp triangular head, mitred corners, and a dark outline (`paint-order: stroke fill` keeps the outline behind the fill). It runs from the projected hand to the projected tip of the same 3D launch vector, so direction and length behave as before.
+  - Head width is 2.2x the shaft's plus 6 px, head length 0.95x its width (clamped to 60% of the arrow so a tiny arrow still has a shaft). A screen-space shape also stops the arrow tapering with perspective.
+  - Everything else is as it was: white to warm orange to reddish orange with power, shaft 4 to 24 px, grey and half-transparent when releasing would cancel, hidden in flight and while guide = off, length set by the "Launch arrow length" slider.
+  - All the 3D arrow objects (lines, cones, outlines) and their material bookkeeping were deleted; `guideLine` (the optional trajectory guide) is the only `Line2` left in the aiming code.
+- **Verified**: a low-power hold gives a thin pale arrow with a wider triangular head; a full-power hold gives a fat reddish-orange arrow with a big sharp head; a throw releases normally, the arrow is `display: none` during the flight, and it returns for the next aim.
+
+### Island Throw: collapsed plane picker could not be reopened (2026-09-29)
+
+Luke: clicking the collapsed picker chip did nothing, so planes couldn't be changed.
+Cause: `.panel` is `pointer-events: none` with an explicit allow-list of controls
+set back to `auto`. The list had `.card` but not `#pickerChip`, and when collapsed the
+chip is the only thing visible, so nothing in the panel could receive a click. The
+JS handler was fine. This is the third instance of the panel-eats-clicks pattern
+(see the paper-plane prototype entries). Fix: `.panel #pickerChip` added to the
+allow-list in `throw-game.html`. Any new clickable element in a `.panel` must be
+added to that list.
+
+### PARKED: paper-plane work, both threads (2026-09-30)
+
+Luke parked all paper-plane work to move on to putting the game online. Nothing here is
+broken, and none of it is wired into Sky Path. The entries above are the full history.
+Start with this list.
+
+**Files (all standalone pages, none linked from the real app):**
+- `app/throw-game.html` + `app/src/throwGameProto.js` + `app/src/throwGame/*` (Island Throw, the live thread)
+- `app/scripts/throwSim.mjs`, `throwFindAim.mjs` (headless tuning; run with node from `app/`)
+- `app/paper-plane-proto.html` + `app/src/paperPlaneProto.js` + `app/src/paperPlane/*` (fold prototype, paused after nine passes)
+- `app/aero-proto.html`, `aeroProto.js`, `paperPlane/aeroPhysics.js`, `scripts/aeroSim.mjs` (superseded profile-area aero model)
+- Dev URL: `http://localhost:5181/throw-game.html` (the extra HTML pages are NOT in the production build, which only builds `index.html`)
+
+**State:** Island Throw is playable: 7 hand-authored challenges, 3 planes, angle sweep + hold-to-choose arrow, wind flag, levers panel (temporary). All uncommitted at the time of parking.
+
+**To resume Island Throw:** (1) decide which levers to bake into `LEVER_DEFAULTS`/`INPUT_DEFAULTS`/`VIEW_DEFAULTS`, then delete the levers panel; (2) move the slow-motion and arrow-length sliders somewhere player-facing; (3) `skyBackdrop.js` is a COPY of Sky Path's backdrop closures, so extract a shared module before shipping; (4) validator does not model angle-timing error yet; (5) no player figure or sound; (6) if it ships into the game, CLAUDE.md's "build it in the game" rule applies again (the standalone page was explicitly authorised).
+
+**To resume folding:** Luke's decision was "three creases, then one or two scripted folds after". Not started. Do not re-propose reducing swipes to edge-crossing X/Y: fold shape only ever used the straight chord.
+
+**Gotchas:** `.panel` elements are `pointer-events:none` with an allow-list of clickable selectors (bit us three times); browser-pane tests need `requestAnimationFrame` overridden and synthetic pointer id 1.

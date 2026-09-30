@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Island Throw</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #5a3a52; overflow: hidden; touch-action: none; font-family: system-ui, sans-serif; }
+      /* Panels use pointer-events:none, with auto on their own controls only.
+         Otherwise a panel silently eats clicks meant for the canvas, which is
+         the bug found twice in the paper-plane prototype (see TODO.md). */
+      .panel {
+        position: absolute; z-index: 10; color: #f4ecdf;
+        background: rgba(24, 16, 26, 0.62); backdrop-filter: blur(6px);
+        border-radius: 12px; padding: 10px 12px; pointer-events: none;
+      }
+      .panel button, .panel input, .panel select, .panel summary, .panel label, .panel .card, .panel #pickerChip { pointer-events: auto; }
+      button {
+        border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer;
+        font: 700 12px system-ui, sans-serif; background: #efe3cf; color: #2a1c26;
+      }
+      button.ghost { background: rgba(255,255,255,0.12); color: #f4ecdf; }
+
+      #courseBar { top: 12px; left: 12px; min-width: 250px; }
+      #courseName { font: 800 17px system-ui, sans-serif; margin-bottom: 2px; }
+      #courseSub { font-size: 12px; opacity: 0.75; margin-bottom: 8px; }
+      #courseBar .row { display: flex; gap: 6px; flex-wrap: wrap; }
+      #scoreLine { font-size: 12px; margin-top: 8px; opacity: 0.85; }
+
+      /* The plane picker lives bottom-left. Collapsed it is a single small chip
+         showing the chosen plane, out of the way of the throw; opened it is a
+         stack of cards, and choosing one collapses it again. */
+      #picker { bottom: 14px; left: 12px; display: flex; flex-direction: column-reverse; gap: 8px; padding: 8px; }
+      #picker.collapsed { padding: 6px; }
+      #pickerChip {
+        display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+        padding: 5px 8px; border-radius: 8px; background: rgba(255,255,255,0.08);
+        font: 800 13px system-ui, sans-serif; white-space: nowrap;
+      }
+      #pickerChip .swatch { width: 11px; height: 11px; border-radius: 3px; }
+      #pickerChip small { font: 600 10px system-ui, sans-serif; opacity: 0.6; margin-left: 4px; }
+      #picker.collapsed .card { display: none; }
+      .card {
+        width: 210px; border-radius: 10px; padding: 9px 10px; cursor: pointer;
+        background: rgba(255,255,255,0.07); border: 2px solid transparent; user-select: none;
+      }
+      .card.sel { border-color: #ffce3a; background: rgba(255, 206, 58, 0.12); }
+      .card .name { font: 800 14px system-ui, sans-serif; display: flex; align-items: center; gap: 7px; }
+      .card .key { font-size: 10px; opacity: 0.55; margin-left: auto; }
+      .card .swatch { width: 11px; height: 11px; border-radius: 3px; }
+      .card .tag { font-size: 11px; opacity: 0.75; margin: 3px 0 6px; min-height: 28px; }
+      .bar { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-top: 3px; }
+      .bar span { width: 62px; opacity: 0.75; }
+      .bar i { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.12); position: relative; overflow: hidden; }
+      .bar i b { position: absolute; left: 0; top: 0; bottom: 0; background: #ffce3a; border-radius: 3px; }
+
+      /* The prompt and the cancel notice sit in the open sky just below the
+         course panel. With the camera centred, the plane in hand is at bottom
+         centre, where these used to sit on top of it. There is no power bar:
+         power is shown by the launch arrow itself getting longer and thicker. */
+      #aimReadout {
+        position: absolute; left: 50%; top: 190px; transform: translateX(-50%); z-index: 10;
+        color: #f4ecdf; font: 600 13px system-ui, sans-serif; text-shadow: 0 1px 4px rgba(0,0,0,0.7);
+        pointer-events: none; white-space: nowrap;
+      }
+      #hint {
+        position: absolute; left: 50%; top: 162px; transform: translateX(-50%); z-index: 10; pointer-events: none;
+        color: #fff; font: 800 15px system-ui, sans-serif; text-shadow: 0 1px 6px rgba(0,0,0,0.8); text-align: center;
+        width: min(560px, 90vw);
+      }
+      #toast {
+        position: absolute; left: 50%; top: 22%; transform: translate(-50%, -50%) scale(0.9); z-index: 11;
+        color: #fff; font: 900 34px system-ui, sans-serif; text-shadow: 0 3px 14px rgba(0,0,0,0.6);
+        pointer-events: none; opacity: 0; transition: opacity 0.2s, transform 0.2s; text-align: center;
+      }
+      #toast.on { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      #toast small { display: block; font: 600 14px system-ui, sans-serif; opacity: 0.85; margin-top: 4px; }
+      /* The launch-angle gauge is a side-on protractor. The needle sweeps up and
+         down until the player taps to lock it. */
+      #angleGauge {
+        /* right side: the left side of the view belongs to the wind flag */
+        position: absolute; right: 22px; top: 46%; transform: translateY(-50%); z-index: 10; pointer-events: none;
+        width: 150px; text-align: center; color: #f4ecdf; font: 700 13px system-ui, sans-serif;
+        text-shadow: 0 1px 4px rgba(0,0,0,0.7); transition: opacity 0.2s;
+      }
+      #angleGauge svg { width: 150px; height: 150px; overflow: visible; }
+      #angleGauge.hidden { opacity: 0; }
+      #angleValue { margin-top: -6px; }
+      /* under the gauge, rather than centre screen where it sat on the target */
+      #arrowLayer { position: absolute; left: 0; top: 0; z-index: 9; pointer-events: none; }
+      #repick { position: absolute; right: 30px; top: calc(46% + 96px); z-index: 10; display: none; }
+      #windHud {
+        position: absolute; right: 16px; bottom: 16px; z-index: 10; pointer-events: none; display: none;
+        color: #f4ecdf; font: 600 12px system-ui, sans-serif; text-align: center;
+        background: rgba(24, 16, 26, 0.62); border-radius: 10px; padding: 8px 10px;
+      }
+      #windArrow { font-size: 26px; line-height: 1; display: inline-block; }
+
+      /* Unlike the other panels this one takes ALL pointer input over its area, not
+         just its controls: it is a scroll container, and with pointer-events:none
+         the mouse wheel over its empty parts fell through to the game's camera
+         zoom instead of scrolling the panel (Luke, 2026-09-29). overscroll-behavior
+         stops the wheel chaining to the page when it reaches either end. */
+      #levers { top: 12px; right: 12px; width: 290px; max-height: calc(100vh - 40px); overflow-y: auto; font-size: 12px; pointer-events: auto; overscroll-behavior: contain; }
+      #levers summary { cursor: pointer; font-weight: 800; }
+      #levers details details { margin: 6px 0 0 4px; }
+      #levers .lever { margin: 7px 0; }
+      #levers .lever .top { display: flex; justify-content: space-between; gap: 6px; }
+      #levers .lever .top b { font-weight: 700; }
+      #levers .lever .why { opacity: 0.6; font-size: 10.5px; margin-top: 1px; }
+      #levers input[type=range] { width: 100%; }
+      #levers select { width: 100%; margin-top: 2px; }
+      #levers .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+      #levers h4 { margin: 12px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #d9b98c; }
+    </style>
+  </head>
+  <body>
+    <div id="hint"></div>
+    <div id="angleGauge">
+      <svg viewBox="-12 -112 130 130">
+        <path id="gaugeArc" fill="rgba(24,16,26,0.45)" stroke="rgba(244,236,223,0.5)" stroke-width="1.5" />
+        <g id="gaugeTicks"></g>
+        <line id="gaugeNeedle" x1="0" y1="0" x2="95" y2="0" stroke="#f4ecdf" stroke-width="4" stroke-linecap="round" />
+        <circle cx="0" cy="0" r="5" fill="#f4ecdf" />
+      </svg>
+      <div id="angleValue"></div>
+    </div>
+    <!-- The launch arrow, drawn over the scene by throwGameProto.js. Sharp mitred
+         corners and flat ends: a plain arrow, nothing rounded. paint-order puts
+         the dark outline behind the fill so the outline never eats into it. -->
+    <svg id="arrowLayer" width="100%" height="100%">
+      <polygon id="arrowShape" points="" fill="#fff" stroke="#1a1020" stroke-width="4" stroke-linejoin="miter" stroke-miterlimit="10" paint-order="stroke fill" style="display:none" />
+    </svg>
+    <button id="repick" class="ghost" style="pointer-events:auto">&#x21bb; Re-pick angle</button>
+
+    <div id="courseBar" class="panel">
+      <div id="courseName"></div>
+      <div id="courseSub"></div>
+      <div class="row">
+        <button id="prevCourse" class="ghost">&larr; Prev</button>
+        <button id="nextCourse" class="ghost">Next &rarr;</button>
+        <button id="randomCourse" class="ghost">Random</button>
+        <button id="clearTrails" class="ghost">Clear trails</button>
+      </div>
+      <div id="scoreLine"></div>
+    </div>
+
+    <div id="aimReadout"></div>
+    <div id="picker" class="panel"></div>
+    <div id="toast"></div>
+    <div id="windHud"><div id="windArrow">&uarr;</div><div id="windText"></div></div>
+
+    <div id="levers" class="panel">
+      <details id="leversDetails">
+        <summary>Levers (temporary tuning panel)</summary>
+        <div id="leversBody"></div>
+      </details>
+    </div>
+
+    <script type="module" src="/src/throwGameProto.js"></script>
+  </body>
+</html>
