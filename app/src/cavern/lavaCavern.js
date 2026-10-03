@@ -21,10 +21,10 @@
  * "Make it a separate thing for now and we'll stitch them together once
  * they're ready." skyPath.js is ~5,500 lines and deeply entangled with sky,
  * sun, temple and curtains; adding a second world to it would put a working,
- * just-polished game at risk to answer a question that doesn't need it. What
- * IS shared is what actually costs frames: the same island model, the same
- * `buildBridge` from bridgeGen.js, the same plank meshes. Those are imported,
- * so the thing being measured here is the real thing.
+ * just-polished game at risk to answer a question that doesn't need it. The
+ * spike first measured Sky Path's own island model and rope bridges; since
+ * 2026-10-03 the cavern has its own volcano-proof iron islands and bridges
+ * (ironKit.js), which are also far cheaper to draw.
  *
  * What this is NOT, all on purpose: no networking, no other players, no
  * questions or word signs, no falling, no jetpack, no objective at the
@@ -34,9 +34,17 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { buildBridge, disposeBridge, BRIDGE_DEFAULTS, BRIDGE_ANCHORS } from '../skypath/bridgeGen.js';
-import { createBridgeWind } from '../skypath/bridgeWind.js';
+import { disposeBridge, BRIDGE_ANCHORS } from '../skypath/bridgeGen.js';
 import { attachBgTuner } from '../skypath/bgTuner.js';
+import {
+  IRON_BREAK_T,
+  buildIronIsland,
+  buildIronBridge,
+  breakIronBridge,
+  updateIronBreaks,
+  clearIronBreaks,
+  disposeIronKit,
+} from './ironKit.js';
 
 export const CAVERN_CHROME = `
 <div id="cavLoader">Loading cavern…</div>
@@ -138,6 +146,10 @@ export function mountLavaCavern(container, options = {}) {
     // dome, where the lava will be". Held as a FRACTION so it tracks the dome
     // rather than needing re-tuning every time the dome grows.
     ringHeightFrac: 0.5,
+    // Midspan sag of every bridge, in world units (a bridge spans ~33). Luke,
+    // 2026-10-04: "Increase the sag of the bridge" (it was 0.8). Walkers
+    // follow it — see actorHeight(). Applied on rebuild, like spacing.
+    bridgeSag: 2.4,
     // Gap between adjacent island centres — i.e. how long a bridge is. This
     // is the primary size dial now, not the ring radius: Luke, 2026-09-09,
     // "make the bridge between the islands somewhat longer, but allow some
@@ -272,80 +284,8 @@ export function mountLavaCavern(container, options = {}) {
   const gltfLoader = new GLTFLoader(manager);
   const texLoader = new THREE.TextureLoader(manager);
 
-  const bridgeWind = createBridgeWind();
-  const plankVariants = [];
-  let islandTemplate = null;
-
-  // Same three plank meshes the real bridges use, prepared the same way — the
-  // Blender object-mode scale has to be baked into the geometry before it can
-  // go into an InstancedMesh (see the longer note at skyPath.js's own plank
-  // loader, which this mirrors deliberately rather than diverging from).
-  for (const src of ['models/plank1.glb', 'models/plank2.glb', 'models/plank3.glb']) {
-    gltfLoader.load(src, (gltf) => {
-      gltf.scene.updateWorldMatrix(true, true);
-      let mesh = null;
-      gltf.scene.traverse((o) => {
-        if (o.isMesh && !mesh) mesh = o;
-      });
-      mesh.geometry.applyMatrix4(mesh.matrixWorld);
-      mesh.geometry.computeBoundingBox();
-      const halfThickness = (mesh.geometry.boundingBox.max.y - mesh.geometry.boundingBox.min.y) / 2;
-      bridgeWind.patch(mesh.material, 'instanced');
-      plankVariants.push({ geometry: mesh.geometry, material: mesh.material, halfThickness });
-    });
-  }
-
-  // Prepared exactly the way skyPath.js prepares the same file, because the
-  // raw export is neither the right size nor textured on its deck:
-  //
-  //   - the flattest mesh in the file is the deck (node names have changed
-  //     between exports; the shape hasn't), and it needs the paving texture
-  //     applied to a *clone* of its material — stray geometry has shared that
-  //     material in past exports, so editing it in place can texture things
-  //     it shouldn't;
-  //   - the model's own scale depends on where a tuning slider happened to sit
-  //     at export time, so the deck's real radius is measured off its vertices
-  //     and the whole model rescaled to ISLAND_RADIUS. Measured from vertices
-  //     rather than a bounding box on purpose: Box3 around a flat disc is a
-  //     square, and its bounding sphere overstates radius r as r*sqrt(2),
-  //     which silently shrinks every island to 71% of its intended size.
-  //
-  // Skipping the rescale is exactly what the first run of this file did, and
-  // it filled the screen with one enormous island.
-  const ISLAND_RADIUS = 4; // Sky Path's own value, which the bridge anchors are tuned against
-  gltfLoader.load('models/island-basic-v2.glb', (gltf) => {
-    let deckMesh = null;
-    let flattestHeight = Infinity;
-    gltf.scene.traverse((o) => {
-      if (!o.isMesh) return;
-      o.geometry.computeBoundingBox();
-      const box = o.geometry.boundingBox;
-      const height = box.max.y - box.min.y;
-      if (height < flattestHeight) {
-        flattestHeight = height;
-        deckMesh = o;
-      }
-    });
-
-    const deckMat = deckMesh.material.clone();
-    deckMat.map = texLoader.load('textures/island-circle.png', (t) => {
-      t.colorSpace = THREE.SRGBColorSpace;
-    });
-    deckMat.vertexColors = false;
-    deckMat.color.set(0xffffff);
-    deckMat.needsUpdate = true;
-    deckMesh.material = deckMat;
-
-    gltf.scene.updateWorldMatrix(true, true);
-    const dPos = deckMesh.geometry.attributes.position;
-    const dVert = new THREE.Vector3();
-    let deckRadius = 0;
-    for (let i = 0; i < dPos.count; i++) {
-      dVert.fromBufferAttribute(dPos, i).applyMatrix4(deckMesh.matrixWorld);
-      deckRadius = Math.max(deckRadius, Math.hypot(dVert.x, dVert.z));
-    }
-    islandTemplate = { scene: gltf.scene, scale: ISLAND_RADIUS / deckRadius };
-  });
+  // Islands and bridges are built in code (ironKit.js), so nothing to load
+  // for them here; everything below is the cavern itself.
 
   // ---------------------------------------------------------------- rim
   //
@@ -1077,13 +1017,12 @@ export function mountLavaCavern(container, options = {}) {
   const bridges = [];
   /** Per spoke: the chain of island cursors from the rim inward, centre last. */
   let spokeCursors = [];
+  /** Per spoke, per gap: { left, right } waypoint routes, as buildGap made them (tagged with their bridge). */
+  let spokeRoutes = [];
 
   function spawnIsland(cursor) {
     const group = new THREE.Group();
-    if (islandTemplate) {
-      for (const child of islandTemplate.scene.clone().children) group.add(child);
-      group.scale.setScalar(islandTemplate.scale);
-    }
+    group.add(buildIronIsland({ seed: islands.length }));
     group.position.set(cursor.x, 0, cursor.z);
     world.add(group);
     islands.push(group);
@@ -1104,20 +1043,23 @@ export function mountLavaCavern(container, options = {}) {
       const sideSign = side === 'right' ? 1 : -1;
       const departEdge = localToWorld(cursor, sideSign * BRIDGE_ANCHORS.lateral, BRIDGE_ANCHORS.forward);
       const arriveEdge = localToWorld(target, sideSign * BRIDGE_ANCHORS.lateral, -BRIDGE_ANCHORS.forward);
-      const group = buildBridge(departEdge, arriveEdge, { sag: BRIDGE_DEFAULTS.sag }, bridgeWind, plankVariants);
+      const group = buildIronBridge(departEdge, arriveEdge, { centres: [cursor, target], seed: bridges.length, sag: TUNE.bridgeSag });
       world.add(group);
       bridges.push(group);
       const info = group.userData.bridge;
       departEdge.bridge = info;
       departEdge.bridgeT = 0;
+      departEdge.group = group;
       arriveEdge.bridge = info;
       arriveEdge.bridgeT = 1;
+      arriveEdge.group = group;
       routes[side] = [departEdge, arriveEdge, { x: target.x, z: target.z }];
     }
     return routes;
   }
 
   function clearWorld() {
+    clearIronBreaks();
     for (const b of bridges) {
       world.remove(b);
       disposeBridge(b);
@@ -1126,6 +1068,7 @@ export function mountLavaCavern(container, options = {}) {
     for (const g of islands) world.remove(g);
     islands.length = 0;
     spokeCursors = [];
+    spokeRoutes = [];
   }
 
   /**
@@ -1163,8 +1106,10 @@ export function mountLavaCavern(container, options = {}) {
         cursors.push({ x: p.x, z: p.z, heading: angle + Math.PI }); // +PI: walking inward, toward the centre
       }
       for (let k = 0; k < n; k++) spawnIsland(cursors[k]); // k === n is the shared centre, already spawned
-      for (let k = 0; k < n; k++) buildGap(cursors[k], cursors[k + 1]);
+      const routes = [];
+      for (let k = 0; k < n; k++) routes.push(buildGap(cursors[k], cursors[k + 1]));
       spokeCursors.push(cursors);
+      spokeRoutes.push(routes);
     }
     resetWalker();
   }
@@ -1283,6 +1228,9 @@ export function mountLavaCavern(container, options = {}) {
     a.queue = [];
     a.phase = 'island';
     a.willFall = false;
+    a.fall = null;
+    a.lastPoint = null;
+    a.y = 0;
     a.sinceDepart = 0;
     a.dwell = a.local ? 0 : 0.5 + Math.random() * 3;
   }
@@ -1293,9 +1241,9 @@ export function mountLavaCavern(container, options = {}) {
    * nothing to choose *with*, and alternating at least walks both bridges of
    * the pair over the course of a run.
    *
-   * Recomputed rather than cached from buildWorld: the bridges are already in
-   * the scene, and these are just three waypoints along one of them — cheap,
-   * and always in step with whatever the sliders last did to the layout.
+   * Copied from the routes buildGap made (spokeRoutes) rather than recomputed,
+   * so each waypoint carries its bridge and where along it (bridgeT), which is
+   * what lets a walker follow the deck's sag the way Sky Path's does.
    */
   function nextLeg(a) {
     const cursors = spokeCursors[a.spoke % Math.max(1, spokeCursors.length)];
@@ -1303,27 +1251,99 @@ export function mountLavaCavern(container, options = {}) {
     const cursor = cursors[a.gapIndex];
     const target = cursors[a.gapIndex + 1];
     const sideSign = a.gapIndex % 2 === 0 ? -1 : 1;
-    const departEdge = localToWorld(cursor, sideSign * BRIDGE_ANCHORS.lateral, BRIDGE_ANCHORS.forward);
-    const arriveEdge = localToWorld(target, sideSign * BRIDGE_ANCHORS.lateral, -BRIDGE_ANCHORS.forward);
+    const route = spokeRoutes[a.spoke % Math.max(1, spokeRoutes.length)]?.[a.gapIndex]?.[sideSign < 0 ? 'left' : 'right'];
+    if (!route) return false;
+    const [departEdge, arriveEdge] = route;
 
     // Bots only: a placeholder failure chance standing in for a real wrong
     // answer (see FALL_CHANCE's own comment). Stops partway across the
     // bridge — echoing Sky Path's own wrong-branch treatment
     // (BRIDGE_WRONG_GAP_T) — rather than at the far edge.
-    a.willFall = !a.local && Math.random() < FALL_CHANCE;
+    // The local player only falls when the tuner's "you: fall on next
+    // crossing" asks (there are no questions to get wrong yet).
+    a.willFall = a.local ? !!a.forceFall : Math.random() < FALL_CHANCE;
+    a.forceFall = false;
     if (a.willFall) {
-      const t = 0.5;
+      // Walks up to the bridge's low point and stops there, where its plates
+      // give way: Sky Path's placement (BRIDGE_WRONG_GAP_T) and the same spot
+      // ironKit picks its breakable plates at.
+      const t = IRON_BREAK_T;
       a.queue = [
-        departEdge,
-        { x: THREE.MathUtils.lerp(departEdge.x, arriveEdge.x, t), z: THREE.MathUtils.lerp(departEdge.z, arriveEdge.z, t) },
+        { ...departEdge },
+        {
+          x: THREE.MathUtils.lerp(departEdge.x, arriveEdge.x, t),
+          z: THREE.MathUtils.lerp(departEdge.z, arriveEdge.z, t),
+          bridge: departEdge.bridge,
+          bridgeT: t,
+          breaks: departEdge.group,
+        },
       ];
     } else {
-      a.queue = [departEdge, arriveEdge, { x: target.x, z: target.z }];
+      a.queue = [{ ...departEdge }, { ...arriveEdge }, { x: target.x, z: target.z }];
     }
+    a.lastPoint = { x: a.walker.x, z: a.walker.z };
     a.gapIndex += 1;
     a.phase = 'walking';
     a.sinceDepart = 0;
     return true;
+  }
+
+  /**
+   * Deck height under an actor, relative to the walk plane: Sky Path's rule.
+   * Only while the segment being crossed has both ends on the same bridge
+   * (lastPoint -> head) does the height come from that bridge's own
+   * heightAt(t); everywhere else (an island deck, the hop to its centre) it
+   * is flat. Standing still at a fall point counts as on the bridge.
+   */
+  function actorHeight(a) {
+    const head = a.queue[0];
+    const last = a.lastPoint;
+    if (head && head.bridge && last?.bridge === head.bridge) {
+      const segLen = Math.hypot(head.x - last.x, head.z - last.z);
+      const remaining = Math.hypot(head.x - a.walker.x, head.z - a.walker.z);
+      const frac = segLen > 1e-6 ? THREE.MathUtils.clamp(1 - remaining / segLen, 0, 1) : 1;
+      return head.bridge.heightAt(THREE.MathUtils.lerp(last.bridgeT, head.bridgeT, frac));
+    }
+    if (!head && last?.bridge && a.phase !== 'island') return last.bridge.heightAt(last.bridgeT);
+    return 0;
+  }
+
+  /**
+   * The figure drops through the gap: a scripted tumble with Sky Path's own
+   * starting kick (a little up, a little sideways, a random spin), then
+   * gravity. Hidden once it's well below the deck.
+   */
+  const FALL_GRAVITY = 9.8;
+  const FALL_VISIBLE_SECONDS = 2.4;
+  function startActorFall(a) {
+    const axis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    a.fall = {
+      t: 0,
+      x: a.walker.x,
+      z: a.walker.z,
+      y: a.y,
+      vx: (Math.random() * 2 - 1) * 0.6,
+      vz: (Math.random() * 2 - 1) * 0.6,
+      vy: 0.4,
+      axis,
+      spin: 2 + Math.random() * 2.5,
+    };
+  }
+
+  /** Back onto the island they set off from, ready to try the same gap again. */
+  function recoverActor(a) {
+    a.gapIndex -= 1;
+    const cursors = spokeCursors[a.spoke % Math.max(1, spokeCursors.length)];
+    const home = cursors?.[a.gapIndex];
+    if (home) {
+      a.walker.x = home.x;
+      a.walker.z = home.z;
+    }
+    a.fall = null;
+    a.queue = [];
+    a.lastPoint = null;
+    a.y = 0;
+    a.phase = 'island';
   }
 
   /** Advances one actor along its queue. `wants` is its input: the held button for the local player, the bot timer for everyone else. */
@@ -1334,21 +1354,26 @@ export function mountLavaCavern(container, options = {}) {
     }
     a.sinceDepart += dt;
 
-    let move = walkSpeed() * dt;
+    // The local player covers ground only while ▲ is held, and stops wherever
+    // they are on release, mid-bridge included: Sky Path's hold-to-advance
+    // (Luke, 2026-10-04: "have the forward button move the player
+    // incrementally, the same as in Skypath"). Bots, once they set off, cross
+    // in one go.
+    let move = a.local && !wants ? 0 : walkSpeed() * dt;
     while (move > 0 && a.queue.length) {
       const head = a.queue[0];
       const dx = head.x - a.walker.x;
       const dz = head.z - a.walker.z;
       const dist = Math.hypot(dx, dz);
       if (dist < 1e-4) {
-        a.queue.shift();
+        a.lastPoint = a.queue.shift();
         continue;
       }
       const take = Math.min(move, dist);
       a.walker.x += (dx / dist) * take;
       a.walker.z += (dz / dist) * take;
       move -= take;
-      if (take >= dist - 1e-4) a.queue.shift();
+      if (take >= dist - 1e-4) a.lastPoint = a.queue.shift();
       // Ease toward the direction of travel rather than snapping, so the
       // camera doesn't jerk at each waypoint.
       const targetHeading = Math.atan2(dx, -dz);
@@ -1356,10 +1381,15 @@ export function mountLavaCavern(container, options = {}) {
       a.facing += delta * Math.min(1, dt * 2.5);
     }
 
+    a.y = actorHeight(a);
+
     if (!a.queue.length) {
       if (a.willFall) {
-        // Stopped mid-bridge. stepActors() owns recovery timing for bots —
-        // this function never advances a 'fallen' actor itself.
+        // Reached the low point: the plates break under them and they drop,
+        // at the same instant, as in Sky Path. stepActors() owns recovery
+        // timing — this function never advances a 'fallen' actor itself.
+        if (a.lastPoint?.breaks) breakIronBridge(a.lastPoint.breaks);
+        startActorFall(a);
         a.phase = 'fallen';
         a.willFall = false;
         a.dwell = FALL_RECOVER_SECONDS;
@@ -1376,20 +1406,20 @@ export function mountLavaCavern(container, options = {}) {
 
   function stepActors(dt) {
     for (const a of actors) {
-      if (a.local) {
-        stepActor(a, dt, holdingForward);
-        continue;
-      }
+      if (a.fall) a.fall.t += dt;
       if (a.phase === 'fallen') {
         a.dwell -= dt;
         if (a.dwell <= 0) {
           // Recover onto the island they departed from, same as a rescued
           // Sky Path player returning to normal play — ready to try the same
           // gap again rather than stuck.
-          a.gapIndex -= 1;
-          a.phase = 'island';
-          a.dwell = 1 + Math.random() * 2;
+          recoverActor(a);
+          a.dwell = a.local ? 0 : 1 + Math.random() * 2;
         }
+        continue;
+      }
+      if (a.local) {
+        stepActor(a, dt, holdingForward);
         continue;
       }
       // Bots stand around for a while, then cross the next gap — a local
@@ -1423,6 +1453,7 @@ export function mountLavaCavern(container, options = {}) {
    * actor is always visible regardless of spoke — the point of the icon is
    * to be seen.
    */
+  const fallSpin = new THREE.Quaternion();
   function renderActors() {
     const y = ringY();
     const mySpoke = actors[0]?.spoke ?? 0;
@@ -1436,8 +1467,19 @@ export function mountLavaCavern(container, options = {}) {
       a.fallIcon.visible = visible && !a.local && a.phase === 'fallen';
       if (!visible) continue;
 
-      a.card.position.set(a.walker.x, y + FIGURE_H / 2, a.walker.z);
-      a.card.quaternion.copy(camera.quaternion); // billboard, so a card is never edge-on
+      if (a.fall) {
+        const f = a.fall;
+        a.card.position.set(
+          f.x + f.vx * f.t,
+          y + f.y + FIGURE_H / 2 + f.vy * f.t - 0.5 * FALL_GRAVITY * f.t * f.t,
+          f.z + f.vz * f.t
+        );
+        a.card.quaternion.copy(camera.quaternion).multiply(fallSpin.setFromAxisAngle(f.axis, f.spin * f.t));
+        a.card.visible = f.t < FALL_VISIBLE_SECONDS;
+      } else {
+        a.card.position.set(a.walker.x, y + (a.y ?? 0) + FIGURE_H / 2, a.walker.z);
+        a.card.quaternion.copy(camera.quaternion); // billboard, so a card is never edge-on
+      }
 
       if (a.local) continue;
       // Beacons hold a constant *apparent* size rather than a constant world
@@ -1446,7 +1488,7 @@ export function mountLavaCavern(container, options = {}) {
       // is meant to advertise. Scaled off distance to the camera, so it reads
       // the same whether the actor is one island away or four.
       const d = camera.position.distanceTo(a.card.position);
-      const beaconY = y + FIGURE_H + 0.9 + d * 0.012;
+      const beaconY = y + (a.y ?? 0) + FIGURE_H + 0.9 + d * 0.012;
       a.beacon.position.set(a.walker.x, beaconY, a.walker.z);
       a.beacon.scale.setScalar(Math.max(1, d * 0.035));
       a.beacon.rotation.y += 0.01;
@@ -1527,6 +1569,9 @@ export function mountLavaCavern(container, options = {}) {
   // range) so it feels like the same control, just applied to rotation
   // instead of position — which is what actually buys the bigger arc.
   const look = { yaw: 0, pitch: 0, tyaw: 0, tpitch: 0 };
+  // Dev-only (see __cavernCam below): an inspection camera offset from the
+  // local player, overriding the follow camera while set.
+  let camOverride = null;
   let dragging = null;
   const LOOK_YAW_LIMIT = THREE.MathUtils.degToRad(50);
   const LOOK_PITCH_UP_LIMIT = THREE.MathUtils.degToRad(65); // toward the vent hole overhead
@@ -1591,8 +1636,8 @@ export function mountLavaCavern(container, options = {}) {
     const t = clock.getElapsedTime();
 
     if (ready) {
-      bridgeWind.update(t);
       stepActors(dt);
+      updateIronBreaks(dt);
 
       lavaMat.uniforms.uTime.value = t;
       lavaMat.uniforms.uDarkAlpha.value = TUNE.lavaDarkAlpha;
@@ -1651,6 +1696,11 @@ export function mountLavaCavern(container, options = {}) {
           camera.position.y + restDy + reach * Math.sin(look.pitch),
           camera.position.z + aim.z
         );
+        if (camOverride) {
+          const o = camOverride;
+          camera.position.set(me.walker.x + o.from[0], y + o.from[1], me.walker.z + o.from[2]);
+          camera.lookAt(me.walker.x + o.at[0], y + o.at[1], me.walker.z + o.at[2]);
+        }
       }
       // Rocks now drift along a world-fixed flow field, not anything
       // camera-relative, so this no longer needs to run after the camera
@@ -1719,6 +1769,7 @@ export function mountLavaCavern(container, options = {}) {
       // that raising `spacing` also speeds the walker up to match, so the time
       // between islands stays put (see secondsPerIsland).
       'spacing (bridge len)': slider('spacing', 10, 60, 1),
+      'bridge sag (rebuild)': slider('bridgeSag', 0, 6, 0.1),
       'islands/spoke': slider('islandsPerSpoke', 2, 10, 1),
       'players/spoke': slider('playersPerSpoke', 1, 8, 1, () => populateActors()),
       'lava dark %': slider('lavaDarkAlpha', 0, 1, 0.02),
@@ -1739,6 +1790,9 @@ export function mountLavaCavern(container, options = {}) {
       { label: '3 spokes (120°)', onClick: () => ((spokeCount = 3), buildWorld()) },
       { label: '4 spokes (90°)', onClick: () => ((spokeCount = 4), buildWorld()) },
       { label: 'back to rim', onClick: () => resetWalker() },
+      // There are no questions yet, so nothing can make the local player
+      // fall; this queues one, to see the break and the drop first-hand.
+      { label: 'you: fall on next crossing', onClick: () => actors[0] && (actors[0].forceFall = true) },
     ],
   });
   // Starts collapsed — Luke, 2026-09-10, now that the numbers above are
@@ -1761,7 +1815,7 @@ export function mountLavaCavern(container, options = {}) {
       actors: actors.length,
       visibleActors: actors.filter((a) => a.card.visible).length,
       me: actors[0]
-        ? { x: +actors[0].walker.x.toFixed(2), z: +actors[0].walker.z.toFixed(2), gapIndex: actors[0].gapIndex }
+        ? { x: +actors[0].walker.x.toFixed(2), z: +actors[0].walker.z.toFixed(2), y: +(actors[0].y ?? 0).toFixed(3), gapIndex: actors[0].gapIndex, phase: actors[0].phase }
         : null,
       tune: { ...TUNE },
     });
@@ -1836,6 +1890,10 @@ export function mountLavaCavern(container, options = {}) {
         })),
       };
     };
+    // Inspection camera, relative to the local player at walk-plane height:
+    // __cavernCamAt([dx, dy, dz], [tx, ty, tz]) to set, __cavernCamAt(null) to release.
+    window.__cavernCamAt = (from, at = [0, 0, 0]) => (camOverride = from ? { from, at } : null);
+    window.__cavernFallNext = () => actors[0] && (actors[0].forceFall = true);
     window.__cavernWalk = (on = true) => {
       holdingForward = on;
     };
@@ -1893,6 +1951,7 @@ export function mountLavaCavern(container, options = {}) {
       window.removeEventListener('resize', onResize);
       tuner?.dispose();
       clearWorld();
+      disposeIronKit();
       for (const a of actors) {
         scene.remove(a.card);
         scene.remove(a.beacon);

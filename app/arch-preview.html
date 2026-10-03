@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Shrine arch</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #9fb8c8; overflow: hidden; }
+      #ui {
+        position: absolute; top: 10px; left: 10px; z-index: 10;
+        font: 12px/1.4 system-ui, sans-serif; color: #eaf2f8;
+        background: rgba(10,20,30,0.62); backdrop-filter: blur(6px);
+        padding: 10px 12px; border-radius: 10px; width: 210px;
+      }
+      #ui .seg { display: flex; gap: 4px; margin-bottom: 6px; }
+      #ui button {
+        flex: 1; width: 100%; margin-top: 4px; border: 0; border-radius: 6px; padding: 7px;
+        font: 700 12px system-ui, sans-serif; background: #cfe3f5; color: #12212f; cursor: pointer;
+      }
+      #ui .seg button { margin-top: 0; }
+      #ui button.on { background: #f2c66b; }
+      #stats { opacity: 0.75; margin-top: 6px; }
+      #ui .label { margin: 12px 0 2px; font-weight: 700; letter-spacing: 0.06em; opacity: 0.8; }
+      #ui .seg button { padding: 7px 2px; }
+      #frameNote { opacity: 0.8; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <div class="seg">
+        <button data-mode="unlit" class="on">game</button>
+        <button data-mode="lit">lit</button>
+        <button data-mode="clay">clay</button>
+      </div>
+      <button id="wire">toggle wireframe</button>
+      <button id="figure">toggle 1.7 m figure</button>
+      <button id="palette">next colour scheme</button>
+      <div class="seg">
+        <button id="shape">random shape</button>
+        <button id="baseShape">base shape</button>
+      </div>
+      <button id="reseed">new seed (wear + glyphs)</button>
+      <button id="exportBtn">export .glb (current mode)</button>
+      <div class="label">WORD SIGNS</div>
+      <button id="signs">show word signs (game proportions)</button>
+      <div class="seg">
+        <button data-frame="none" class="on">none</button>
+        <button data-frame="rail">rail</button>
+        <button data-frame="lintel">lintel</button>
+        <button data-frame="scroll">scroll</button>
+      </div>
+      <button id="words">next word pair</button>
+      <div id="frameNote"></div>
+      <div id="stats"></div>
+    </div>
+    <script type="module" src="/src/archProto.js"></script>
+  </body>
+</html>

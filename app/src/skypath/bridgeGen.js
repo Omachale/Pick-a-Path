@@ -658,7 +658,9 @@ export function breakPlank(breakablePlank) {
  */
 export function disposeBridge(group) {
   for (const child of group.children) {
-    child.geometry?.dispose();
+    // sharedGeometry: the Lava Cavern's volcanic bridges reuse a few cached
+    // geometries across every span (cavern/ironKit.js frees those itself).
+    if (!child.userData?.sharedGeometry) child.geometry?.dispose();
     if (!child.userData?.sharedMaterial) child.material?.dispose();
   }
 }

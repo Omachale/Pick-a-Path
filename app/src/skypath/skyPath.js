@@ -37,6 +37,8 @@ import { buildAbduction, buildWaitingGlow, buildRepelledShip, REPEL_SHIP_DEFAULT
 import { createResistWave, RESIST_WAVE_DEFAULTS } from './resistWave.js';
 import { createAbductDefense, createAbductGuideView } from './abductDefense.js';
 import { attachBgTuner } from './bgTuner.js';
+import { buildArch, varyArch, buildSignFrame, ARCH_DEFAULTS, ARCH_PALETTES, ARCH_LIT_FILL } from './archGen.js';
+import { buildArchTextures, buildGlyphTextures } from './archTextures.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildIsland } from './islandGen.js';
 import { buildNameTagCanvas, normalizePlayerName } from './nameTag.js';
@@ -216,9 +218,30 @@ export function mountSkyPath(container, options = {}) {
   // drives everything else now. See TODO.md "World scale rework" for the full
   // reasoning. ISLAND_RADIUS must match the deck's own scale target
   // (ISLAND_TARGET_RADIUS, set from this same constant further down).
-  const ISLAND_RADIUS = 4; // world units — was 6; shrunk by a third, 2026-08-28. See FORK_HALF_ANGLE/FORK_PINCH_WIDTH above and below: both were re-tuned alongside this, since the gap they carve between the two branches at an island scales with ISLAND_RADIUS too and would otherwise have closed to overlapping.
+  // 4.8: widened 20% from 4 (Luke, 2026-10-03, once the shrine arch was on the deck).
+  const ISLAND_RADIUS = 4.8; // world units — was 6; shrunk by a third to 4, 2026-08-28. See FORK_HALF_ANGLE/FORK_PINCH_WIDTH above and below: both were re-tuned alongside this, since the gap they carve between the two branches at an island scales with ISLAND_RADIUS too and would otherwise have closed to overlapping.
   const ISLAND_PATH_GAP = 8; // visible gap between two islands' *edges* — the one real pacing knob
   const FORK_DISTANCE = 2 * ISLAND_RADIUS + ISLAND_PATH_GAP; // forward distance, fork centre to fork centre
+  // bridgeGen's BRIDGE_ANCHORS were tuned against a radius-4 deck (forward =
+  // 4·cos30°) and are shared with the lava cavern, so Sky Path scales its own
+  // copy: the bridge must still leave from the deck's edge, not from inside it.
+  const ISLAND_ANCHORS = {
+    lateral: BRIDGE_ANCHORS.lateral,
+    forward: (BRIDGE_ANCHORS.forward * ISLAND_RADIUS) / 4,
+  };
+  // How far each fork island's centre sits AHEAD of the fork point where the
+  // players stand — i.e. the players stand 20% of a radius toward the back
+  // of their island, leaving the front for the shrine arch (Luke, 2026-10-03).
+  // Done by moving the island rather than the players because the fork point
+  // (sec.fork / nextCursor) anchors the camera, seats, walk legs, jetpack and
+  // abduction landings, and every one of those stays untouched this way. What
+  // moves with the island instead: the island itself, its arch, both ends of
+  // each bridge (the far end only between fork islands — the last bridge
+  // still lands on the temple island's own edge), the fog curtain, and the
+  // stone-suppression zone.
+  const ISLAND_AHEAD = ISLAND_RADIUS * 0.2;
+  /** Where the island under a fork point actually sits. */
+  const islandCentre = (cursor) => localToWorld(cursor, 0, ISLAND_AHEAD);
 
   // The character, separately, was shrunk for a sense of scale — but "the
   // world is big" has to mean the *world* is big relative to a normal-sized
@@ -466,6 +489,8 @@ export function mountSkyPath(container, options = {}) {
   const hemi = new THREE.HemisphereLight(0xbfe0f5, 0x6b5a44, 0.5);
   scene.add(hemi);
 
+  const sunOffset = new THREE.Vector3(); // key light position relative to its target — see applySun
+
   const SUN_DAWN = new THREE.Color(0xff7043);
   const SUN_NOON = new THREE.Color(0xfff6e0);
   const SUN_DUSK = new THREE.Color(0xff5a3c);
@@ -483,7 +508,13 @@ export function mountSkyPath(container, options = {}) {
     const R = 16;
     const H = 13;
     const BASE_Y = 2.2;
-    key.position.set(-Math.cos(angle) * R, BASE_Y + Math.sin(angle) * H, 6);
+    // An offset from key.target (the walker), not a world position. It used
+    // to be absolute, which only matched at the start: as the walker moved
+    // down -Z the light swung round to shine from behind, and past ~40 units
+    // the shadow camera (far = 40) couldn't reach the walker at all. Nothing
+    // showed it until the arches started casting shadows (2026-10-04).
+    sunOffset.set(-Math.cos(angle) * R, BASE_Y + Math.sin(angle) * H, 6);
+    key.position.copy(key.target.position).add(sunOffset);
 
     threeStopLerp(sunColorScratch, SUN_DAWN, SUN_NOON, SUN_DUSK, p);
     key.color.copy(sunColorScratch);
@@ -680,6 +711,7 @@ export function mountSkyPath(container, options = {}) {
       const dPos = deckMesh.geometry.attributes.position;
       const dVert = new THREE.Vector3();
       let deckRadius = 0;
+      let deckTop = -Infinity; // the paving's surface height, for the shadow catcher
       for (let i = 0; i < dPos.count; i++) {
         // Through the mesh's own transform: the deck has been a separately
         // translated child node in some exports and merged into the rock's
@@ -687,13 +719,14 @@ export function mountSkyPath(container, options = {}) {
         // scene root's space.
         dVert.fromBufferAttribute(dPos, i).applyMatrix4(deckMesh.matrixWorld);
         deckRadius = Math.max(deckRadius, Math.hypot(dVert.x, dVert.z));
+        deckTop = Math.max(deckTop, dVert.y);
       }
       // Rescale to the size the game is laid out around (ISLAND_TARGET_RADIUS
       // below) — this export's own scale depends on whatever the tuning
       // page's size slider happened to be at export time, and on the Blender
       // edit afterward, neither of which has any reason to already match.
       const scale = ISLAND_TARGET_RADIUS / deckRadius;
-      const t = { scene: gltf.scene, scale, deckRadiusScaled: deckRadius * scale };
+      const t = { scene: gltf.scene, scale, deckRadiusScaled: deckRadius * scale, deckRadius, deckTop };
       islandTemplates.push(t);
     });
   }
@@ -1748,6 +1781,186 @@ export function mountSkyPath(container, options = {}) {
   const islands = [];
   const islandSpots = []; // fork centres, registered before the stones arrive
 
+  // ------------------------------------------------------------------ shrine arch
+  //
+  // Every fork island gets a shrine arch (archGen.js) toward its front edge,
+  // straddling both bridges, and the fork's word signs hang from its rope —
+  // Luke, 2026-10-03, placement sketched in Blender: the player walks toward
+  // and through it. ARCH is in world units, not the model's metres, because
+  // what constrains it is world-side: the pillars must clear both bridges
+  // (anchored at ±ISLAND_ANCHORS.lateral) and the five seated players, the
+  // gap between them must take two hanging words side by side, and the rope
+  // must be high enough that those words clear the crowd's name tags (the
+  // job WORD_SIGN_Y = 3.6 used to do on its own). So the arch is built
+  // wider-for-its-height than the stand-alone model, and ARCH.scale only sets
+  // how big its carved detail (plinths, bands, brackets) reads.
+  const ARCH = {
+    scale: 3.6,
+    forward: 1.7,       // island centre → arch, along the heading (Luke, tuned 2026-10-03). Bridges leave at ISLAND_ANCHORS.forward (4.16).
+    span: 6.6,          // outer width across the pillars
+    clearHeight: 4.4,   // deck → underside of the beam
+    pillarRadius: 0.26,
+    ropeHeight: 3.75,
+    ropeSag: 0.25,
+    ropeThickness: 0.55,
+    signGap: 0.3,       // between the two hanging words
+    signDrop: 0.18,     // cord length, rope → the sign frame's hanging rings
+    // Lit by the game's own sun and sky lights (MeshStandardMaterial), rather
+    // than the baked, unlit look the rest of the scene uses — Luke preferred
+    // it in the preview (2026-10-04). Both switchable from the ?archTune=1
+    // panel while that's being judged in place.
+    lit: true,
+    shadows: true,      // arches cast shadows, and the island decks receive them
+  };
+  // Painting the arch's textures costs a couple of seconds of main thread, so
+  // it happens once per page and is shared by every arch and every rebuild.
+  // Variety comes from elsewhere (Luke, 2026-10-04: "they all look the
+  // same"): each island builds its own geometry through varyArch — small
+  // seeded changes of proportion and ornament, never the span/clearance/rope
+  // the word signs depend on — and gets its own colour scheme, applied as a
+  // shader tint over the shared textures' lacquer masks. No extra downloads,
+  // no extra texture painting; a build costs ~0.1-0.2 s of geometry each.
+  let archTextures = null;
+  const arches = []; // { group, built, cursor, seed, palette }
+  // Colour scheme per island, in order (Luke, 2026-10-04): the first four
+  // islands show each of the four schemes once, shuffled; after that, two
+  // more picked at random — different from each other, and the first of them
+  // different from the fourth island's, so neighbours never match.
+  function makeArchPaletteOrder() {
+    const n = ARCH_PALETTES.length;
+    const rand = () => Math.floor(Math.random() * n);
+    const order = [...Array(n).keys()];
+    for (let i = n - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    let a, b;
+    do a = rand(); while (a === order[n - 1]);
+    do b = rand(); while (b === a);
+    return [...order, a, b];
+  }
+  let archPaletteOrder = makeArchPaletteOrder();
+  function archParams() {
+    const s = ARCH.scale;
+    const span = ARCH.span / s;
+    const beamLength = span * 1.73; // the stand-alone model's beam:span ratio
+    return {
+      span,
+      beamLength,
+      capLength: beamLength + 0.18,
+      clearHeight: ARCH.clearHeight / s,
+      pillarRadius: ARCH.pillarRadius / s,
+      pillarTopRadius: (ARCH.pillarRadius * 0.89) / s,
+      ropeHeight: ARCH.ropeHeight / s,
+      ropeSag: ARCH.ropeSag / s,
+      ropeThickness: ARCH.ropeThickness,
+      ropeCharms: false, // the word signs hang there instead
+    };
+  }
+  const getArchTextures = () => (archTextures ??= buildArchTextures(ARCH_DEFAULTS.seed));
+  const archMode = () => (ARCH.lit ? 'lit' : 'unlit');
+  /**
+   * Builds (or rebuilds) one arch's geometry from its seed and colour scheme.
+   * Each arch also gets its own glyphs (talismans, plaque, plinth runes —
+   * Luke, 2026-10-04): drawn over the shared, cached base paint, so only the
+   * cheap stroke layer is per arch.
+   */
+  function buildArchFor(a) {
+    if (a.built) {
+      scene.remove(a.group);
+      a.built.dispose(); // textures were passed in, so this leaves them alone
+    }
+    a.glyphs ??= buildGlyphTextures(ARCH_DEFAULTS.seed, a.seed);
+    a.built = buildArch(varyArch(archParams(), a.seed), {
+      textures: { ...getArchTextures(), ...a.glyphs },
+      palette: a.palette,
+      mode: archMode(),
+    });
+    a.group = a.built.group;
+    placeArch(a);
+    applyArchShadows(a);
+    scene.add(a.group);
+  }
+  function applyArchShadows(a) {
+    a.group.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = ARCH.shadows && o.name !== 'arch-runes'; // the glow is a transparent decal, not a solid
+      o.receiveShadow = ARCH.shadows && ARCH.lit; // an unlit material can't show a shadow anyway
+    });
+  }
+  /**
+   * The deck is unlit (MeshBasicMaterial), and an unlit material can't show
+   * a shadow — so each island gets a transparent ShadowMaterial disc laid a
+   * hair above its paving, which draws nothing but the shadows that fall on
+   * it. It also catches the cardboard figures' shadows (they have always
+   * cast, onto nothing), so the switch hides it entirely: "off" is exactly
+   * the old look. Child of the island group, so in its (unscaled) units.
+   */
+  const shadowCatcherGeometry = new THREE.CircleGeometry(1, 64).rotateX(-Math.PI / 2);
+  // Opacity reads much weaker than it sounds: blending happens in linear
+  // light, so 0.35 measured as barely visible (2026-10-04) and 0.6 comes out
+  // around a third darker on screen.
+  const shadowCatcherMaterial = new THREE.ShadowMaterial({ opacity: 0.6, depthWrite: false });
+  function addShadowCatcher(group, t) {
+    const m = new THREE.Mesh(shadowCatcherGeometry, shadowCatcherMaterial);
+    m.scale.setScalar(t.deckRadius);
+    m.position.y = t.deckTop + 0.01 / t.scale; // 1 cm of world above the paving
+    m.receiveShadow = true;
+    m.renderOrder = 1;
+    m.userData.shadowCatcher = true;
+    m.visible = ARCH.shadows;
+    group.add(m);
+  }
+  function applyDeckShadows(group) {
+    group.traverse((o) => {
+      if (o.userData.shadowCatcher) o.visible = ARCH.shadows;
+    });
+  }
+  function applyArchLighting() {
+    for (const a of arches) {
+      a.built.setMode(archMode());
+      applyArchShadows(a);
+    }
+    for (const g of islands) applyDeckShadows(g);
+  }
+  function placeArch(a) {
+    const p = localToWorld(a.cursor, 0, ISLAND_AHEAD + ARCH.forward);
+    a.group.position.set(p.x, ISLAND_Y, p.z);
+    a.group.rotation.y = -a.cursor.heading; // model faces +Z; heading 0 walks toward -Z
+    a.group.scale.setScalar(ARCH.scale);
+  }
+  function spawnArch(cursor) {
+    const a = {
+      group: null,
+      built: null,
+      cursor: { ...cursor },
+      seed: Math.floor(Math.random() * 1e6),
+      palette: ARCH_PALETTES[archPaletteOrder[arches.length % archPaletteOrder.length]],
+    };
+    buildArchFor(a);
+    arches.push(a);
+  }
+  function rebuildArches() {
+    for (const a of arches) buildArchFor(a);
+  }
+  function disposeArches() {
+    for (const a of arches) {
+      scene.remove(a.group);
+      a.built.dispose();
+      for (const t of Object.values(a.glyphs)) t.dispose();
+    }
+    arches.length = 0;
+  }
+  /** The arch standing on the island of the fork at `cursor`. */
+  const archAt = (cursor) => arches.find((a) => a.cursor.x === cursor.x && a.cursor.z === cursor.z);
+  /** World height of an arch's rope at a lateral offset from its centre line. */
+  function archRopeY(a, lateral) {
+    const r = a.built.rope;
+    const x = THREE.MathUtils.clamp(lateral / ARCH.scale, -r.half, r.half);
+    return ISLAND_Y + r.y(x) * ARCH.scale;
+  }
+  const archRopeHalf = (a) => a.built.rope.half * ARCH.scale;
+
   // ------------------------------------------------------------------ bridges
   //
   // Replace the scattered stone path between two islands (Luke, 2026-08-31 —
@@ -1846,14 +2059,15 @@ export function mountSkyPath(container, options = {}) {
   /**
    * The waypoints for one bridge branch: straight from `cursor`'s edge to
    * `target`'s edge (a rope bridge cannot bow — see bridgeGen.js's planBow
-   * note), using BRIDGE_ANCHORS for how far in from each island's centre the
+   * note), using ISLAND_ANCHORS for how far in from each island's centre the
    * anchors sit. Used for every fork, including the last (target there is the
    * temple island's own measured edge, not a registered fork island — see
    * buildFork). Always returns exactly [departEdge, arriveEdge, target-centre].
    */
-  function genBridgeRoute(cursor, target, sideSign) {
-    const departEdge = localToWorld(cursor, sideSign * BRIDGE_ANCHORS.lateral, BRIDGE_ANCHORS.forward);
-    const arriveEdge = localToWorld(target, sideSign * BRIDGE_ANCHORS.lateral, -BRIDGE_ANCHORS.forward);
+  function genBridgeRoute(cursor, target, sideSign, targetIsFork) {
+    const departEdge = localToWorld(cursor, sideSign * ISLAND_ANCHORS.lateral, ISLAND_AHEAD + ISLAND_ANCHORS.forward);
+    const arriveAhead = targetIsFork ? ISLAND_AHEAD : 0; // the temple island doesn't shift
+    const arriveEdge = localToWorld(target, sideSign * ISLAND_ANCHORS.lateral, arriveAhead - ISLAND_ANCHORS.forward);
     return [departEdge, arriveEdge, { x: target.x, z: target.z }];
   }
 
@@ -1863,7 +2077,8 @@ export function mountSkyPath(container, options = {}) {
    * trunk is scattered before the fork itself is built.
    */
   function registerIsland(pos) {
-    islandSpots.push({ x: pos.x, z: pos.z });
+    const c = islandCentre(pos);
+    islandSpots.push({ x: c.x, z: c.z });
   }
 
   function nearIsland(x, z) {
@@ -1889,6 +2104,7 @@ export function mountSkyPath(container, options = {}) {
       // random seed, so no two forks need look alike.
       const t = islandTemplates[Math.floor(Math.random() * islandTemplates.length)];
       fillGroupFromTemplate(group, t);
+      addShadowCatcher(group, t);
     } else {
       // Not a loading race — the journey is only ever built from
       // manager.onLoad (see startJourney()'s definition), which fires once
@@ -1900,9 +2116,12 @@ export function mountSkyPath(container, options = {}) {
       // of no island at all is the right trade rather than surfacing an error.
       for (const child of buildIsland({ seed, ...ISLAND_FALLBACK_PARAMS }).children) group.add(child);
     }
-    group.position.set(forkCursor.x, ISLAND_Y, forkCursor.z);
+    const centre = islandCentre(forkCursor);
+    group.position.set(centre.x, ISLAND_Y, centre.z);
     scene.add(group);
     islands.push(group);
+    applyDeckShadows(group);
+    spawnArch(forkCursor);
     return group;
   }
 
@@ -1993,7 +2212,7 @@ export function mountSkyPath(container, options = {}) {
   // to be tied to this the same way, as a fraction of the branch's own curve;
   // it's now wherever BRIDGE_WRONG_GAP_T puts the breakable planks — see
   // buildFork.)
-  const CURTAIN_DIST = ISLAND_RADIUS + 1.5; // how far past the fork the curtain stands — must clear the deck's edge
+  const CURTAIN_DIST = ISLAND_AHEAD + ISLAND_RADIUS + 1.5; // how far past the fork the curtain stands — must clear the deck's edge (the island sits ISLAND_AHEAD forward of the fork)
   const CURTAIN_OPEN_LEAD = 1.6; // starts dissolving this far before the avatar reaches it
   const CURTAIN_OPEN_TIME = 1.0; // seconds to fully dissolve
   const CURTAIN_GUIDE_OPACITY = 0.28; // guide sees through it — the cheap version of "the guide can see ahead"
@@ -2537,6 +2756,8 @@ export function mountSkyPath(container, options = {}) {
     }
     islands.length = 0;
     islandSpots.length = 0;
+    disposeArches();
+    archPaletteOrder = makeArchPaletteOrder();
     for (const p of pillars) {
       scene.remove(p);
       p.geometry.dispose();
@@ -2593,12 +2814,12 @@ export function mountSkyPath(container, options = {}) {
    * Returns `branch`, a `{ left, right }` pair of waypoint arrays in the
    * shape buildFork's own `sec.branch` expects.
    */
-  function buildForkBridges(cursor, target, correct, sagMultiplier) {
+  function buildForkBridges(cursor, target, correct, sagMultiplier, targetIsFork) {
     const branch = {};
     for (const side of ['left', 'right']) {
       const isCorrect = side === correct;
       const sideSign = side === 'right' ? 1 : -1;
-      const [departEdge, arriveEdge, centreHop] = genBridgeRoute(cursor, target, sideSign);
+      const [departEdge, arriveEdge, centreHop] = genBridgeRoute(cursor, target, sideSign, targetIsFork);
       const bridgeOptions = {
         sag: BRIDGE_DEFAULTS.sag * sagMultiplier,
         ...(isCorrect ? {} : { breakableT: BRIDGE_WRONG_GAP_T }),
@@ -2726,11 +2947,11 @@ export function mountSkyPath(container, options = {}) {
     let target;
     if (isLastFork) {
       const templeEdge = templeIslandNearEdge();
-      const anchorRadius = Math.hypot(BRIDGE_ANCHORS.lateral, BRIDGE_ANCHORS.forward);
+      const anchorRadius = Math.hypot(ISLAND_ANCHORS.lateral, ISLAND_ANCHORS.forward);
       const margin = ISLAND_RADIUS - anchorRadius; // same margin-from-edge every ordinary bridge anchors at
       target = {
         x: templeEdge.x + LAST_FORK_LANDING_OFFSET.x,
-        z: templeEdge.z - margin - BRIDGE_ANCHORS.forward + LAST_FORK_LANDING_OFFSET.z,
+        z: templeEdge.z - margin - ISLAND_ANCHORS.forward + LAST_FORK_LANDING_OFFSET.z,
         heading: 0, // the temple sits dead ahead on the world's own centreline
       };
     } else {
@@ -2758,7 +2979,7 @@ export function mountSkyPath(container, options = {}) {
     // The last fork's pair hangs deeper — Luke, 2026-09-05: "~30% greater"
     // depth/steepness, on top of the longer span already asking for it.
     const sagMultiplier = isLastFork ? LAST_FORK_SAG_MULTIPLIER : 1;
-    const branch = buildForkBridges(cursor, target, correct, sagMultiplier);
+    const branch = buildForkBridges(cursor, target, correct, sagMultiplier, !isLastFork);
 
     const sec = {
       fork: { ...cursor },
@@ -6674,18 +6895,18 @@ export function mountSkyPath(container, options = {}) {
   // distinct from the player's names" (name tags are NAME_TAG_HEIGHT=0.6, so
   // this also widens the gap between the two sizes, not just the position).
   const WORD_SIGN_HEIGHT = 1.08;
-  // Luke, 2026-09-12: with several players' name tags now sitting at the
-  // same fork the words are chosen at, the signs need to sit clear of a
-  // crowd rather than just above head height. Raised well above the tallest
-  // name tag (NAME_TAG_HEIGHT-based tags top out well under FIGURE_H, itself
-  // ~1.27 world units) and pushed further outward from the fork's centreline
-  // than the branch angle alone would put them — see the extra lateral
-  // offset in updateWordSigns — so a full team of five waiting at a fork
-  // can't obscure either word. Kept the correct-word sign's +0.5 offset
-  // above the player signs' height, same relative gap as before.
-  const WORD_SIGN_Y = 3.6;
-  const WORD_SIGN_Y_CORRECT = 4.1;
-  const WORD_SIGN_LATERAL_EXTRA = ISLAND_RADIUS * 0.4; // world units, beyond the branch-angle position below
+  // Where the signs go: hung from the fork island's shrine arch rope (Luke,
+  // 2026-10-03), the two player words side by side, the guide's single word
+  // centred. This replaced free-floating signs at a fixed WORD_SIGN_Y = 3.6,
+  // pushed out sideways by an extra ISLAND_RADIUS * 0.4 — the height and
+  // spread that kept a crowd of five from hiding either word (2026-09-12).
+  // That job now belongs to the arch's own ARCH.ropeHeight and pillar span,
+  // which were sized against it. A word too wide for its half of the rope
+  // shrinks to fit rather than overlapping its partner or a pillar, so its
+  // letters can come out slightly smaller than WORD_SIGN_HEIGHT for long words.
+  // Clearance kept each side of a sign within its slot. The rail frame
+  // (WORD_SIGN_FRAME) adds only 0.02 × height per side, well inside this.
+  const WORD_SIGN_MARGIN = 0.1;
 
   function makeWordSignMesh() {
     const m = new THREE.Mesh(
@@ -6694,9 +6915,18 @@ export function mountSkyPath(container, options = {}) {
     );
     m.renderOrder = 10; // above the fog puffs (9), so a sign is never veiled
     m.visible = false;
+    // Two hanging cords, as children so they show/hide with the sign. The
+    // sign is scaled non-uniformly (w, h), so layoutWordSign counter-scales them.
+    m.userData.cords = [-1, 1].map(() => {
+      const c = new THREE.Mesh(wordCordGeometry, wordCordMaterial);
+      m.add(c);
+      return c;
+    });
     scene.add(m);
     return m;
   }
+  const wordCordGeometry = new THREE.CylinderGeometry(0.014, 0.014, 1, 5);
+  const wordCordMaterial = new THREE.MeshBasicMaterial({ color: 0x6b5233, fog: false });
   const wordSigns = { left: makeWordSignMesh(), right: makeWordSignMesh(), correct: makeWordSignMesh() };
 
   // word text -> THREE.CanvasTexture, keyed by the word itself: word pairs
@@ -6729,31 +6959,78 @@ export function mountSkyPath(container, options = {}) {
     return entry;
   }
 
-  // Applies `word` to one sign mesh at world position (x, y, z), sizing the
-  // plane from the texture's own aspect so the sign is never stretched.
-  // Async (texture build is), so it guards against the sign having moved on
-  // to a different word — or the round having moved past this fork entirely
-  // — by the time the promise resolves, same pattern as attachNameTag.
-  function setWordSign(mesh, word, x, y, z) {
+  // Applies `word` to one sign mesh. `hang` = { lateral, forward, maxW, cursor, arch }
+  // places it under the arch rope of the fork at `cursor`. Async (texture
+  // build is), so it guards against the sign having moved on to a different
+  // word — or the round having moved past this fork entirely — by the time
+  // the promise resolves, same pattern as attachNameTag.
+  function setWordSign(mesh, word, hang) {
+    mesh.userData.hang = hang;
     if (mesh.userData.word === word) {
-      mesh.position.set(x, y, z);
-      mesh.visible = true;
+      if (mesh.userData.aspect) layoutWordSign(mesh);
       return;
     }
     mesh.userData.word = word;
+    mesh.userData.aspect = null;
     getWordTexture(word).then(({ texture, aspect }) => {
       if (disposed || mesh.userData.word !== word) return;
-      // aspect is height/width (see buildNameTagCanvas) — height is fixed,
-      // so width is derived from it, not the other way around (see
-      // WORD_SIGN_HEIGHT above for why that direction matters).
-      const h = WORD_SIGN_HEIGHT;
-      const w = h / aspect;
       mesh.material.map = texture;
       mesh.material.needsUpdate = true;
-      mesh.scale.set(w, h, 1);
-      mesh.position.set(x, y, z);
-      mesh.visible = true;
+      mesh.userData.aspect = aspect;
+      layoutWordSign(mesh);
     });
+  }
+
+  function layoutWordSign(mesh) {
+    const { lateral, forward: fwd, maxW, cursor, arch } = mesh.userData.hang;
+    const aspect = mesh.userData.aspect; // height/width (see buildNameTagCanvas)
+    // Height is fixed, width derived from it (see WORD_SIGN_HEIGHT for why
+    // that direction matters) — unless that would overrun the slot.
+    let h = WORD_SIGN_HEIGHT;
+    let w = h / aspect;
+    if (w > maxW) {
+      w = maxW;
+      h = w * aspect;
+    }
+    const frame = signFrameFor(mesh, w, h);
+    // The cords keep their tuned length (signDrop) down to the frame's
+    // hanging rings; the card sits `frame.above` below those.
+    const attach = archRopeY(arch, lateral) - ARCH.signDrop;
+    const top = attach - frame.above;
+    const p = localToWorld(cursor, lateral, fwd);
+    mesh.scale.set(w, h, 1);
+    mesh.position.set(p.x, top - h / 2, p.z);
+    mesh.rotation.y = -cursor.heading;
+    mesh.userData.cords.forEach((c, i) => {
+      const cx = frame.cordX[i];
+      const len = Math.max(0.01, archRopeY(arch, lateral + cx) - attach);
+      c.position.set(cx / w, 0.5 + frame.above / h + len / h / 2, 0);
+      c.scale.set(1 / w, len / h, 1);
+    });
+    mesh.visible = true;
+  }
+
+  // A slim wooden frame around each sign (Luke, 2026-10-04 — chose 'rail' of
+  // the three in arch-preview.html; see SIGN_FRAMES in archGen.js). Built in
+  // world units for the sign's current size, and rebuilt only when that size
+  // changes (a different word). It's a child of the sign so it shows and
+  // hides with it, counter-scaled against the sign's own (w, h) scale.
+  const WORD_SIGN_FRAME = 'rail';
+  function signFrameFor(mesh, w, h) {
+    const key = `${w.toFixed(4)}x${h.toFixed(4)}`;
+    if (mesh.userData.frameKey !== key) {
+      const old = mesh.userData.frame;
+      if (old) {
+        mesh.remove(old.group);
+        old.dispose();
+      }
+      const f = buildSignFrame(WORD_SIGN_FRAME, w, h, getArchTextures());
+      f.group.scale.set(1 / w, 1 / h, 1);
+      mesh.add(f.group);
+      mesh.userData.frame = f;
+      mesh.userData.frameKey = key;
+    }
+    return mesh.userData.frame;
   }
 
   function updateWordSigns() {
@@ -6801,21 +7078,22 @@ export function mountSkyPath(container, options = {}) {
       wordSigns.correct.userData.word = null;
       return;
     }
-    const step = BRANCH_LEN / BRANCH_SEGMENTS;
+    // Signs sit just in front of the rope (toward the approaching player).
+    const fwd = ISLAND_AHEAD + ARCH.forward - 0.06;
+    const arch = archAt(sec.fork);
+    const half = archRopeHalf(arch);
     if (role === 'guide') {
       wordSigns.left.visible = false;
       wordSigns.right.visible = false;
       const correctWord = sec.words[sec.correct];
-      const mid = advance(sec.fork, sec.fork.heading, step);
-      setWordSign(wordSigns.correct, correctWord, mid.x, WORD_SIGN_Y_CORRECT, mid.z);
+      setWordSign(wordSigns.correct, correctWord, { lateral: 0, forward: fwd, maxW: half * 1.2, cursor: sec.fork, arch });
     } else {
       wordSigns.correct.visible = false;
-      const leftBase = advance(sec.fork, sec.fork.heading - FORK_HALF_ANGLE, step);
-      const rightBase = advance(sec.fork, sec.fork.heading + FORK_HALF_ANGLE, step);
-      const leftOut = forward(sec.fork.heading - Math.PI / 2, WORD_SIGN_LATERAL_EXTRA);
-      const rightOut = forward(sec.fork.heading + Math.PI / 2, WORD_SIGN_LATERAL_EXTRA);
-      setWordSign(wordSigns.left, sec.words.left, leftBase.x + leftOut.x, WORD_SIGN_Y, leftBase.z + leftOut.z);
-      setWordSign(wordSigns.right, sec.words.right, rightBase.x + rightOut.x, WORD_SIGN_Y, rightBase.z + rightOut.z);
+      const slot = half - ARCH.signGap / 2;
+      const centre = ARCH.signGap / 2 + slot / 2;
+      const maxW = slot - 2 * WORD_SIGN_MARGIN;
+      setWordSign(wordSigns.left, sec.words.left, { lateral: -centre, forward: fwd, maxW, cursor: sec.fork, arch });
+      setWordSign(wordSigns.right, sec.words.right, { lateral: centre, forward: fwd, maxW, cursor: sec.fork, arch });
     }
   }
 
@@ -7147,6 +7425,7 @@ export function mountSkyPath(container, options = {}) {
             set: (v) => {
               ISLAND_Y = v;
               for (const g of islands) g.position.y = v;
+              for (const a of arches) a.group.position.y = v;
             },
           },
           'light stagger': { value: cloudLight.stagger, min: 0, max: 0.5, step: 0.05, set: (v) => (cloudLight.stagger = v), format: (v) => v.toFixed(2) },
@@ -7277,6 +7556,93 @@ export function mountSkyPath(container, options = {}) {
             },
           },
         },
+      })
+    : null;
+
+  // TEMPORARY — shrine arch placement/size tuner (`?archTune=1`), 2026-10-03.
+  // Delete once Luke settles the numbers and they're baked into ARCH above.
+  // Shape sliders rebuild the shared arch geometry (debounced, a few hundred
+  // ms each); placement and sign sliders just re-place things.
+  let archRebuildTimer = null;
+  const archShape = () => {
+    clearTimeout(archRebuildTimer);
+    archRebuildTimer = setTimeout(() => {
+      rebuildArches();
+      refreshUI();
+    }, 150);
+  };
+  const archPlace = () => {
+    for (const a of arches) placeArch(a);
+    refreshUI();
+  };
+  const archSlider = (key, min, max, step, after) => ({
+    value: ARCH[key],
+    min,
+    max,
+    step,
+    set: (v) => {
+      ARCH[key] = v;
+      after();
+    },
+  });
+  function archLightingLabel() {
+    return ARCH.lit ? 'lighting: lit by the sun (tap for baked)' : 'lighting: baked (tap for lit)';
+  }
+  function archShadowsLabel() {
+    return ARCH.shadows ? 'shadows: on (tap to turn off)' : 'shadows: off (tap to turn on)';
+  }
+  const archTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('archTune')
+    ? attachBgTuner({
+        container,
+        id: 'archTuner',
+        title: 'shrine arch',
+        position: 'left',
+        panels: {},
+        extrasTitle: 'ARCH (world units)',
+        extras: {
+          'forward (from island centre)': archSlider('forward', -2, 3.6, 0.05, archPlace),
+          'span (outer, pillars)': archSlider('span', 3.5, 9, 0.05, archShape),
+          'beam clearance': archSlider('clearHeight', 2.5, 7, 0.05, archShape),
+          'pillar radius': archSlider('pillarRadius', 0.12, 0.45, 0.01, archShape),
+          'rope height': archSlider('ropeHeight', 2, 6.5, 0.05, archShape),
+          'rope sag': archSlider('ropeSag', 0, 1, 0.01, archShape),
+          'rope thickness': archSlider('ropeThickness', 0.2, 1.5, 0.05, archShape),
+          'detail scale': archSlider('scale', 2, 6, 0.05, archShape),
+          'sign gap': archSlider('signGap', 0, 1.5, 0.05, archPlace),
+          'sign cord length': archSlider('signDrop', 0, 1, 0.02, archPlace),
+          'shadow strength': {
+            value: shadowCatcherMaterial.opacity,
+            min: 0,
+            max: 1,
+            step: 0.05,
+            set: (v) => (shadowCatcherMaterial.opacity = v), // one shared material for every island
+          },
+          'lit fill (brightness floor)': {
+            value: ARCH_LIT_FILL.value,
+            min: 0,
+            max: 1.5,
+            step: 0.05,
+            set: (v) => (ARCH_LIT_FILL.value = v), // shared uniform: every lit arch updates live
+          },
+        },
+        actions: [
+          {
+            label: archLightingLabel(),
+            onClick: (button) => {
+              ARCH.lit = !ARCH.lit;
+              applyArchLighting();
+              button.textContent = archLightingLabel();
+            },
+          },
+          {
+            label: archShadowsLabel(),
+            onClick: (button) => {
+              ARCH.shadows = !ARCH.shadows;
+              applyArchLighting();
+              button.textContent = archShadowsLabel();
+            },
+          },
+        ],
       })
     : null;
 
@@ -7830,6 +8196,15 @@ export function mountSkyPath(container, options = {}) {
   els.role.addEventListener('click', () => {
     if (!soloRoleToggle) return; // assigned by the session layer; button is inert
     role = role === 'guide' ? 'player' : 'guide';
+    // The guide camera normally advances by watching teammates rest and
+    // depart (updateGuideCamera), but solo has no teammates — the only
+    // walker is this device's own, so the guide never left island 1. Here
+    // the guide simply joins the fork that walker has reached.
+    if (role === 'guide') {
+      guideIsland = THREE.MathUtils.clamp(forkIndex, 1, N_FORKS);
+      guideMode = 'parked';
+      guideFollowToken = null;
+    }
     els.role.dataset.role = role;
     els.role.textContent = role === 'guide' ? 'Guide view' : 'Player view';
     figure.visible = role !== 'guide';
@@ -8458,6 +8833,7 @@ export function mountSkyPath(container, options = {}) {
     updateWindClouds(dt);
 
     key.target.position.set(walker.x + seatLateral.x, 0, walker.z + seatLateral.z);
+    key.position.copy(key.target.position).add(sunOffset);
 
     harness?.update(dt);
     updateBirds(dt);
@@ -8818,6 +9194,13 @@ export function mountSkyPath(container, options = {}) {
       bgTuner?.dispose();
       rescueTuner?.dispose();
       tagTuner?.dispose();
+      archTuner?.dispose();
+      clearTimeout(archRebuildTimer);
+      disposeArches();
+      for (const m of Object.values(wordSigns)) m.userData.frame?.dispose();
+      shadowCatcherGeometry.dispose();
+      shadowCatcherMaterial.dispose();
+      if (archTextures) for (const t of Object.values(archTextures)) t.dispose();
       resizeObserver.disconnect();
       renderer.dispose();
       renderer.forceContextLoss();

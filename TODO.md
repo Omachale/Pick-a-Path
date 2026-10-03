@@ -1242,3 +1242,123 @@ Start with this list.
 **To resume folding:** Luke's decision was "three creases, then one or two scripted folds after". Not started. Do not re-propose reducing swipes to edge-crossing X/Y: fold shape only ever used the straight chord.
 
 **Gotchas:** `.panel` elements are `pointer-events:none` with an allow-list of clickable selectors (bit us three times); browser-pane tests need `requestAnimationFrame` overridden and synthetic pointer id 1.
+
+### Lava Cavern: volcanic island and bridge styles (2026-10-03)
+
+Luke: the cavern re-used Sky Path's grassy island and rope bridges; redesign them for a
+volcano, as a few styles to switch between, thinking about what would be fireproof.
+Built as `app/src/cavern/volcanicKit.js`, wired into `lavaCavern.js` (spawnIsland /
+buildGap branch on `style`). Switch live with the cavern tuner's `style:` buttons, or on
+load with `?style=basalt|chain|arch` (e.g. `http://localhost:5181/?cavern=1&style=chain`).
+`original` is still there for comparison.
+
+- **basalt**: hexagonal basalt columns (what lava cools into). Islands are column
+  clusters hanging to a ragged point; bridges are rows of short column-stub stepping
+  stones. Toggle `basalt: columns to lava` stands every column on the lava floor
+  instead. That was the first version: grand from the rim, but a bridge seen side-on
+  is a 150-unit palisade, and the cross-spokes walled off the lava completely, so it
+  is not the default. Depth fade (shader `fadeDepth`) added for the same reason.
+- **chain**: rope bridge's fireproof twin: forged link handrail chains, iron posts,
+  deck straps, iron plates, same catenary sag. Obsidian islands with a riveted iron
+  deck. First pass: obsidian sheen read as lavender plastic and the plates read as
+  wood; both toned down to dark glass / cool iron.
+- **arch**: natural rock land bridge (drained lava tube), flat walkway, thick and
+  wide where it buries into the islands, thin mid-span, some faces still glowing,
+  dripped spikes underneath. Cooled-lava-crust islands with ember cracks on the deck.
+
+House style kept: unlit, vertex colours with a fake key light plus orange underglow
+from the lava (the shared cue across all three). Deck textures are canvas-drawn
+placeholders for real art once a style is picked.
+
+**Cost** (full 4-spoke cavern, measured in the browser): original 314-339 draw calls /
+3.6M tris; basalt ~54-101 / ~0.1-0.24M; chain ~63 / 0.4M; arch ~63-122 / 25-48k. Every
+island and bridge is one merged mesh; island geometry is cached (3 variants per style).
+
+**Known / not done:** walker still walks at constant deck height, so on the chain
+bridge's 0.8 sag the figure floats a little mid-span (same as the rope version);
+lava rocks drift through basalt-to-lava columns; after moving `ring height %`, press a
+style button or rebuild so basalt re-measures the drop; no breakable plank in any
+volcanic style yet.
+
+**Testing note:** the Browser pane runs the cavern at ~3 fps or not at all when hidden.
+Load it in a same-origin iframe, patch its `requestAnimationFrame` to setTimeout before
+the modules run, and capture with `canvas.toDataURL` in the same task as a render,
+POSTed to the dev server's `/__shot` (lands in `app/shots/`).
+
+### Lava Cavern: iron chosen, other styles removed, damage pass (2026-10-04)
+
+Supersedes the style-switching part of the entry above. Luke chose the iron chain bridge
+and iron-decked obsidian islands, and asked for the other options to be removed and for
+"more variety, a bit more imperfection ... not just surface detail, but the shape".
+
+- `app/src/cavern/volcanicKit.js` is gone (never committed); replaced by
+  `app/src/cavern/ironKit.js` (`buildIronIsland`, `buildIronBridge`, `disposeIronKit`).
+  `lavaCavern.js` no longer loads `island-basic-v2.glb`, `island-circle.png`, the plank
+  `.glb`s or bridge wind; the style buttons, `?style=`, the basalt toggle and
+  `__cavernStyle` are removed. URL: `http://localhost:5181/?cavern=1`.
+- Luke: no art assets needed; the canvas-drawn deck textures are the finished art.
+- **Island decks:** 1-2 plates missing per island (painted holes onto joists with lava glow
+  coming up) and 1-3 loose plates as real geometry, cut from the intact art and either
+  hinged up off a radial edge or shoved/twisted to ride over a neighbour, leaving a
+  crescent of hole. ~12% of rivets gone (holes or rust rings), some proud, rivets off
+  their lines, sprung seams, worn tread. Skirt: rivets missing, a bracket gone or hanging.
+- **Bridges:** per plate: missing 5% (bolt stubs left), broken 7% (snapped across with a
+  ragged edge, loose half hanging off its strap), shifted 9% (slid and skewed), loose 6%
+  (tipped up off one strap), warped 40% (bowed/twisted). Per handrail chain: 30% snapped
+  with dangling ends; each sags its own amount. Hangers: 15% missing, 12% torn loose and
+  swinging. Posts: 20% leaning hard, 15% missing caps. All rates in `WEAR` in ironKit.js.
+- **Build cost.** The detail made a cold cavern build ~3-4 s. Found and fixed, in order of
+  size: `BufferGeometry.clone()` on a `TorusGeometry` constructs a full default torus first
+  (~200 ms per bridge, fixed by copying the template into a plain BufferGeometry); deck grain
+  via `getImageData` readback + per-pixel loop (~270 ms per island; now a 256px noise tile
+  pattern); ~700 fresh `BoxGeometry` per bridge (now clones of cached unit boxes) and
+  recomputed normals (now kept from templates). Bridges are also cached: 6 variants per
+  route side, built in a local frame and placed by transform (`disposeBridge` in
+  bridgeGen.js skips `userData.sharedGeometry`). Now ~150 ms per island variant and
+  ~80 ms per bridge variant on desktop, ~1.4 s cold total; unmeasured on a phone.
+- **Gameplay overlap to decide:** missing and broken planks are also Sky Path's cue for
+  the wrong branch. Here they are cosmetic and random; if the cavern gets right/wrong
+  bridges, the wear rates may need to stay off whichever cue is used.
+- Walker still walks at a constant height, so it floats slightly over sag and over
+  displaced deck plates.
+
+### Lava Cavern: sag, hold-to-walk, and the iron bridge breaking (2026-10-04)
+
+Luke: increase the sag and have the player follow it as in Sky Path; make ▲ move the
+player incrementally as in Sky Path; and when a player falls, the plate under them must
+break and fall, on Sky Path's timing and placement, with a new animation for iron, the
+handrails unaffected. The random worn/missing plates are cosmetic only and don't affect
+falls (his call).
+
+- **Sag:** `CHAIN.sag` 0.8 -> 2.4 (ironKit.js), and the cavern passes `TUNE.bridgeSag`
+  (tuner slider "bridge sag (rebuild)", 0-6). Sag is part of the bridge cache key.
+- **Following it:** `buildWorld` now keeps buildGap's routes (`spokeRoutes`), tagged with
+  `bridge`/`bridgeT`/`group`; `nextLeg` copies them instead of recomputing untagged
+  points. `actorHeight()` is Sky Path's rule: on a segment whose two ends share a bridge,
+  y = `bridge.heightAt(lerp(lastPoint.bridgeT, head.bridgeT, frac))`, else 0. Cards and
+  beacons add `a.y`. Camera height stays fixed, as Sky Path's does.
+- **Hold to walk:** the local player moves only while ▲ is held and stops wherever they
+  are on release, mid-bridge included. Bots still cross in one go once they set off.
+- **Falls:** the walker stops at `IRON_BREAK_T` (0.5, the low point; Sky Path's
+  BRIDGE_WRONG_GAP_T), and at that instant `breakIronBridge()` runs and the figure drops
+  (`startActorFall`: Sky Path's starting kick, then gravity and a spin; hidden after
+  2.4 s). Recovery (2.5 s) now puts the actor back on the island they left, for the local
+  player too. Tuner button "you: fall on next crossing" (and `__cavernFallNext()`) makes
+  the local player's next crossing fail, since there are no questions yet.
+- **The break (ironKit.js, "breaking"):** the same two plates as Sky Path (the one at the
+  low point and the one before it), always built sound and flat, merged LAST into the
+  bridge geometry. Each bridge mesh is its own BufferGeometry *view* of the cached
+  variant (shared attributes/index, so shared GPU buffers) with its own draw range;
+  breaking just shortens the range. No extra draw calls. Animation: the plate under the
+  walker folds into a V about its straps (0.16 s), shears (bolt heads pop), and both
+  halves tumble away; the plate before it lets go on one strap 0.2 s later and swings down
+  to dangle from the other. Falling pieces are removed at 6 s; the bridge restores at 8 s
+  (`BREAK.restoreSeconds`), a stand-in for whatever repairs a shared bridge between
+  attempts. Handrails, hangers and straps are untouched.
+- Verified in the browser (forced local fall, side-on frames via the new dev hook
+  `__cavernCamAt(from, at)`) and headlessly (break -> pieces gone at 6 s, dangling plate
+  kept, restore at 8 s, a second bridge sharing the variant unaffected).
+- **Open:** what restores a broken bridge in real play (timer stand-in now); whether a
+  second faller on an already-broken bridge should look different (they currently just
+  drop through the gap); the walker doesn't sway or bob on the bridge yet (Sky Path has
+  bridgeSway and a walk bob).
