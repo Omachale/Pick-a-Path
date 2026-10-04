@@ -36,11 +36,13 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { disposeBridge, BRIDGE_ANCHORS } from '../skypath/bridgeGen.js';
 import { attachBgTuner } from '../skypath/bgTuner.js';
+import { createBridgeWind, WIND_DEFAULTS } from '../skypath/bridgeWind.js';
 import {
   IRON_BREAK_T,
   buildIronIsland,
   buildIronBridge,
   breakIronBridge,
+  setIronBridgeWind,
   updateIronBreaks,
   clearIronBreaks,
   disposeIronKit,
@@ -150,6 +152,11 @@ export function mountLavaCavern(container, options = {}) {
     // 2026-10-04: "Increase the sag of the bridge" (it was 0.8). Walkers
     // follow it — see actorHeight(). Applied on rebuild, like spacing.
     bridgeSag: 2.4,
+    // One dial for all the motion Sky Path gives a walker on a bridge (Luke,
+    // 2026-10-04: "a single slider to increase both"): the bridges' wind sway
+    // (and the walker riding it) and the walker's step bob. 1 = Sky Path's own
+    // amounts; see applySwayBob().
+    swayBob: 1,
     // Gap between adjacent island centres — i.e. how long a bridge is. This
     // is the primary size dial now, not the ring radius: Luke, 2026-09-09,
     // "make the bridge between the islands somewhat longer, but allow some
@@ -286,6 +293,30 @@ export function mountLavaCavern(container, options = {}) {
 
   // Islands and bridges are built in code (ironKit.js), so nothing to load
   // for them here; everything below is the cavern itself.
+
+  // Sky Path's own bridge wind, unchanged, driving the iron bridges' sway (see
+  // setIronBridgeWind) and the walker riding them. Its amounts are Sky Path's
+  // tuned ones times TUNE.swayBob.
+  const bridgeWind = createBridgeWind();
+  setIronBridgeWind(bridgeWind);
+  function applySwayBob() {
+    const k = TUNE.swayBob;
+    bridgeWind.config.swing.amplitude = WIND_DEFAULTS.swing.amplitude * k;
+    bridgeWind.config.bob.amplitude = WIND_DEFAULTS.bob.amplitude * k;
+    bridgeWind.config.roll.amount = WIND_DEFAULTS.roll.amount * k;
+    bridgeWind.apply();
+  }
+  applySwayBob();
+
+  // Sky Path's step bob (skyPath.js WALK_BOB_*): up-and-right-and-tilt, back
+  // down, then up-and-left-and-tilt, one lobe per half-step, only while
+  // actually moving, and a stop always finishes the lobe it's in rather than
+  // freezing mid-step. Lengths are Sky Path's, already at its figure scale,
+  // which the cavern shares; all three are multiplied by TUNE.swayBob.
+  const WALK_BOB_RATE = Math.PI / 0.35;
+  const WALK_BOB_HEIGHT = 0.09 * 0.72;
+  const WALK_BOB_LATERAL = 0.07 * 0.72;
+  const WALK_BOB_TILT = THREE.MathUtils.degToRad(9);
 
   // ---------------------------------------------------------------- rim
   //
@@ -1156,7 +1187,10 @@ export function mountLavaCavern(container, options = {}) {
   // judged now, same reasoning as the beacon itself: the rendering is worth
   // proving before the real mechanic that will eventually trigger it exists.
   const FALL_CHANCE = 0.25; // per crossing
-  const FALL_RECOVER_SECONDS = 2.5; // stopped, showing the icon, before trying again
+  // Seconds from a fall to trying again. Was 2.5, but the fall now plays out
+  // for Sky Path's full FALL_DISAPPEAR (5 s, below) with the camera following
+  // it down, so recovering sooner would snap everyone back mid-fall.
+  const FALL_RECOVER_SECONDS = 5.2;
 
   function makeActor({ id, spoke, local = false, tint = 0xffffff }) {
     const card = new THREE.Mesh(
@@ -1231,6 +1265,8 @@ export function mountLavaCavern(container, options = {}) {
     a.fall = null;
     a.lastPoint = null;
     a.y = 0;
+    a.spanT = null;
+    a.walkPhase = 0;
     a.sinceDepart = 0;
     a.dwell = a.local ? 0 : 0.5 + Math.random() * 3;
   }
@@ -1251,6 +1287,7 @@ export function mountLavaCavern(container, options = {}) {
     const cursor = cursors[a.gapIndex];
     const target = cursors[a.gapIndex + 1];
     const sideSign = a.gapIndex % 2 === 0 ? -1 : 1;
+    a.routeSide = sideSign;
     const route = spokeRoutes[a.spoke % Math.max(1, spokeRoutes.length)]?.[a.gapIndex]?.[sideSign < 0 ? 'left' : 'right'];
     if (!route) return false;
     const [departEdge, arriveEdge] = route;
@@ -1298,13 +1335,18 @@ export function mountLavaCavern(container, options = {}) {
   function actorHeight(a) {
     const head = a.queue[0];
     const last = a.lastPoint;
+    a.spanT = null; // set only while on a bridge: where along it, for the sway
     if (head && head.bridge && last?.bridge === head.bridge) {
       const segLen = Math.hypot(head.x - last.x, head.z - last.z);
       const remaining = Math.hypot(head.x - a.walker.x, head.z - a.walker.z);
       const frac = segLen > 1e-6 ? THREE.MathUtils.clamp(1 - remaining / segLen, 0, 1) : 1;
-      return head.bridge.heightAt(THREE.MathUtils.lerp(last.bridgeT, head.bridgeT, frac));
+      a.spanT = THREE.MathUtils.lerp(last.bridgeT, head.bridgeT, frac);
+      return head.bridge.heightAt(a.spanT);
     }
-    if (!head && last?.bridge && a.phase !== 'island') return last.bridge.heightAt(last.bridgeT);
+    if (!head && last?.bridge && a.phase !== 'island') {
+      a.spanT = last.bridgeT;
+      return last.bridge.heightAt(last.bridgeT);
+    }
     return 0;
   }
 
@@ -1314,20 +1356,54 @@ export function mountLavaCavern(container, options = {}) {
    * gravity. Hidden once it's well below the deck.
    */
   const FALL_GRAVITY = 9.8;
-  const FALL_VISIBLE_SECONDS = 2.4;
+  const FALL_VISIBLE_SECONDS = 5; // Sky Path's FALL_DISAPPEAR
+
+  // Sky Path's fall camera (skyPath.js FALL_CAM_*), duplicated: rather than
+  // tilting down from the trailing spot behind the walker (which looks
+  // through the deck), the camera eases to a fixed point beside the fall,
+  // out on the side of the bridge they were on, a touch ahead, above deck
+  // level, and watches the figure all the way down.
+  const FALL_CAM_HEIGHT = 2.6; // above the walk plane (deck level at the islands), as in Sky Path
+  const FALL_CAM_SIDE = 2.8; // sideways from the walker, toward their bridge's side
+  const FALL_CAM_FORWARD = 0.8; // small nudge out past the fall point
+  const FALL_CAM_EASE = 3.2; // per-second ease rate toward the anchor
+
+  /** Where a falling actor's card is, `t` seconds into the fall (world-group frame, walk plane at y=0). */
+  function fallPosition(f, out) {
+    return out.set(f.x + f.vx * f.t, f.y + FIGURE_H / 2 + f.vy * f.t - 0.5 * FALL_GRAVITY * f.t * f.t, f.z + f.vz * f.t);
+  }
   function startActorFall(a) {
     const axis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    const sway = a.spanT !== null && a.spanT !== undefined ? bridgeWind.evaluate(a.walker.x, a.walker.z, a.spanT).offset : null;
     a.fall = {
       t: 0,
-      x: a.walker.x,
-      z: a.walker.z,
-      y: a.y,
+      x: a.walker.x + (sway ? sway.x : 0),
+      z: a.walker.z + (sway ? sway.z : 0),
+      y: a.y + (sway ? sway.y : 0),
       vx: (Math.random() * 2 - 1) * 0.6,
       vz: (Math.random() * 2 - 1) * 0.6,
       vy: 0.4,
       axis,
       spin: 2 + Math.random() * 2.5,
     };
+    // Sky Path: "Lean in the direction of the falling path: left if they
+    // chose left, right if they chose right."
+    const side = forward(a.facing + (a.routeSide < 0 ? -Math.PI / 2 : Math.PI / 2), FALL_CAM_SIDE);
+    const ahead = forward(a.facing, FALL_CAM_FORWARD);
+    a.fall.camAnchor = { x: a.walker.x + side.x + ahead.x, y: FALL_CAM_HEIGHT, z: a.walker.z + side.z + ahead.z };
+  }
+
+  /** Sky Path's walkPhase rule, per actor: advance while moving; on a stop, finish the current lobe. */
+  function advanceBob(a, dt) {
+    a.walkPhase ??= 0;
+    if (a.moving && a.phase === 'walking') {
+      a.walkPhase += dt * WALK_BOB_RATE;
+    } else if (a.walkPhase > 0) {
+      const nextBoundary = Math.ceil(a.walkPhase / Math.PI - 1e-6) * Math.PI;
+      a.walkPhase = Math.min(a.walkPhase + dt * WALK_BOB_RATE, nextBoundary);
+      if (a.walkPhase >= nextBoundary - 1e-6) a.walkPhase = 0;
+    }
+    a.moving = false; // re-armed by stepActor each frame it actually moves
   }
 
   /** Back onto the island they set off from, ready to try the same gap again. */
@@ -1343,6 +1419,7 @@ export function mountLavaCavern(container, options = {}) {
     a.queue = [];
     a.lastPoint = null;
     a.y = 0;
+    a.spanT = null;
     a.phase = 'island';
   }
 
@@ -1360,6 +1437,7 @@ export function mountLavaCavern(container, options = {}) {
     // incrementally, the same as in Skypath"). Bots, once they set off, cross
     // in one go.
     let move = a.local && !wants ? 0 : walkSpeed() * dt;
+    a.moving = move > 0;
     while (move > 0 && a.queue.length) {
       const head = a.queue[0];
       const dx = head.x - a.walker.x;
@@ -1388,7 +1466,9 @@ export function mountLavaCavern(container, options = {}) {
         // Reached the low point: the plates break under them and they drop,
         // at the same instant, as in Sky Path. stepActors() owns recovery
         // timing — this function never advances a 'fallen' actor itself.
-        if (a.lastPoint?.breaks) breakIronBridge(a.lastPoint.breaks);
+        if (a.lastPoint?.breaks) {
+          breakIronBridge(a.lastPoint.breaks, bridgeWind.evaluate(a.walker.x, a.walker.z, a.spanT ?? 0.5).offset.clone());
+        }
         startActorFall(a);
         a.phase = 'fallen';
         a.willFall = false;
@@ -1405,6 +1485,7 @@ export function mountLavaCavern(container, options = {}) {
   }
 
   function stepActors(dt) {
+    for (const a of actors) advanceBob(a, dt);
     for (const a of actors) {
       if (a.fall) a.fall.t += dt;
       if (a.phase === 'fallen') {
@@ -1454,6 +1535,8 @@ export function mountLavaCavern(container, options = {}) {
    * to be seen.
    */
   const fallSpin = new THREE.Quaternion();
+  const viewAxis = new THREE.Vector3(0, 0, 1);
+  const swayTmp = new THREE.Vector3();
   function renderActors() {
     const y = ringY();
     const mySpoke = actors[0]?.spoke ?? 0;
@@ -1469,16 +1552,38 @@ export function mountLavaCavern(container, options = {}) {
 
       if (a.fall) {
         const f = a.fall;
-        a.card.position.set(
-          f.x + f.vx * f.t,
-          y + f.y + FIGURE_H / 2 + f.vy * f.t - 0.5 * FALL_GRAVITY * f.t * f.t,
-          f.z + f.vz * f.t
-        );
+        fallPosition(f, a.card.position).y += y;
         a.card.quaternion.copy(camera.quaternion).multiply(fallSpin.setFromAxisAngle(f.axis, f.spin * f.t));
         a.card.visible = f.t < FALL_VISIBLE_SECONDS;
       } else {
-        a.card.position.set(a.walker.x, y + (a.y ?? 0) + FIGURE_H / 2, a.walker.z);
-        a.card.quaternion.copy(camera.quaternion); // billboard, so a card is never edge-on
+        // Step bob (sideways is across the direction of travel, which here is
+        // any heading, not Sky Path's mostly-along-z) plus, on a bridge, the
+        // deck's own wind sway via the JS twin of the bridges' shader, so the
+        // walker rides the deck rather than standing still while it moves.
+        const k = TUNE.swayBob;
+        const phase = a.walkPhase ?? 0;
+        const lobe = Math.floor(phase / Math.PI);
+        const lift = Math.sin(phase - lobe * Math.PI);
+        const bobSide = lobe % 2 === 0 ? 1 : -1;
+        const across = forward(a.facing + Math.PI / 2, bobSide * lift * WALK_BOB_LATERAL * k);
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        let roll = 0;
+        if (a.spanT !== null && a.spanT !== undefined) {
+          const sw = bridgeWind.evaluate(a.walker.x, a.walker.z, a.spanT, swayTmp);
+          sx = sw.offset.x;
+          sy = sw.offset.y;
+          sz = sw.offset.z;
+          roll = sw.roll;
+        }
+        a.card.position.set(
+          a.walker.x + across.x + sx,
+          y + (a.y ?? 0) + FIGURE_H / 2 + lift * WALK_BOB_HEIGHT * k + sy,
+          a.walker.z + across.z + sz
+        );
+        // billboard, so a card is never edge-on, tilted about the view axis
+        a.card.quaternion.copy(camera.quaternion).multiply(fallSpin.setFromAxisAngle(viewAxis, -bobSide * lift * WALK_BOB_TILT * k + roll));
       }
 
       if (a.local) continue;
@@ -1572,6 +1677,8 @@ export function mountLavaCavern(container, options = {}) {
   // Dev-only (see __cavernCam below): an inspection camera offset from the
   // local player, overriding the follow camera while set.
   let camOverride = null;
+  const fallCamTarget = new THREE.Vector3();
+  const fallLookAt = new THREE.Vector3();
   let dragging = null;
   const LOOK_YAW_LIMIT = THREE.MathUtils.degToRad(50);
   const LOOK_PITCH_UP_LIMIT = THREE.MathUtils.degToRad(65); // toward the vent hole overhead
@@ -1636,6 +1743,7 @@ export function mountLavaCavern(container, options = {}) {
     const t = clock.getElapsedTime();
 
     if (ready) {
+      bridgeWind.update(t);
       stepActors(dt);
       updateIronBreaks(dt);
 
@@ -1696,6 +1804,18 @@ export function mountLavaCavern(container, options = {}) {
           camera.position.y + restDy + reach * Math.sin(look.pitch),
           camera.position.z + aim.z
         );
+        if (me.fall?.camAnchor) {
+          // Falling: ease to the anchor beside the fall and watch the figure.
+          const anchor = me.fall.camAnchor;
+          fallCamTarget.set(anchor.x, y + anchor.y, anchor.z);
+          // Eases from wherever it was when the fall began. Kept on the fall
+          // itself, since the follow camera above re-places the camera every frame.
+          me.fall.camPos ??= camera.position.clone();
+          me.fall.camPos.lerp(fallCamTarget, Math.min(1, dt * FALL_CAM_EASE));
+          camera.position.copy(me.fall.camPos);
+          fallPosition(me.fall, fallLookAt).y += y;
+          camera.lookAt(fallLookAt);
+        }
         if (camOverride) {
           const o = camOverride;
           camera.position.set(me.walker.x + o.from[0], y + o.from[1], me.walker.z + o.from[2]);
@@ -1770,6 +1890,7 @@ export function mountLavaCavern(container, options = {}) {
       // between islands stays put (see secondsPerIsland).
       'spacing (bridge len)': slider('spacing', 10, 60, 1),
       'bridge sag (rebuild)': slider('bridgeSag', 0, 6, 0.1),
+      'sway & bob': slider('swayBob', 0, 5, 0.05, () => applySwayBob()),
       'islands/spoke': slider('islandsPerSpoke', 2, 10, 1),
       'players/spoke': slider('playersPerSpoke', 1, 8, 1, () => populateActors()),
       'lava dark %': slider('lavaDarkAlpha', 0, 1, 0.02),

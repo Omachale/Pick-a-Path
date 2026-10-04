@@ -4,13 +4,24 @@
     {
       "name": "app",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "app"],
-      "port": 5181
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "app"
+      ],
+      "port": 5181,
+      "autoPort": true
     },
     {
       "name": "prototype-threejs",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "prototype-threejs"],
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "prototype-threejs"
+      ],
       "port": 5180
     }
   ]

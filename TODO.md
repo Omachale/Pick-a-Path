@@ -1362,3 +1362,127 @@ falls (his call).
   second faller on an already-broken bridge should look different (they currently just
   drop through the gap); the walker doesn't sway or bob on the bridge yet (Sky Path has
   bridgeSway and a walk bob).
+
+### In progress 2026-10-04: lobby redesign, step 1 — the 3D backdrop + dial layout test
+**If Luke says "the lobby board", "the lobby background" or "the lobby dials": start at
+[app/src/lobby/lobbyBoard.js](app/src/lobby/lobbyBoard.js) — its header is the design doc.
+View it at `http://localhost:5181/?lobbyBoard=1` (a flag in App.jsx, so the working plain
+lobby stays the default for multi-device testing until real screens exist).**
+- **Direction (Luke):** teacher picks the game first, on the left of the screen; the right
+  is for options like the player lobby and teams. Only one game for now, "Sky Temple". Look
+  is cardboard and homemade, matching the game's cardboard UI. Screens not designed yet.
+- **Backdrop:** replaces the planned flat photo (`Desktop/Lobby Cardboard.png`) with real
+  geometry — "better able to be resized". Oak frame rebuilt to the viewport on resize;
+  cardboard/wood textures are procedural (canvas), mapped in world units so grain never
+  stretches. Lit with soft shadows, deliberately (the header explains why that doesn't
+  break the game's unlit convention).
+- **Dials:** a 3D take on `dialProto.js`'s dial — three housings with window scales 1x /
+  1.5x / 2.3x, proportions measured from `dial-housing2-holes.png`. First pass had a clean
+  metal crimped rim; Luke: "too clean and neat... meant to be handmade from cardboard". Now:
+  scissor-cut outlines (faceted circles, stroke-by-stroke window edges, over-cut slits),
+  cut walls sloped so the shallow board depth is visible from the near-top-down camera,
+  and the dial a corrugated disc whose top is narrower than its base, flute texture on the
+  slope (dial.png's pale wavy rim turned out to be exposed flute, not metal). Windows are
+  deliberately EMPTY: images will sit behind them and turn with the dial (not built).
+  Click a dial to turn it 45° (right-click = other way) — test trigger only;
+  `window.__lobbyDials()` reports angles.
+- **Comparison, same day:** Luke: "I think the original might look better" — the LEFT
+  housing is now the original flat art (`dial-housing2-holes.png` + `dial.png`, unlit,
+  composited exactly as dialProto does it), via `style: 'original'` in
+  `LOBBY_BOARD_DEFAULTS.dials`. The middle and right ones are still the 3D handmade version.
+- **Columns + real shadows, same day:** Luke preferred the original dial/window but not the
+  housing PNG's baked shadow and faint surrounding rectangle on the new board. The original
+  housing now uses only a clean flat black window (no shadow, his choice) and `dial.png`
+  cropped to its disc. Every dial (original and 3D) is the top face of a hidden cardboard
+  column standing off the board. One key light from the display's top-left corner at 45°,
+  shadows about 60% brightness ("medium, not too dark"). The 3D dials keep their holes and
+  rise out of them. Column height is a TEMPORARY Low/Medium/High toggle (10/25/50 px,
+  `DIAL_LIFTS`, panel bottom-left); delete it once Luke picks, baking into `dialLift`.
+- **Open:** the actual lobby screens (game picker left, player lobby / teams tab right,
+  QR display incl. a second-screen option); the images behind the windows and how they
+  link to dial turns; whether these dials are a lobby control at all or just a test.
+
+### Lava Cavern: Sky Path's sway and bob, one slider (2026-10-04)
+
+Luke: "Add the sway and bob from Sky Path, but add a single slider to increase both."
+
+- **Sway:** the iron bridges now sway in Sky Path's own wind (`createBridgeWind()`,
+  unchanged defaults), and walkers ride it via the JS twin `evaluate()`, as Sky Path's
+  walker does. A swaying figure on a rigid deck is what Sky Path's own comment warns
+  "reads as more obviously broken than no sway at all", so the deck had to move too.
+  bridgeWind's `patch()` assumes untransformed world-space geometry, which the cached,
+  transformed iron bridges aren't, so ironKit's `getBridgeMat()` injects the same
+  `WIND_GLSL` (now exported from bridgeWind.js; Sky Path unaffected) with the phase taken
+  from the vertex's world position and the push rotated back into the mesh's local frame.
+  `aSpanT` is added to each cached bridge geometry. Broken-plate debris starts at the
+  deck's swayed position (`breakIronBridge(group, swayOffset)`).
+- **Bob:** Sky Path's WALK_BOB_* step bob per actor (phase advances only while actually
+  moving, and a stop finishes the current lobe). Sideways is across the actor's heading,
+  since cavern spokes run in every direction.
+- **Slider:** "sway & bob" (TUNE.swayBob, 0-5, default 1 = Sky Path's amounts) scales the
+  wind's swing, vertical bob and roll (`applySwayBob()`, live) and the step bob's height,
+  sideways shift and tilt. Sky Path's 0.1-unit swing was tuned for ~9-unit bridges; over
+  the cavern's 33-unit spans 1x is subtle, so expect to want more.
+- Also: each island's loose deck plates are now merged into two meshes (tops + edges)
+  instead of two per plate, saving ~100 draw calls in a wide view (266 -> 168).
+- Verified in the browser at 5x: deck visibly swings between frames and the figure stays
+  on the plates; no shader errors.
+- **Game-mode dial, 2026-10-04:** Luke chose the 3D dials at 50 px lift (toggle removed;
+  the `style: 'original'` path stays only as reference). The three test dials are replaced
+  by ONE dial centred in the top-left quadrant (`dials[0]` in `LOBBY_BOARD_DEFAULTS`):
+  150 px hole, 330x186 window (16:9, matching the paintings). Behind the board sits a real
+  card wheel on the dial's axis carrying the mode pictures, so a picture arrives tilted and
+  levels out as it centres (Luke wanted "angularity", not a flat horizontal slide). The
+  wheel is a separate group synced to the dial's rotation so clicks over it don't count as
+  the dial. Step is per dial: 90° here, 4 slots, because at this window width a picture
+  spans ~70° of wheel and 45° would park between pictures. Slot 0 = Volcano
+  (`textures/mode-volcano.jpg`, from Luke's `Desktop/Volcano Pastel.jpg`, 2% cropped to
+  hide its paper margin); slot 1 reserved for Sky Temple art; 2-3 empty card.
+  Debug: `__lobbyDialSet(i, deg)` parks a dial at any angle.
+  Reference screenshots for Luke's paintings are in `lobby-mode-screenshots/`.
+- **Open:** Sky Temple art; what selecting a mode actually does; the right-hand half
+  (player lobby / teams tab, QR).
+- **Mode dial, round 2 (same day):** board is now always 16:9, letterboxed (canvas sized to
+  the board and centred, so the oversized wheel behind it can't show in the margins).
+  Window 520x293 over a 104 px dial. Wheel reworked per Luke ("five images on a wheel...
+  with a small gap between each"): 5 slots, 72° steps; each slot is a card segment filling
+  its slice with a constant 6 px gap, the picture glued on, plus a card hub. To fit five
+  window-sized pictures, the wheel's axis sits well below the dial (hidden, as if geared),
+  not on the dial's axis. Slots: Volcano, Sky Temple (art to come), 3 blank.
+- **Layout + number dials (same day):** dial positions are now `place` = window centre in
+  design px from the frame's inside top-left. Mode window 598x337 (+15%), 40 px from top and
+  left; dial unchanged. Lower-left: "Teams" (1-4) and "Players per Team" (2-6) dials, each a
+  150x110 window on an 8-slot (45°) number wheel, turning clamped to the range. Labels use
+  the cardboard letter art (no card background; nameTag.js's per-letter scale tweaks not
+  applied). Numerals are a handwriting font (the letter art has no digits) on card. Each
+  wheel is clipped to its own window (local clipping planes) since the wheels overlap
+  behind the board. The seamless mirrored join on the mode wheel was "good enough for now"
+  but Luke only wanted the dark line gone, not the shapes changed; corners look odd.
+- **Open:** label contrast (cardboard letters on cardboard read faintly); digit art;
+  revisit the mode-wheel join.
+
+### Lava Cavern: no fall-through-sized gaps in the iron deck (2026-10-04)
+
+Luke: some random gaps were "too big ... Small gaps are fine, but they shouldn't look big
+enough to fall through." Causes: missing plates (a full plate-width hole), broken plates'
+dropped half (a half-plate hole), and slid plates opening their gap to ~2x spacing. Now
+`WEAR.plateMissing` = 0 (code path kept), broken halves sag 6-14 degrees instead of
+dropping 25-60, and slides are ±0.06 along / ±0.08 across with less skew. Only a real fall
+opens the deck. Checked from above along two bridges.
+
+Dev server: `.claude/launch.json` "app" now has `autoPort: true` and vite reads `PORT`,
+falling back to 5181. 5181 stays the default: a chat only gets another port when 5181 is
+already taken (e.g. by the lobby chat's server, which serves the same files).
+
+### Lava Cavern: Sky Path's fall camera (2026-10-04)
+
+Luke: "When the player falls, the camera should follow them down, in the same way it does
+in Sky path." Duplicated skyPath.js's FALL_CAM_*: at the fall the camera eases (rate 3.2/s)
+from wherever it was to a fixed anchor beside the fall point (2.8 out on the side of the
+route the player was on, 0.8 ahead, 2.6 above the walk plane) and looks at the falling
+figure every frame. The figure now stays visible for Sky Path's FALL_DISAPPEAR (5 s, was
+2.4), and FALL_RECOVER_SECONDS went 2.5 -> 5.2 so nobody is snapped back mid-fall (bots
+too, so they pace a little slower after a fall). `fallPosition()` is shared by the card
+and the camera. Local player only; bots' falls don't move the camera. Checked with a
+forced fall: camera swings out beside the bridge and tracks the figure down toward the
+lava.

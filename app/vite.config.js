@@ -44,7 +44,10 @@ export default {
   plugins: [react(), shotPlugin()],
   // 5181 while the old standalone prototype still runs on 5180 — the two need
   // to be up side by side for Stage A's "plays identically" comparison.
-  server: { host: true, port: 5181 },
+  // PORT, when set, comes from the Code tab's preview launcher (launch.json
+  // autoPort), so a second chat can run its own server beside another one;
+  // plain `npm run dev` still gets 5181.
+  server: { host: true, port: Number(process.env.PORT) || 5181 },
   // es2022, not the prototype's es2020: skyPath.js keeps the prototype's
   // module-scope `await RAPIER.init()` (Rapier is WASM and needs it before any
   // RAPIER.* class exists), and top-level await isn't valid below es2022.

@@ -35,6 +35,7 @@ import SkyPath from './skypath/SkyPath.jsx';
 import LavaCavern from './cavern/LavaCavern.jsx';
 import TeacherDashboard from './lobby/TeacherDashboard.jsx';
 import KeyboardTestHarness from './keyboard/KeyboardTestHarness.jsx';
+import LobbyBoard from './lobby/LobbyBoard.jsx';
 
 const params = new URLSearchParams(location.search);
 
@@ -129,6 +130,10 @@ export default function App() {
   if (params.get('victory') === '1') return <SoloVictoryStage />;
   if (params.get('solo') === '1') return <SoloSkyPath />;
   if (params.get('debugKeyboard') === '1') return <KeyboardTestHarness />;
+  // The new lobby's 3D backdrop, being built up in place (2026-10-04). Behind
+  // a flag until it has real screens on it, so the working plain lobby below
+  // stays the default for multi-device testing meanwhile.
+  if (params.get('lobbyBoard') === '1') return <LobbyBoard />;
 
   if (teacherView) return <TeacherDashboard onExit={() => setTeacherView(false)} />;
 

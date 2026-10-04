@@ -93,7 +93,10 @@ export const WIND_DEFAULTS = {
  * so a disabled layer contributes exactly nothing rather than merely a small
  * amount.
  */
-const WIND_GLSL = /* glsl */ `
+// Exported for the Lava Cavern's iron bridges (cavern/ironKit.js), which need
+// their own injection (their meshes are transformed, unlike these) but must run
+// the same wind function, not a copy that could drift from evaluate().
+export const WIND_GLSL = /* glsl */ `
 uniform float uWindOn;
 uniform float uWindTime;
 uniform vec2  uWindDir;

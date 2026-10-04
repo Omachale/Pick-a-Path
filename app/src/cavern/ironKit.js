@@ -33,6 +33,7 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { WIND_GLSL } from '../skypath/bridgeWind.js';
 
 /**
  * Must stay >= the cavern's ISLAND_RADIUS (4): BRIDGE_ANCHORS puts each bridge
@@ -267,6 +268,52 @@ const bridgeCache = new Map(); // see buildIronBridge
 function getSolidMat() {
   solidMat ??= new THREE.MeshBasicMaterial({ vertexColors: true });
   return solidMat;
+}
+
+/**
+ * Bridges sway in the same wind as Sky Path's rope bridges: Luke, 2026-10-04,
+ * "Add the sway and bob from Sky Path". The cavern hands over its
+ * createBridgeWind() instance here before building; every bridge then shares
+ * one material whose vertex shader runs that instance's own wind function
+ * (WIND_GLSL), on the same uniforms, so the walker can ride the deck with the
+ * JS twin, wind.evaluate(), exactly as in Sky Path.
+ *
+ * Why not bridgeWind's own patch(): it assumes bridge geometry sits in world
+ * space with no transform. These meshes are cached and placed by a transform,
+ * so the phase is taken from the vertex's WORLD position (keeping the 48
+ * bridges out of step with each other, as Sky Path's are) and the world-space
+ * push is turned back into the mesh's local frame before it is added. The
+ * transform is a y-rotation plus translation, so transpose(mat3) is its
+ * inverse rotation. aSpanT (0..1 along the span) comes from chainBridge.
+ *
+ * Without a wind set, bridges use the plain solid material and stay still.
+ */
+let bridgeWind = null;
+let bridgeMat = null;
+export function setIronBridgeWind(wind) {
+  bridgeWind = wind;
+  bridgeMat?.dispose();
+  bridgeMat = null;
+}
+function getBridgeMat() {
+  if (!bridgeWind) return getSolidMat();
+  if (!bridgeMat) {
+    bridgeMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    bridgeMat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, bridgeWind.uniforms);
+      shader.vertexShader = WIND_GLSL + shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        /* glsl */ `
+        #include <begin_vertex>
+        float windRoll;
+        vec3 windWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        transformed += transpose(mat3(modelMatrix)) * bridgeWind(windWorld, aSpanT, windRoll);
+        `
+      );
+    };
+    bridgeMat.customProgramCacheKey = () => 'ironBridgeWind';
+  }
+  return bridgeMat;
 }
 
 function canvasTexture(canvas) {
@@ -720,8 +767,7 @@ function loosePlate({ plate, how, r }, mats) {
       .multiply(new THREE.Matrix4().makeTranslation(-c.x, 0, -c.z));
   }
   geo.applyMatrix4(m);
-  plateEdgeMat ??= new THREE.MeshBasicMaterial({ color: 0x1e1b19 });
-  return { geometry: geo, material: [mats.loose, plateEdgeMat] };
+  return geo;
 }
 
 // ---------------------------------------------------------------- islands
@@ -814,6 +860,33 @@ function ironSkirt(variant) {
   return mergeGeometries(parts).toNonIndexed();
 }
 
+/**
+ * All of one island's loose plates as two meshes, textured tops and dark
+ * edges, rather than two per plate: ExtrudeGeometry is non-indexed with its
+ * caps in group 0 and its sides in group 1, so each group's vertex range is
+ * sliced out and the slices merged. Saves ~100 draw calls across the cavern.
+ */
+function mergeLoosePlates(geos, mats) {
+  if (!geos.length) return [];
+  const slice = (g, group) => {
+    const out = new THREE.BufferGeometry();
+    for (const name of ['position', 'uv']) {
+      const attr = g.attributes[name];
+      const n = attr.itemSize;
+      out.setAttribute(name, new THREE.BufferAttribute(attr.array.slice(group.start * n, (group.start + group.count) * n), n));
+    }
+    return out;
+  };
+  const caps = mergeGeometries(geos.map((g) => slice(g, g.groups.find((gr) => gr.materialIndex === 0))));
+  const sides = mergeGeometries(geos.map((g) => slice(g, g.groups.find((gr) => gr.materialIndex === 1))));
+  for (const g of geos) g.dispose();
+  plateEdgeMat ??= new THREE.MeshBasicMaterial({ color: 0x1e1b19 });
+  return [
+    { geometry: caps, material: mats.loose },
+    { geometry: sides, material: plateEdgeMat },
+  ];
+}
+
 function buildIslandVariant(variant) {
   const glass = shader({ base: 0x1b181f, sheen: 0x3e3652, sheenPower: 14, ambient: 0.35, underGlow: 0.6 });
   const flake = new THREE.Color(0x6a6080);
@@ -847,7 +920,7 @@ function buildIslandVariant(variant) {
   return [
     { geometry: mergeGeometries([body, ironSkirt(variant)]), material: getSolidMat() },
     { geometry: disc, material: mats.deck },
-    ...damage.loose.map((l) => loosePlate(l, mats)),
+    ...mergeLoosePlates(damage.loose.map((l) => loosePlate(l, mats)), mats),
   ];
 }
 
@@ -888,9 +961,18 @@ const CHAIN = {
  * the surface-only pass: "still too uniform. Change not just surface detail,
  * but the shape."
  */
+/*
+ * Gaps: Luke, 2026-10-04, after the first damage pass: "Some of the random
+ * gaps in the Iron bridge are too big ... Small gaps are fine, but they
+ * shouldn't look big enough to fall through." A missing plate left a full
+ * plate-width hole, a broken plate's dropped half a half-plate one, and a slid
+ * plate could open its gap to twice the normal spacing. So: no missing plates
+ * (the code path is kept, at 0), broken halves only sag, and slides are small.
+ * Only a real fall opens the deck (see "breaking").
+ */
 const WEAR = {
-  plateMissing: 0.05, // gone: just a bolt stub or two left on the straps
-  plateBroken: 0.07, // snapped across, the loose half hanging off its strap
+  plateMissing: 0, // gone: just a bolt stub or two left on the straps. 0: see above
+  plateBroken: 0.07, // cracked across, the loose half sagging off its strap
   plateShifted: 0.09, // slid along or across the straps, skewed
   plateLoose: 0.06, // worked loose: tipped up off one strap
   plateWarp: 0.4, // bowed and twisted, by up to warpMax
@@ -968,9 +1050,10 @@ function chainBridge(from, to, { centres, seed, sag = CHAIN.sag }) {
     let across = 0;
     let yaw = (rand() - 0.5) * 0.06;
     if (which === 2) {
-      along = (rand() - 0.5) * 0.3;
-      across = (rand() - 0.5) * 0.24;
-      yaw = (rand() - 0.5) * 0.5;
+      // Small: anything more opens a gap you could step through (see WEAR).
+      along = (rand() - 0.5) * 0.12;
+      across = (rand() - 0.5) * 0.16;
+      yaw = (rand() - 0.5) * 0.3;
     }
     euler.set((rand() - 0.5) * 0.035, yaw, (rand() - 0.5) * 0.02);
     m.makeBasis(tangent, yAx, zAx).multiply(rot.makeRotationFromEuler(euler));
@@ -1006,7 +1089,8 @@ function chainBridge(from, to, { centres, seed, sag = CHAIN.sag }) {
 
     if (which === 1) {
       // Broken across: the near half stays bolted to its strap, the far half
-      // hangs off the other strap, its snapped edge ragged.
+      // sags off the other strap, its snapped edge ragged. Sags, not hangs:
+      // a dropped half left a hole big enough to fall through (see WEAR).
       const cut = (rand() - 0.5) * 0.3;
       const keepSide = rand() < 0.5 ? -1 : 1;
       const pieces = [
@@ -1023,11 +1107,11 @@ function chainBridge(from, to, { centres, seed, sag = CHAIN.sag }) {
         }
         warpGeo(g);
         if (piece.hang) {
-          // Hinge on the strap it still hangs from, dropped 25-60 degrees.
+          // Hinge on the strap it still hangs from, sagging 6-14 degrees.
           const hingeZ = -keepSide * P.halfWidth;
           // Opposite sign to the loose-plate tip below: there the free edge
           // lifts, here it drops.
-          const angle = (0.45 + rand() * 0.6) * (hingeZ > 0 ? -1 : 1);
+          const angle = (0.1 + rand() * 0.15) * (hingeZ > 0 ? -1 : 1);
           g.translate(0, 0, -hingeZ).applyMatrix4(new THREE.Matrix4().makeRotationX(angle)).translate(0, 0, hingeZ);
         }
         out.push(paint(g.applyMatrix4(m), shade));
@@ -1199,6 +1283,13 @@ function chainBridge(from, to, { centres, seed, sag = CHAIN.sag }) {
   let breakStart = 0;
   for (const g of parts) breakStart += g.index.count;
   const geometry = mergeGeometries([...parts, ...breakParts]);
+  // Where each vertex sits along the span, for the wind's envelope (zero at
+  // both ends, so posts and the island-side plates stay put). The bridge is
+  // built along +x from the origin, so it's just x over the span.
+  const gp = geometry.attributes.position;
+  const spanT = new Float32Array(gp.count);
+  for (let i = 0; i < gp.count; i++) spanT[i] = THREE.MathUtils.clamp(gp.getX(i) / span, 0, 1);
+  geometry.setAttribute('aSpanT', new THREE.BufferAttribute(spanT, 1));
   geometry.computeBoundingSphere();
   return { geometry, breakStart, breakables, heightAt: (t) => deckY(THREE.MathUtils.clamp(t, 0, 1)) - 0.005 };
 }
@@ -1275,18 +1366,22 @@ function freeFall(piece, v, spin) {
 }
 
 /**
- * Starts the break on a bridge built by buildIronBridge. Returns false if it
+ * Starts the break on a bridge built by buildIronBridge. `swayOffset` is the
+ * deck's current wind displacement at the break point, if swaying. Returns false if it
  * is already broken (a second faller on the same bridge before it's restored
  * just falls through the gap that's already there).
  */
-export function breakIronBridge(group) {
+export function breakIronBridge(group, swayOffset = null) {
   const st = group.userData.iron;
   if (!st || st.broken) return false;
   st.broken = true;
   st.age = 0;
   st.mesh.geometry.setDrawRange(0, st.breakStart);
   st.debris = new THREE.Group();
+  // The debris doesn't sway, so it starts where the swaying deck was at that
+  // instant (`swayOffset`, world frame, from wind.evaluate at the break).
   st.debris.position.copy(st.mesh.position);
+  if (swayOffset) st.debris.position.add(swayOffset);
   st.debris.rotation.copy(st.mesh.rotation);
   group.add(st.debris);
   st.pieces = [];
@@ -1428,7 +1523,7 @@ export function buildIronBridge(from, to, { centres = [], seed = 0, sag = CHAIN.
   for (const [name, attr] of Object.entries(built.geometry.attributes)) view.setAttribute(name, attr);
   view.setIndex(built.geometry.index);
   view.boundingSphere = built.geometry.boundingSphere.clone();
-  const mesh = new THREE.Mesh(view, getSolidMat());
+  const mesh = new THREE.Mesh(view, getBridgeMat());
   mesh.position.set(from.x, 0, from.z);
   mesh.rotation.y = Math.atan2(-dz, dx); // local +x onto the span, local +z onto its left-hand side
   mesh.userData.sharedMaterial = true;
@@ -1456,6 +1551,8 @@ export function disposeIronKit() {
   deckMats.clear();
   solidMat?.dispose();
   solidMat = null;
+  bridgeMat?.dispose();
+  bridgeMat = null;
   plateEdgeMat?.dispose();
   plateEdgeMat = null;
 }
