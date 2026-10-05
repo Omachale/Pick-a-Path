@@ -88,8 +88,7 @@
  * viewport (letterboxed on a portrait screen) rather than stretched to the
  * viewport's own shape. Luke: "It should be landscape, not portrait."
  *
- * Turning: a smoothstep-eased step per click, 1s each (TURN_DURATION), with
- * no new turn while one is still running. Clicking a dial's
+ * Turning: one slot per click, clicks stack, ends bump; see turn(). Clicking a dial's
  * right half turns it clockwise, its left half anticlockwise. That's only a test trigger, the
  * same as dialProto's Turn buttons.
  *
@@ -98,6 +97,9 @@
  * layout experiment, not a final screen.
  */
 import * as THREE from 'three';
+import { buildQrCard } from './qrCard.js';
+import { buildNameTagCanvas, normalizePlayerName } from '../skypath/nameTag.js';
+import { createRoster, addPlayer as rosterAdd, applySettings, randomise, movePlayer, boxCap, isOverfull, UNASSIGNED_CAP } from './lobbyRoster.js';
 
 // ---------------------------------------------------------------- tuning
 
@@ -153,7 +155,12 @@ export const LOBBY_BOARD_DEFAULTS = {
     // number on the same kind of wheel, 45° a slot (dialProto's own step).
     {
       label: ['Teams'],
-      place: { x: 40 + 598 * 0.25, y: 622 },
+      setting: 'teams',
+      // Luke, 2026-10-05: moved left to "the same margin between the Teams
+      // Window and the left border as the top display window has" (40), with
+      // Players per Team beside it at that same margin, to make room for the
+      // QR button to their right.
+      place: { x: 40 + 150 / 2, y: 622 },
       hole: 104,
       window: { w: 150, h: 110 },
       gap: 8,
@@ -163,7 +170,8 @@ export const LOBBY_BOARD_DEFAULTS = {
     },
     {
       label: ['Players', 'per Team'],
-      place: { x: 40 + 598 * 0.75, y: 622 },
+      setting: 'players',
+      place: { x: 40 + 150 + 40 + 150 / 2, y: 622 },
       hole: 104,
       window: { w: 150, h: 110 },
       gap: 8,
@@ -173,6 +181,63 @@ export const LOBBY_BOARD_DEFAULTS = {
     },
   ],
   labelCapHeight: 26, // design px: height of a capital in a dial's label
+  // Push buttons: a square cardboard block standing `dialLift` off the board
+  // in a hand-cut square hole (Luke: "50px high (same height as the
+  // dials)"), which sinks to just below the board's surface while pressed
+  // ("so that it looks like it is slightly below the surface of the backing
+  // cardboard"). `place` is the button's centre, as for dials. What a press
+  // DOES is the next step; for now it only moves.
+  buttons: [
+    // The QR button, right of the number dials at the same 40 px margin.
+    // Nudged right by half its own width (Luke, 2026-10-05).
+    // Luke, 2026-10-05: moved to sit level with the two number dials (centre
+    // y 737, the dials' own), just right of them, and 25% smaller (110 -> 82.5),
+    // to free the board's middle for wider team boxes.
+    { id: 'qr', place: { x: 380 + 40 + 82.5 / 2, y: 737 }, size: 82.5, label: ['Join'] },
+    // Randomise the teams (Luke, 2026-10-05). Unassigned players are dealt in too.
+    { id: 'shuffle', place: { x: 380 + 40 + 82.5 + 40 + 82.5 / 2, y: 737 }, size: 82.5, label: ['Shuffle'] },
+  ],
+  buttonPressedDepth: 2, // design px below the board's face, while held
+  // The player lobby: the right half of the board. Team boxes stacked
+  // top to bottom and shrinking as teams are added (Luke: "one on top of
+  // another, simply shrinking vertically"), then Unassigned at the bottom,
+  // the same size as a team box. Each box has room for players + 2 name tags.
+  // Sizes always assume the dials' current maximum, so nothing reflows as
+  // players arrive.
+  roster: {
+    // Left edge: 40 px clear of the mode window (which ends at x 638). The
+    // buttons below it end at x 625, so every box, Unassigned included, can
+    // come this far left.
+    area: { x0: 678, y0: 40, x1: 1492, y1: 792 }, // design px from the frame's inside top-left
+    boxGap: 10,
+    titleCap: 15, // capital height of the "Team One" titles: "very minimal... small lettering"
+    settleSeconds: 1.5, // dial changes take effect this long after the last one stops
+    // Each box is a shallow tray pressed into the board (Luke, 2026-10-05:
+    // "slight indents cut/pushed into the cardboard"). Real geometry, so the
+    // board's own light throws a real shadow along each tray's upper-left
+    // inside edge. Pressed rather than cut: rounded corners and gently
+    // sloping walls, unlike the hand-cut windows.
+    tray: { depth: 5, slope: 3, corner: 8 }, // design px; the board is 6 thick
+    // Name tags float this far above the tray floor, casting a shadow onto it
+    // (Luke, 2026-10-05: "raise the name tags in the tray? Maybe 10-20px").
+    tagRaise: 25, // was 15: "I can't actually see it, really"
+    tagLift: 25, // extra height while being dragged
+  },
+  // The QR card (see qrCard.js), brought in by the QR button. Luke,
+  // 2026-10-05: "the code to move in front of the top left quadrant of the
+  // UI, blocking the large image and the dial below it, as well as portions
+  // of the border. It will appear from the left, as if that hand is moving
+  // it into place... 1.3s. Pressing it again will take it away, in 0.7s.
+  // We might have to fiddle with the exact placement." The card keeps the
+  // backing image's own proportions; only its overall scale is set here.
+  qrCard: {
+    url: 'https://omachale.github.io/Pick-a-Path/', // prototype: the Pages root, i.e. the lobby
+    centre: { x: 342, y: 265 }, // the CARD's centre (not the image's), design px from the frame's inside top-left
+    cardSize: 620, // design px across the card itself (515 px in the backing image)
+    height: 90, // design px off the board: above the dials, so it shadows them too
+    inSeconds: 1.3,
+    outSeconds: 0.7,
+  },
 };
 
 const FOV = 20; // narrow: near-orthographic, but the far walls of each cut-out still show a little
@@ -192,9 +257,11 @@ const ORIGINAL = {
 // Turn step is per dial now (`step`, degrees). dialProto settled on 45°, but
 // on the mode dial a 45° step would park the window halfway between two
 // pictures: at this window width each picture spans ~70° of the wheel.
-// dialProto settled on 0.25s; Luke slowed the lobby's mode dial to 1s a turn
-// (2026-10-04), so the picture sweeping past the window can be followed.
-const TURN_DURATION = 1;
+// dialProto settled on 0.25s; Luke slowed the lobby dials to 1s a turn
+// (2026-10-04) so the picture sweeping past can be followed, then asked for
+// "50% faster" (2026-10-05): 1s / 1.5. See turn().
+const TURN_DURATION = 1 / 1.5;
+const BUMP_DURATION = 0.3; // the out-and-back at either end of a dial's range
 
 // ---------------------------------------------------------------- procedural textures
 
@@ -495,15 +562,33 @@ function makeRampCanvas() {
   return c;
 }
 
+// The QR backing image's own geometry (811x586; the card spans x 274-789,
+// y 65-567): enough to scale the image by the CARD's size and place it by
+// the card's centre rather than the image's.
+const QR_BACKING = { w: 811, h: 586, card: { w: 515, cx: 531.5, cy: 316 } };
+
 // ---------------------------------------------------------------- dial labels
 
 // The game's cardboard letter art (see skypath/nameTag.js), stamped onto a
-// transparent canvas: just the letters and a soft drop shadow, no card
-// background, since they sit straight on the board's own cardboard. Sizes
+// transparent canvas: the letters with a soft cream halo, no card
+// background, since they sit straight on the board's own cardboard. The
+// halo is the one board-label readability treatment Luke picked (option D
+// of six compared in label-options.png, 2026-10-05): cardboard letters on
+// cardboard read poorly at label size, and a light glow, the same idea as
+// the name tags', lifts them without changing the letters. Sizes
 // follow nameTag.js's agreed constants (capitals 150 px, lowercase 70%,
 // descenders dropped 6 px); its per-letter size corrections aren't
 // exported, so they're not applied here.
-const LABEL = { upper: 150, lower: 105, desc: 6, spacing: 10, wordGap: 34, lineGap: 30, pad: 12 };
+const LABEL = {
+  upper: 150,
+  lower: 105,
+  desc: 6,
+  spacing: 10,
+  wordGap: 34,
+  lineGap: 30,
+  pad: 46, // room round the letters for the halo
+  halo: { color: '#fff3d6', blur: 30, passes: 3 }, // canvas px, at the 150 px capital size
+};
 const labelGlyphs = new Map();
 function labelGlyph(ch) {
   const src = /[A-Z]/.test(ch) ? `textures/letters/upper-v2/${ch}.png` : `textures/letters/lower/${ch}.png`;
@@ -556,12 +641,14 @@ function labelCanvas(lines) {
             }
             let y = baseline - it.h;
             if ('gjpqy'.includes(it.ch)) y += LABEL.desc;
+            // Drawing with a shadow set draws the letter itself on top of its
+            // own glow; repeating re-saturates the blurred edge (as nameTag.js
+            // does for the name tags' glow).
             ctx.save();
-            ctx.globalAlpha = 0.35;
-            ctx.filter = 'blur(3px)';
-            ctx.drawImage(it.img, x + 2, y + 4, it.w, it.h);
+            ctx.shadowColor = LABEL.halo.color;
+            ctx.shadowBlur = LABEL.halo.blur;
+            for (let pass = 0; pass < LABEL.halo.passes; pass++) ctx.drawImage(it.img, x, y, it.w, it.h);
             ctx.restore();
-            ctx.drawImage(it.img, x, y, it.w, it.h);
             x += it.w + LABEL.spacing;
           }
         });
@@ -573,6 +660,24 @@ function labelCanvas(lines) {
 }
 
 // ---------------------------------------------------------------- geometry helpers
+
+// A rectangle with rounded corners, anticlockwise, as points.
+function roundedRectPoints(x0, y0, x1, y1, r, seg = 6) {
+  const pts = [];
+  const corners = [
+    [x1 - r, y0 + r, -Math.PI / 2],
+    [x1 - r, y1 - r, 0],
+    [x0 + r, y1 - r, Math.PI / 2],
+    [x0 + r, y0 + r, Math.PI],
+  ];
+  for (const [cx, cy, a0] of corners) {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (i / seg) * (Math.PI / 2);
+      pts.push(new THREE.Vector2(cx + Math.cos(a) * r, cy + Math.sin(a) * r));
+    }
+  }
+  return pts;
+}
 
 /**
  * One mitred frame bar, built lying along x with its outer edge at +y and
@@ -869,10 +974,397 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   // cylinder cap's UVs span 0..1 across its diameter rather than world units.
   // Its repeat is set per dial in build() so the grain matches the board's.
   const dials = []; // { group, wheel, step, faceMat, turning }
+  const buttons = []; // { id, group, pressedZ, pressed }
   const wheelMats = []; // per-build wheel backs, disposed with the content
-  // Slot pictures, cached by src so a resize rebuild doesn't reload them. The
-  // paintings have a paper margin; cropping 2% off each side keeps it out
-  // of the window.
+  // ---------------------------------------------------------------- the board sheet
+  let sheetState = null;
+  function sheetGeometry(holes, extraHoles) {
+    const { W, H, boardT } = sheetState ?? pendingSheet;
+    const shape = new THREE.Shape();
+    shape.moveTo(-W / 2, -H / 2);
+    shape.lineTo(W / 2, -H / 2);
+    shape.lineTo(W / 2, H / 2);
+    shape.lineTo(-W / 2, H / 2);
+    shape.closePath();
+    shape.holes = [...holes, ...extraHoles];
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: boardT, bevelEnabled: false });
+    geo.translate(0, 0, -boardT); // top face at z=0
+    return geo;
+  }
+  let pendingSheet = null; // the size being built, before sheetState exists
+
+  // ---------------------------------------------------------------- the player lobby
+  // See lobbyRoster.js for the rules. `settings` is what the boxes are
+  // currently laid out for. It follows the dials only after they've been
+  // still for `settleSeconds` (Luke: "a delay of perhaps 1.5s... reset every
+  // time a dial is turned"), so a teacher clicking through values doesn't
+  // see the names jump about at every click.
+  let settings = { teams: 1, players: 2 }; // the dials' starting values
+  const roster = createRoster(settings);
+  let settleTimer = null;
+  let nextPlayerId = 1;
+  const rosterGroup = new THREE.Group(); // lives outside `content`, so tags survive a resize rebuild
+  scene.add(rosterGroup);
+  const boxesGroup = new THREE.Group();
+  rosterGroup.add(boxesGroup);
+  const tags = new Map(); // id -> { mesh, aspect (height / width) }
+  const tagGeo = new THREE.PlaneGeometry(1, 1);
+  let layout = null; // { boxes: [{ key, x0, y0, x1, y1 }], s }
+  // A tray's floor is the same card, a shade darker where it was pressed;
+  // its walls are plain card-brown, shaded by the light.
+  const trayFloorMat = new THREE.MeshStandardMaterial({ map: cardTex, bumpMap: cardTex, bumpScale: 1.2, roughness: 0.95, color: 0xe6dac8 });
+  const trayWallMat = new THREE.MeshStandardMaterial({ color: 0xa2805a, roughness: 1, side: THREE.DoubleSide });
+  const overfullMat = new THREE.MeshBasicMaterial({ color: 0xc0392b, transparent: true, opacity: 0.22, depthWrite: false });
+  const titleMats = new Map(); // text -> Promise<{ mat, aspect }>
+  // The game's character-select palette (skyPath.js's PALETTE, not exported
+  // from there; keep the two in step). A dev player gets one at random; real
+  // arrivals will bring the colour they picked.
+  const PLAYER_COLOURS = [0x5a9fe0, 0xd9564a, 0x5cb86c, 0xe0b93c, 0x9a6fd6, 0xe08a3c, 0x3fb8b0, 0xe07fb0];
+  const playerColours = new Map(); // id -> hex
+  const NUMBER_WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight'];
+  // The cardboard letters have no digits, so titles are spelled: "Team One".
+  const teamTitle = (i) => `Team ${NUMBER_WORDS[i] ?? i + 1}`;
+  function titleMaterial(text) {
+    if (!titleMats.has(text)) {
+      titleMats.set(
+        text,
+        labelCanvas([text]).then(({ canvas, capPx }) => {
+          const tex = new THREE.CanvasTexture(canvas);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+          return { mat, aspect: canvas.height / canvas.width, capFrac: capPx / canvas.height };
+        }),
+      );
+    }
+    return titleMats.get(text);
+  }
+
+  function tagFor(id) {
+    if (!tags.has(id)) {
+      // shadowSide: by default three.js casts a single-sided plane's shadow
+      // from its BACK face, which faces away from the light, so a raised tag
+      // cast no shadow at all until this was set.
+      const mat = new THREE.MeshBasicMaterial({ transparent: true, shadowSide: THREE.DoubleSide });
+      mat.visible = false;
+      const mesh = new THREE.Mesh(tagGeo, mat);
+      mesh.userData.playerId = id;
+      rosterGroup.add(mesh);
+      const t = { mesh, aspect: 0.3 };
+      tags.set(id, t);
+      // The game's own name tag: cardboard letters on a card tag, the letters
+      // glowing in the PLAYER'S colour, exactly as the game draws them
+      // (skyPath.js attachNameTag passes the player's colorHex as glowColor).
+      // Luke, 2026-10-05: "It's important that when this is connected to real
+      // players, the colours used in their names in-game are also used here."
+      // So a real arrival must pass its own colorHex to addPlayer (the dev
+      // button's colour is random). The colour is always passed explicitly:
+      // nameTag.js's own default (GLOW_COLOR_DEFAULT) is referenced but never
+      // defined, which the game never trips over because it always passes one.
+      const colourCss = `#${playerColours.get(id).toString(16).padStart(6, '0')}`;
+      buildNameTagCanvas(roster.names.get(id), { glowColor: colourCss }).then(({ canvas: tagCanvas }) => {
+        // Trimmed: the game's tag has 40 px of card round the letters (nameTag.js's
+        // PAD_X/PAD_Y), sized for a tag floating over a character, so the
+        // letters fill only ~60% of its height. In a crowded lobby box that
+        // made names look small, so 22 px comes off each side here.
+        const TRIM = 22;
+        const canvas = document.createElement('canvas');
+        canvas.width = tagCanvas.width - 2 * TRIM;
+        canvas.height = tagCanvas.height - 2 * TRIM;
+        // (A coloured border in the player's colour was tried, 2026-10-05, and
+        // dropped: it hid the raised tags' shadows. The colour shows in the
+        // letters' glow instead.)
+        canvas.getContext('2d').drawImage(tagCanvas, -TRIM, -TRIM);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = 8;
+        mat.map = tex;
+        mat.visible = true;
+        mat.needsUpdate = true;
+        t.aspect = canvas.height / canvas.width;
+        renderRoster();
+      });
+    }
+    return tags.get(id);
+  }
+
+  // The best grid for n tag slots in a w x h area: the column count that
+  // gives the tallest tag while a TYPICAL name's tag still fits its cell.
+  // History: sized first for a worst-case 10-letter name everywhere (tags
+  // "a bit small"), then for the widest name present (one "Maximilian"
+  // shrank every tag in the lobby). Luke chose (2026-10-05) to size for a
+  // typical name and let only names too long for their cell shrink, which
+  // they do in placement below. Sizes now never change as names come and go.
+  // TYPICAL_TAG_RATIO is a 6-letter name's tag, measured: Hannah 3.47,
+  // Sophia 3.19, Tomas 3.22, Mateo 3.00 (for scale: Kit 1.48, Maximilian 4.94).
+  const TYPICAL_TAG_RATIO = 3.4;
+  function slotGrid(n, w, h, ratio = TYPICAL_TAG_RATIO) {
+    let best = null;
+    for (let c = 1; c <= n; c++) {
+      const rows = Math.ceil(n / c);
+      const cw = w / c;
+      const ch = h / rows;
+      const tagH = Math.min(ch * 0.86, (cw * 0.92) / ratio);
+      if (!best || tagH > best.tagH) best = { c, rows, cw, ch, tagH };
+    }
+    return best;
+  }
+
+  const TAG_SCALE = 1.15;
+  let tagRestZ = 0.6; // on the tray floor; set by renderRoster
+  const TAG_GLIDE = 0.35; // seconds
+
+  // Names glide to a new place rather than jumping (Luke, 2026-10-05): after
+  // a drop, when others shift up to close a gap, on a dial change, and on
+  // Shuffle. Even 32 tags gliding at once is trivial work. `instant` is for
+  // a resize rebuild, a tag's first appearance, and anything not visible yet.
+  let gliding = false;
+  function placeTag(t, x, y, sx, sy, instant) {
+    const m = t.mesh;
+    if (instant || !t.placed || !m.material.visible) {
+      m.position.set(x, y, tagRestZ);
+      m.scale.set(sx, sy, 1);
+      m.castShadow = true;
+      t.glide = null;
+      t.placed = true;
+      return;
+    }
+    const p = m.position;
+    if (Math.abs(p.x - x) + Math.abs(p.y - y) + Math.abs(p.z - tagRestZ) + Math.abs(m.scale.x - sx) < 0.01) return;
+    t.glide = {
+      from: { x: p.x, y: p.y, z: p.z, sx: m.scale.x, sy: m.scale.y },
+      to: { x, y, z: tagRestZ, sx, sy },
+      start: performance.now(),
+    };
+    if (!gliding) {
+      gliding = true;
+      requestAnimationFrame(glideFrame);
+    }
+  }
+  function glideFrame(now) {
+    let any = false;
+    for (const t of tags.values()) {
+      const g = t.glide;
+      if (!g || t === drag?.tag) continue;
+      const k = Math.min(1, (now - g.start) / (TAG_GLIDE * 1000));
+      const e = 1 - (1 - k) ** 3;
+      const m = t.mesh;
+      m.position.set(g.from.x + (g.to.x - g.from.x) * e, g.from.y + (g.to.y - g.from.y) * e, g.from.z + (g.to.z - g.from.z) * e);
+      m.scale.set(g.from.sx + (g.to.sx - g.from.sx) * e, g.from.sy + (g.to.sy - g.from.sy) * e, 1);
+      if (k < 1) any = true;
+      else {
+        t.glide = null;
+        m.castShadow = true;
+      }
+    }
+    renderer.render(scene, camera);
+    if (any) requestAnimationFrame(glideFrame);
+    else gliding = false;
+  }
+
+  function renderRoster(instant = false) {
+    if (!size.w) return;
+    const W = boardSize.w;
+    const H = boardSize.h;
+    const s = Math.min(W / 1600, H / 900);
+    const F = params.frameWidth * s;
+    const R = params.roster;
+    const wx = (x) => -W / 2 + F + x * s;
+    const wy = (y) => H / 2 - F - y * s;
+    for (const c of [...boxesGroup.children]) {
+      boxesGroup.remove(c);
+      if (c.geometry !== tagGeo) c.geometry.dispose();
+    }
+    const n = settings.teams + 1;
+    const boxH = (R.area.y1 - R.area.y0 - R.boxGap * (n - 1)) / n;
+    const titleBand = Math.min(R.titleCap * 1.35, boxH * 0.2);
+    const boxes = [];
+    const T = R.tray;
+    const floorZ = -T.depth * s;
+    tagRestZ = floorZ + R.tagRaise * s;
+    const trayHoles = [];
+    for (let i = 0; i < n; i++) {
+      const unassigned = i === settings.teams;
+      const ids = unassigned ? roster.unassigned : roster.teams[i];
+      const y0 = R.area.y0 + i * (boxH + R.boxGap);
+      const box = { key: unassigned ? 'unassigned' : i, x0: R.area.x0, y0, x1: R.area.x1, y1: y0 + boxH };
+      boxes.push(box);
+      // The tray: an opening in the sheet, a sloping wall down to a floor.
+      const rim = roundedRectPoints(wx(box.x0), wy(box.y1), wx(box.x1), wy(box.y0), T.corner * s);
+      const floorEdge = roundedRectPoints(
+        wx(box.x0) + T.slope * s,
+        wy(box.y1) + T.slope * s,
+        wx(box.x1) - T.slope * s,
+        wy(box.y0) - T.slope * s,
+        Math.max(1, (T.corner - T.slope) * s),
+      );
+      trayHoles.push(new THREE.Path(rim));
+      const wall = new THREE.Mesh(ringWallGeometry(rim, 0, floorEdge, floorZ, 40 * s), trayWallMat);
+      wall.castShadow = true;
+      wall.receiveShadow = true;
+      boxesGroup.add(wall);
+      const floor = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(floorEdge)), trayFloorMat);
+      floor.position.z = floorZ;
+      floor.receiveShadow = true;
+      boxesGroup.add(floor);
+      const over = unassigned ? ids.length > UNASSIGNED_CAP : isOverfull(ids, settings);
+      if (over) {
+        const tint = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(floorEdge)), overfullMat);
+        tint.position.z = floorZ + 0.15;
+        boxesGroup.add(tint);
+      }
+      // Title, top left inside the box.
+      const title = unassigned ? 'Unassigned' : teamTitle(i);
+      const capWorld = Math.min(R.titleCap, titleBand * 0.55) * s;
+      const tx = wx(box.x0 + 10);
+      const ty = wy(y0 + titleBand / 2);
+      titleMaterial(title).then(({ mat, aspect, capFrac }) => {
+        if (layout?.boxes !== boxes) return; // laid out again meanwhile
+        const h = capWorld / capFrac;
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(h / aspect, h), mat);
+        plane.position.set(tx + h / aspect / 2, ty, floorZ + 0.25);
+        boxesGroup.add(plane);
+        requestRender();
+      });
+      // Name tags, in a grid sized for this box's capacity.
+      const slots = unassigned ? UNASSIGNED_CAP : boxCap(settings);
+      const g = slotGrid(slots, box.x1 - box.x0 - 16, boxH - titleBand - 8);
+      box.grid = g;
+      ids.forEach((id, k) => {
+        const t = tagFor(id);
+        if (t === drag?.tag) return; // the one being dragged follows the pointer instead
+        const col = k % g.c;
+        const row = Math.floor(k / g.c);
+        // 15% over the grid's own fit (Luke, 2026-10-05: "Expand them by
+        // 15%. It's OK if they're nearly touching, as long as they don't
+        // actually touch"), then held to 97% of the cell's width and 95% of
+        // its height. A name too long for its cell at that size is shrunk
+        // to fit it, on its own; every other tag keeps the full size.
+        let th = g.tagH * TAG_SCALE;
+        let tw = th / t.aspect;
+        if (tw > g.cw * 0.97) {
+          tw = g.cw * 0.97;
+          th = tw * t.aspect;
+        }
+        if (th > g.ch * 0.95) {
+          th = g.ch * 0.95;
+          tw = th / t.aspect;
+        }
+        placeTag(t, wx(box.x0 + 8 + (col + 0.5) * g.cw), wy(y0 + titleBand + (row + 0.5) * g.ch), tw * s, th * s, instant);
+      });
+    }
+    layout = { boxes };
+    setTrays(boxes, trayHoles);
+    requestRender();
+  }
+
+  // Re-makes the board sheet with the trays' openings, only when the boxes
+  // actually changed (not on every drag or arrival).
+  function setTrays(boxes, holes) {
+    if (!sheetState) return;
+    const key = boxes.map((b) => `${b.x0},${b.y0},${b.x1},${b.y1}`).join('|') + `@${boardSize.w}`;
+    if (key === sheetState.traysKey) return;
+    sheetState.traysKey = key;
+    const old = sheetState.mesh.geometry;
+    sheetState.mesh.geometry = sheetGeometry(sheetState.baseHoles, holes);
+    old.dispose();
+  }
+
+  function rosterBoxAt(worldX, worldY) {
+    if (!layout) return null;
+    const W = boardSize.w;
+    const H = boardSize.h;
+    const s = Math.min(W / 1600, H / 900);
+    const F = params.frameWidth * s;
+    const x = (worldX + W / 2 - F) / s;
+    const y = (H / 2 - F - worldY) / s;
+    return layout.boxes.find((b) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) ?? null;
+  }
+
+  function dialSettings() {
+    const out = { ...settings };
+    for (const d of dials) {
+      if (!d.setting) continue;
+      const stepRad = (d.step * Math.PI) / 180;
+      const idx = d.target ?? Math.round(-d.group.rotation.z / stepRad);
+      out[d.setting] = d.values[Math.max(0, Math.min(d.values.length - 1, idx))];
+    }
+    return out;
+  }
+  // Called whenever a settings dial is clicked (cancel) and when it comes to
+  // rest (restart the countdown).
+  function settingsDialMoved(resting) {
+    clearTimeout(settleTimer);
+    if (!resting || dials.some((d) => d.setting && d.turning)) return;
+    settleTimer = setTimeout(() => {
+      settings = dialSettings();
+      applySettings(roster, settings);
+      renderRoster();
+    }, params.roster.settleSeconds * 1000);
+  }
+
+  // Dragging a tag: it lifts off the board (with a shadow) and follows the
+  // pointer; dropped on a box with room, it moves there; anywhere else, or
+  // onto a full box, it goes back.
+  let drag = null; // { tag, id, off: Vector2 }
+  const dragPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  function pointerOnBoard(ev) {
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    return raycaster.ray.intersectPlane(dragPlane, new THREE.Vector3());
+  }
+  function tagAt(ev) {
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects([...tags.values()].map((t) => t.mesh).filter((m) => m.material.visible))[0];
+    return hit ? tags.get(hit.object.userData.playerId) : null;
+  }
+
+  // The QR card: progress p runs 0 (hidden) to 1 (in place); see poseQr().
+  const qr = { p: 0, target: 0, mesh: null, shownPos: null, hiddenPos: null };
+  qr.mat = new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.5, side: THREE.DoubleSide });
+  qr.mat.visible = false; // until its texture exists
+  buildQrCard(params.qrCard.url).then((canvas) => {
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    qr.mat.map = tex;
+    qr.mat.visible = true;
+    qr.mat.needsUpdate = true;
+    requestRender();
+  });
+  // In: decelerates into place with the slightest overshoot, as a hand
+  // placing something does. Out: accelerates away. The tilt unwinds as it
+  // arrives, which sells the "carried in by the hand" swing.
+  function poseQr(p) {
+    if (!qr.mesh) return;
+    qr.mesh.visible = p > 0.001;
+    qr.mesh.position.lerpVectors(qr.hiddenPos, qr.shownPos, p);
+    qr.mesh.rotation.z = (1 - Math.min(1, p)) * 0.18;
+  }
+  function moveQr(show) {
+    qr.target = show ? 1 : 0;
+    const from = qr.p;
+    const to = qr.target;
+    // A reversal mid-way only takes the time for the distance left.
+    const dur = (show ? params.qrCard.inSeconds : params.qrCard.outSeconds) * Math.abs(to - from);
+    const start = performance.now();
+    const id = (qr.animId = (qr.animId ?? 0) + 1);
+    const frame = (now) => {
+      if (qr.animId !== id) return;
+      const t = dur > 0 ? Math.min(1, (now - start) / (dur * 1000)) : 1;
+      const c = 1.2; // easeOutBack, gentle
+      const e = show ? 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2 : t * t * t;
+      qr.p = from + (to - from) * e;
+      poseQr(qr.p);
+      renderer.render(scene, camera);
+      if (t < 1) requestAnimationFrame(frame);
+      else qr.p = to;
+    };
+    requestAnimationFrame(frame);
+  }
+  // Slot pictures, cached by src so a resize rebuild doesn't reload them.
   const slotMats = new Map();
   function slotMaterial(src) {
     if (!slotMats.has(src)) {
@@ -942,6 +1434,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   let prevAngles = []; // dial angles survive a resize rebuild
   let content = null;
   let size = { w: 0, h: 0 };
+  let boardSize = { w: 0, h: 0 }; // the 16:9 board inside the viewport
 
   function disposeContent() {
     if (!content) return;
@@ -975,6 +1468,8 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     const rand = mulberry32(31);
 
     // --- cardboard sheet, with the housings' window + hole cut right through
+    sheetState = null;
+    pendingSheet = { W, H, boardT };
     const sheet = new THREE.Shape();
     sheet.moveTo(-W / 2, -H / 2);
     sheet.lineTo(W / 2, -H / 2);
@@ -999,13 +1494,23 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       h.hole = handCutCircle(h.cx, h.holeY, h.R, s, rand);
       sheet.holes.push(new THREE.Path(h.win.points), new THREE.Path(h.hole));
     }
+    const buttonSpots = (P.buttons ?? []).map((b) => {
+      const size = b.size * s;
+      const cx = -W / 2 + F + b.place.x * s;
+      const cy = H / 2 - F - b.place.y * s;
+      const hole = handCutRect(cx, cy, size, size, s, rand);
+      sheet.holes.push(new THREE.Path(hole.points));
+      return { b, size, cx, cy, hole };
+    });
 
-    const sheetGeo = new THREE.ExtrudeGeometry(sheet, { depth: boardT, bevelEnabled: false });
-    sheetGeo.translate(0, 0, -boardT); // top face at z=0
-    const sheetMesh = new THREE.Mesh(sheetGeo, [cardMat, cutEdgeMat]);
+    const sheetMesh = new THREE.Mesh(sheetGeometry(sheet.holes, []), [cardMat, cutEdgeMat]);
     sheetMesh.receiveShadow = true;
     sheetMesh.castShadow = true;
     content.add(sheetMesh);
+    // The team-box trays are cut into this sheet too, but they change with the
+    // dials, so renderRoster() re-makes the sheet's geometry with them (see
+    // setTrays). Kept here: the holes that never change.
+    sheetState = { mesh: sheetMesh, baseHoles: sheet.holes.slice(), W, H, boardT, traysKey: null };
 
     // --- the dark cavity behind the board, seen around each dial
     const back = new THREE.Mesh(new THREE.PlaneGeometry(W, H), cavityMat);
@@ -1176,7 +1681,16 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
         content.add(wheel);
       }
       const step = h.d.wheelSlots ? 360 / h.d.wheelSlots : 45;
-      dials.push({ group, wheel, step, slotCount: h.d.slots?.length ?? 0, faceMat, turning: false });
+      dials.push({
+        group,
+        wheel,
+        step,
+        slotCount: h.d.slots?.length ?? 0,
+        setting: h.d.setting,
+        values: h.d.slots?.map((sl) => sl.value),
+        faceMat,
+        turning: false,
+      });
 
       // --- the label above the window, in the game's cardboard lettering
       if (h.d.label) {
@@ -1195,6 +1709,90 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
           requestRender();
         });
       }
+    }
+
+    // --- push buttons (see LOBBY_BOARD_DEFAULTS.buttons)
+    buttons.length = 0;
+    for (const bs of buttonSpots) {
+      const lift = P.dialLift * s;
+      for (const outline of [bs.hole.points]) {
+        const wall = new THREE.Mesh(ringWallGeometry(outline, 0, insetOutline(outline, taper, rand), -boardT, 40 * s), cutWallMat);
+        wall.castShadow = true;
+        wall.receiveShadow = true;
+        content.add(wall);
+      }
+      for (const tri of bs.hole.overcuts) {
+        const slit = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(tri)), overcutMat);
+        slit.position.z = 0.08;
+        content.add(slit);
+      }
+      // The block: a hand-cut square a little inside the hole (clear of its
+      // sloping walls), its top narrower than its base like the dials', with
+      // the same corrugated side.
+      const base = handCutRect(0, 0, bs.size * 0.88, bs.size * 0.88, s, rand).points;
+      const top = base.map((p) => p.clone().multiplyScalar(1 - P.dialTaper));
+      const pieceH = Math.min(P.dialHeight * s, lift);
+      const colTop = lift - pieceH;
+      const bottom = -boardT - cavity;
+      const group = new THREE.Group();
+      group.position.set(bs.cx, bs.cy, 0);
+      const below = new THREE.Mesh(ringWallGeometry(base, colTop, base, bottom, 40 * s), cutWallMat);
+      const side = new THREE.Mesh(ringWallGeometry(top, lift, base, colTop, FLUTES_PER_TILE * P.flutePitch * s), fluteMat);
+      const faceTex = canvasTexture(faceCanvas);
+      faceTex.repeat.set(1 / CARDBOARD_TILE, 1 / CARDBOARD_TILE);
+      faceTex.offset.set(rand(), rand());
+      const faceMat = new THREE.MeshStandardMaterial({ map: faceTex, bumpMap: faceTex, bumpScale: 1.2, roughness: 0.95 });
+      wheelMats.push(faceMat);
+      const face = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(top)), faceMat);
+      face.position.z = lift;
+      for (const m of [below, side, face]) {
+        m.castShadow = true;
+        m.receiveShadow = true;
+        group.add(m);
+      }
+      content.add(group);
+      // Pressed, the whole block drops until its face is just below the board.
+      buttons.push({ id: bs.b.id, group, pressedZ: -(lift + P.buttonPressedDepth * s), pressed: false });
+      // Buttons are labelled above, like the dials, so two blank squares
+      // can be told apart.
+      if (bs.b.label) {
+        const forContent = content;
+        labelCanvas(bs.b.label).then(({ canvas, capPx }) => {
+          if (content !== forContent) return;
+          const k = (P.labelCapHeight * s) / capPx;
+          const tex = new THREE.CanvasTexture(canvas);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: 0.95, depthWrite: false });
+          wheelMats.push(mat);
+          const plane = new THREE.Mesh(new THREE.PlaneGeometry(canvas.width * k, canvas.height * k), mat);
+          plane.position.set(bs.cx, bs.cy + bs.size / 2 + 6 * s + (canvas.height * k) / 2, 0.12);
+          content.add(plane);
+          requestRender();
+        });
+      }
+    }
+
+    // --- the QR card: built at this size, posed from its current progress
+    {
+      const q = P.qrCard;
+      const k = (q.cardSize * s) / QR_BACKING.card.w; // world units per backing px
+      const geo = new THREE.PlaneGeometry(QR_BACKING.w * k, QR_BACKING.h * k);
+      qr.mesh = new THREE.Mesh(geo, qr.mat);
+      qr.mesh.castShadow = true;
+      qr.mesh.renderOrder = 5;
+      // Card centre on screen when shown; the image's own centre is offset
+      // from it, since the card is right of centre in the backing (the hand
+      // takes up the left).
+      const cardX = -W / 2 + F + q.centre.x * s;
+      const cardY = H / 2 - F - q.centre.y * s;
+      const offX = (QR_BACKING.w / 2 - QR_BACKING.card.cx) * k;
+      const offY = (QR_BACKING.card.cy - QR_BACKING.h / 2) * k; // backing y runs down
+      qr.shownPos = new THREE.Vector3(cardX + offX, cardY + offY, q.height * s);
+      // Hidden: the whole image just off the board's left edge, tipped back
+      // a little, as if still on its way in from the side.
+      qr.hiddenPos = new THREE.Vector3(-W / 2 - (QR_BACKING.w * k) / 2 - 20 * s, cardY + offY - 30 * s, q.height * s);
+      content.add(qr.mesh);
+      poseQr(qr.p);
     }
 
     // --- the oak frame: four mitred bars
@@ -1271,8 +1869,10 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     const bw = Math.min(w, (h * 16) / 9);
     const bh = (bw * 9) / 16;
     renderer.setSize(bw, bh);
+    boardSize = { w: bw, h: bh };
     renderer.domElement.style.margin = `${(h - bh) / 2}px auto 0`;
     build(bw, bh);
+    renderRoster(true);
     requestRender();
   }
   const ro = new ResizeObserver(resize);
@@ -1288,28 +1888,135 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     raycaster.setFromCamera(ndc, camera);
     return dials.find((d) => raycaster.intersectObject(d.group, true).length > 0);
   }
+  /**
+   * Turning, 2026-10-05 (Luke): "50% faster", clicks that stack ("three
+   * clicks on 2 moves to 5, but much faster than waiting for each rotation
+   * to finish"), and "a stunted motion when the end is reached: ... a quick
+   * quarter-turn and then back".
+   *
+   * Each dial keeps a target slot. A click moves the target one step and
+   * restarts the tween from wherever the dial is right now to the new
+   * target, over TURN_DURATION whatever the distance, so quick clicks cover
+   * more ground in the same time. A tween that starts while the dial is
+   * already moving eases OUT only: smoothstep would start from rest and
+   * visibly stall mid-spin.
+   *
+   * A click past either end doesn't move the target. The dial nudges a
+   * quarter of a step that way and springs back (BUMP_DURATION), so it
+   * reads as hitting a stop. The window's wheel turns with it, being
+   * synced to the dial.
+   */
   function turn(dial, direction) {
-    if (dial.turning) return;
-    // A dial with a picture wheel stops at its first and last picture.
-    if (dial.slotCount) {
-      const next = Math.round(-dial.group.rotation.z / ((dial.step * Math.PI) / 180)) - direction;
-      if (next < 0 || next >= dial.slotCount) return;
+    const stepRad = (dial.step * Math.PI) / 180;
+    if (dial.target == null) dial.target = Math.round(-dial.group.rotation.z / stepRad);
+    const next = dial.target - direction; // rotation.z is anticlockwise-positive; clockwise = next slot
+    if (dial.slotCount && (next < 0 || next >= dial.slotCount)) {
+      if (!dial.turning) bump(dial, direction * stepRad * 0.25);
+      return;
     }
-    dial.turning = true;
+    dial.target = next;
+    if (dial.setting) settingsDialMoved(false);
     const from = dial.group.rotation.z;
-    const to = from + (direction * dial.step * Math.PI) / 180;
+    const to = -next * stepRad;
+    const moving = dial.turning;
     const start = performance.now();
-    const step = (now) => {
+    const id = (dial.animId = (dial.animId ?? 0) + 1);
+    dial.turning = true;
+    const frame = (now) => {
+      if (dial.animId !== id) return; // superseded by a newer click
       const t = Math.min(1, (now - start) / (TURN_DURATION * 1000));
-      dial.group.rotation.z = from + (to - from) * t * t * (3 - 2 * t);
-      if (dial.wheel) dial.wheel.rotation.z = dial.group.rotation.z;
-      renderer.render(scene, camera);
-      if (t < 1) requestAnimationFrame(step);
+      const e = moving ? 1 - (1 - t) ** 3 : t * t * (3 - 2 * t);
+      setAngle(dial, from + (to - from) * e);
+      if (t < 1) requestAnimationFrame(frame);
+      else {
+        dial.turning = false;
+        if (dial.setting) settingsDialMoved(true);
+      }
+    };
+    requestAnimationFrame(frame);
+  }
+  function bump(dial, amount) {
+    const base = dial.group.rotation.z;
+    const start = performance.now();
+    const id = (dial.animId = (dial.animId ?? 0) + 1);
+    dial.turning = true;
+    const frame = (now) => {
+      if (dial.animId !== id) return;
+      const t = Math.min(1, (now - start) / (BUMP_DURATION * 1000));
+      setAngle(dial, base + amount * Math.sin(Math.PI * t)); // out and back
+      if (t < 1) requestAnimationFrame(frame);
       else dial.turning = false;
     };
-    requestAnimationFrame(step);
+    requestAnimationFrame(frame);
   }
+  function setAngle(dial, a) {
+    dial.group.rotation.z = a;
+    if (dial.wheel) dial.wheel.rotation.z = a;
+    renderer.render(scene, camera);
+  }
+  function buttonAt(ev) {
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    return buttons.find((b) => raycaster.intersectObject(b.group, true).length > 0);
+  }
+  // Down while held, up on release (anywhere, so dragging off it still lets
+  // it come back up). A quick drop and a slightly slower spring back.
+  function pressButton(b, down) {
+    if (b.pressed === down) return;
+    b.pressed = down;
+    const from = b.group.position.z;
+    const to = down ? b.pressedZ : 0;
+    const dur = down ? 0.08 : 0.16;
+    const start = performance.now();
+    const id = (b.animId = (b.animId ?? 0) + 1);
+    const frame = (now) => {
+      if (b.animId !== id) return;
+      const t = Math.min(1, (now - start) / (dur * 1000));
+      b.group.position.z = from + (to - from) * (1 - (1 - t) ** 2);
+      renderer.render(scene, camera);
+      if (t < 1) requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+  const onPointerUp = (ev) => {
+    for (const b of buttons) pressButton(b, false);
+    if (drag) {
+      const p = pointerOnBoard(ev);
+      const box = p && rosterBoxAt(p.x, p.y);
+      if (box) movePlayer(roster, settings, drag.id, box.key);
+      drag = null;
+      renderRoster();
+    }
+  };
   const onPointerDown = (ev) => {
+    const button = buttonAt(ev);
+    if (button) {
+      pressButton(button, true);
+      if (button.id === 'qr') moveQr(qr.target === 0);
+      if (button.id === 'shuffle') {
+        randomise(roster, settings);
+        renderRoster();
+      }
+      return;
+    }
+    // While the card is up, it covers what's under it.
+    if (qr.mesh?.visible) {
+      const r = renderer.domElement.getBoundingClientRect();
+      ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      if (raycaster.intersectObject(qr.mesh).length) return;
+    }
+    const tag = tagAt(ev);
+    if (tag) {
+      const p = pointerOnBoard(ev);
+      tag.glide = null;
+      drag = { tag, id: tag.mesh.userData.playerId, off: new THREE.Vector2(tag.mesh.position.x - p.x, tag.mesh.position.y - p.y) };
+      tag.mesh.position.z = tagRestZ + params.roster.tagLift * Math.min(boardSize.w / 1600, boardSize.h / 900);
+      tag.mesh.castShadow = true;
+      requestRender();
+      return;
+    }
     const dial = dialAt(ev);
     if (!dial) return;
     // Luke, 2026-10-04: "clicking on the right should do the standard action,
@@ -1325,15 +2032,44 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     if (dialAt(ev)) ev.preventDefault();
   };
   const onPointerMove = (ev) => {
-    renderer.domElement.style.cursor = dialAt(ev) ? 'pointer' : '';
+    if (drag) {
+      const p = pointerOnBoard(ev);
+      if (p) drag.tag.mesh.position.set(p.x + drag.off.x, p.y + drag.off.y, drag.tag.mesh.position.z);
+      renderer.domElement.style.cursor = 'grabbing';
+      requestRender();
+      return;
+    }
+    renderer.domElement.style.cursor = tagAt(ev) ? 'grab' : dialAt(ev) || buttonAt(ev) ? 'pointer' : '';
   };
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointerup', onPointerUp);
+  // Debug only: hold a button down (true) or let it up (false).
+  window.__lobbyButton = (id, down) => pressButton(buttons.find((b) => b.id === id), down);
+  // Debug only: pose the QR card at progress p (0 hidden, 1 in place), and
+  // render a frame to a data URL, for checking it without a visible pane
+  // (POST the result to the dev server's /__shot to save it).
+  window.__lobbyQr = (p) => {
+    qr.p = qr.target = p;
+    poseQr(p);
+  };
+  // Debug only: the lobby as it stands.
+  window.__lobbyRoster = () => ({
+    settings,
+    grid: layout?.boxes[0]?.grid,
+    teams: roster.teams.map((t) => t.map((id) => roster.names.get(id))),
+    unassigned: roster.unassigned.map((id) => roster.names.get(id)),
+  });
+  window.__lobbyCapture = () => {
+    renderer.render(scene, camera);
+    return renderer.domElement.toDataURL('image/png');
+  };
   // Debug only, like dialProto's window.__dialState: the dial face has no
   // marking, so a turn is hard to confirm by eye.
   window.__lobbyDials = () => dials.map((d) => ({ deg: (d.group.rotation.z * 180) / Math.PI, turning: d.turning }));
   // Debug only: park dial i at an angle, e.g. mid-turn, to inspect the wheel.
   window.__lobbyDialSet = (i, deg) => {
     const d = dials[i];
+    d.target = null; // re-derived from the angle on the next click
     d.group.rotation.z = (deg * Math.PI) / 180;
     if (d.wheel) d.wheel.rotation.z = d.group.rotation.z;
     requestRender();
@@ -1341,15 +2077,38 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   renderer.domElement.addEventListener('contextmenu', onContextMenu);
   renderer.domElement.addEventListener('pointermove', onPointerMove);
 
-  return {
+  const api = {
+    /**
+     * Adds a player to the lobby (dev button for now; real arrivals later).
+     * A real arrival MUST pass the colour the player picked (the same
+     * colorHex the game uses for their name tag), so their name looks the
+     * same here as in the game. Only the dev button relies on the random default.
+     */
+    addPlayer(rawName, colourHex = PLAYER_COLOURS[Math.floor(Math.random() * PLAYER_COLOURS.length)]) {
+      const id = `p${nextPlayerId++}`;
+      playerColours.set(id, colourHex);
+      rosterAdd(roster, settings, id, normalizePlayerName(rawName) || 'Player');
+      renderRoster();
+      return id;
+    },
     dispose() {
+      clearTimeout(settleTimer);
       ro.disconnect();
       delete window.__lobbyDials;
       delete window.__lobbyDialSet;
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      delete window.__lobbyButton;
+      delete window.__lobbyQr;
+      delete window.__lobbyCapture;
+      delete window.__lobbyRoster;
+      delete window.__lobbyAdd;
+      delete window.__lobbySettings;
       renderer.domElement.removeEventListener('contextmenu', onContextMenu);
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
       disposeContent();
+      qr.mat.map?.dispose();
+      qr.mat.dispose();
       for (const m of slotMats.values()) {
         m.map?.dispose();
         m.dispose();
@@ -1363,4 +2122,14 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       renderer.domElement.remove();
     },
   };
+  // Debug only: add a player with a given name (the dev button picks at random).
+  window.__lobbyAdd = (name) => api.addPlayer(name);
+  // Debug only: apply dial settings at once and lay out without gliding, for
+  // checking layouts when the page can't animate (a hidden preview pane).
+  window.__lobbySettings = (st) => {
+    settings = { ...settings, ...st };
+    applySettings(roster, settings);
+    renderRoster(true);
+  };
+  return api;
 }

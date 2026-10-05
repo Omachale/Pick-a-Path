@@ -1,0 +1,159 @@
+/*
+ * Paper Planes UI. Sized for a phone held sideways (the whole game is
+ * landscape) and scaled up a little on bigger screens. One rule throughout:
+ * every control is its own small box that takes its own taps; nothing
+ * invisible ever sits over the canvas (see ui.js).
+ */
+html, body { margin: 0; height: 100%; overflow: hidden; background: #5a3a52; overscroll-behavior: none; }
+#game { position: fixed; inset: 0; font: 600 15px/1.25 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fffaf2; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+#game canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+#game button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulation; }
+#game svg { overflow: visible; }
+
+:root { --card: rgba(36, 24, 40, 0.62); --card-edge: rgba(255, 240, 220, 0.18); --gold: #ffd34d; }
+@media (min-height: 600px) { #game { font-size: 17px; } }
+
+.pgCard { background: var(--card); border: 1px solid var(--card-edge); border-radius: 14px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
+.pgBtn { background: rgba(255, 248, 236, 0.16); border: 1px solid rgba(255, 240, 220, 0.35); border-radius: 12px; padding: 9px 16px; min-height: 44px; }
+#game .pgBtn.primary { background: #fff3dc; color: #3a2430; border-color: #fff3dc; font-weight: 800; }
+.pgBtn:active { transform: scale(0.97); }
+
+/* top bar */
+.pgTop { position: absolute; top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); display: flex; gap: 8px; align-items: stretch; pointer-events: none; }
+.pgTop > * { pointer-events: auto; }
+.pgIsland { padding: 6px 12px; min-width: 128px; }
+.pgIsland .n { font-size: 0.78em; opacity: 0.8; text-transform: uppercase; letter-spacing: 0.04em; }
+.pgIsland .n span { opacity: 0.7; }
+.pgIsland .nm { font-size: 1.05em; font-weight: 800; }
+.pgIsland .row { display: flex; gap: 10px; align-items: center; margin-top: 2px; }
+.pgIsland .throws i { display: inline-block; width: 18px; height: 6px; border-radius: 3px; margin-right: 3px; background: #fff3dc; }
+.pgIsland .throws i.used { background: rgba(255,243,220,0.22); }
+.pgIsland .st b, .pgResult .stars b { color: rgba(255,255,255,0.25); font-size: 1.05em; }
+.pgIsland .st b.on, .pgResult .stars b.on { color: var(--gold); text-shadow: 0 0 6px rgba(255,200,60,0.5); }
+.pgWind { margin: 0 auto; display: flex; align-items: center; gap: 8px; padding: 4px 12px 4px 6px; }
+.pgWindDial { width: 44px; height: 44px; }
+.pgWindDial .ring { fill: rgba(255,255,255,0.08); stroke: rgba(255,250,240,0.5); stroke-width: 3; }
+.pgWindDial .arrow path { fill: #fff3dc; stroke: #3a2430; stroke-width: 2; }
+.pgWindDial .hub { fill: rgba(255,250,240,0.7); }
+.pgWind.calm .hub { fill: rgba(255,250,240,0.35); }
+.pgWindText { display: flex; flex-direction: column; }
+.pgWindText .word { font-weight: 800; }
+.pgWindText .bars i { display: inline-block; width: 14px; height: 6px; border-radius: 3px; margin-right: 3px; background: rgba(255,255,255,0.22); }
+.pgWindText .bars i.on { background: #9fdcff; }
+.pgScore { padding: 0 14px; display: flex; align-items: center; font-size: 1.25em; font-weight: 800; gap: 6px; }
+.pgScore b { color: var(--gold); }
+.pgLooksBtn { background: var(--card); }
+
+/* plane chip + picker */
+.pgChip { position: absolute; left: max(8px, env(safe-area-inset-left)); bottom: max(8px, env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 8px; padding: 6px 14px 6px 8px; min-height: 52px; background: var(--card); border: 1px solid var(--card-edge); border-radius: 14px; backdrop-filter: blur(6px); }
+.pgChip .pgIcon { width: 38px; height: 38px; }
+.pgChip span { font-weight: 800; font-size: 1.05em; }
+.pgChip em { font-style: normal; font-size: 0.75em; opacity: 0.75; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 8px; }
+.pgPicker { position: absolute; left: 50%; bottom: max(8px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: none; flex-direction: column; align-items: center; gap: 6px; }
+.pgPicker.open { display: flex; }
+.pgPickerTitle { font-size: 1.2em; font-weight: 800; text-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+.pgCards { display: flex; gap: 10px; }
+.pgPlaneCard { width: 172px; background: rgba(36,24,40,0.74); border: 2px solid rgba(255,240,220,0.2); border-radius: 16px; padding: 8px 10px 10px; text-align: left; backdrop-filter: blur(6px); display: flex; flex-direction: column; align-items: center; }
+.pgPlaneCard.sel { border-color: var(--pc); box-shadow: 0 0 0 2px var(--pc) inset; }
+.pgPlaneCard .pgIcon { width: 64px; height: 64px; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.35)); }
+.pgPlaneCard .name { font-size: 1.2em; font-weight: 900; margin: 2px 0 4px; }
+.pgPlaneCard .traits { align-self: stretch; font-size: 0.8em; }
+.pgPlaneCard .traits div { display: flex; justify-content: space-between; align-items: center; padding: 1px 0; }
+.pgPlaneCard .traits .lbl { opacity: 0.85; }
+.pgPlaneCard .pips i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 3px; border: 1.5px solid rgba(255,255,255,0.55); }
+.pgPlaneCard .pips i.on { background: var(--pc); border-color: var(--pc); }
+.pgPlaneCard .blurb { font-size: 0.74em; font-weight: 500; opacity: 0.85; margin-top: 5px; text-align: center; }
+/* Phones held sideways: the cards lie flat (icon beside the words) so the
+   picker takes the bottom quarter of the screen, not half of it. */
+@media (max-height: 420px) {
+  .pgPlaneCard { width: 196px; padding: 6px 10px 6px 6px; display: grid; grid-template-columns: 52px 1fr; column-gap: 6px; align-items: center; }
+  .pgPlaneCard .pgIcon { width: 50px; height: 50px; grid-row: span 2; }
+  .pgPlaneCard .name { margin: 0; font-size: 1.05em; }
+  .pgPlaneCard .traits { font-size: 0.72em; }
+  .pgPlaneCard .traits div { padding: 0; }
+  .pgPlaneCard .pips i { width: 8px; height: 8px; }
+  .pgPlaneCard .blurb { display: none; }
+  .pgPickerTitle { font-size: 0.95em; }
+}
+
+/* angle gauge */
+.pgLeft { position: absolute; left: max(10px, env(safe-area-inset-left)); top: calc(max(8px, env(safe-area-inset-top)) + 72px); display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.pgGauge { width: 132px; padding: 10px 10px 6px; background: var(--card); border: 1px solid var(--card-edge); border-radius: 16px; backdrop-filter: blur(6px); display: none; touch-action: none; }
+.pgGauge svg { width: 100%; height: auto; display: block; }
+.pgGauge .fan { fill: rgba(255,255,255,0.08); stroke: rgba(255,250,240,0.35); stroke-width: 1.5; }
+.pgGauge .ground { stroke: rgba(255,250,240,0.6); stroke-width: 3; stroke-linecap: round; }
+.pgGauge .needle line { stroke: #fff3dc; stroke-width: 5; stroke-linecap: round; }
+.pgGauge .tipPlane path { fill: #fff3dc; stroke: #3a2430; stroke-width: 1.5; }
+.pgGauge .hub { fill: #fff3dc; }
+.pgGauge .ghost { stroke: #9fdcff; stroke-width: 3; stroke-dasharray: 5 4; }
+.pgGauge.locked { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold) inset; }
+.pgGauge.locked .needle line, .pgGauge.locked .tipPlane path, .pgGauge.locked .hub { stroke: var(--gold); fill: var(--gold); }
+.pgGauge.locked .tipPlane path { stroke: #3a2430; }
+.pgGaugeLabel { text-align: center; font-size: 0.8em; opacity: 0.8; margin-top: 2px; }
+@media (max-height: 420px) { .pgGauge { width: 104px; padding: 8px 8px 4px; } .pgLeft { top: calc(max(8px, env(safe-area-inset-top)) + 62px); } }
+
+.pgRedo { display: none; background: var(--card); padding: 6px 10px; min-height: 40px; }
+
+.pgHint { position: absolute; left: 50%; bottom: max(14px, env(safe-area-inset-bottom)); transform: translateX(-50%); padding: 8px 16px; border-radius: 999px; background: rgba(36,24,40,0.55); font-size: 1.05em; font-weight: 700; white-space: nowrap; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.4); }
+.pgHint b { color: var(--gold); }
+
+.pgArrow { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; display: none; }
+.pgArrow .reach { fill: rgba(255,255,255,0.06); stroke: rgba(255,250,240,0.35); stroke-width: 2; stroke-dasharray: 6 6; }
+.pgArrow .dead { fill: rgba(0,0,0,0.12); stroke: rgba(255,250,240,0.25); stroke-width: 1.5; }
+.pgArrow .shaft { stroke-width: 9; stroke-linecap: butt; }
+.pgArrow .head { stroke: none; }
+.pgArrow .arrowG { filter: drop-shadow(0 2px 3px rgba(0,0,0,0.45)); }
+.pgArrow .cancelX line { stroke: #fff; stroke-width: 5; stroke-linecap: round; }
+
+.pgFF { position: absolute; right: max(14px, env(safe-area-inset-right)); bottom: max(14px, env(safe-area-inset-bottom)); padding: 6px 12px; border-radius: 10px; background: rgba(36,24,40,0.55); font-weight: 900; display: none; pointer-events: none; }
+
+/* result card */
+.pgResult { position: absolute; right: max(10px, env(safe-area-inset-right)); top: 50%; transform: translateY(-42%); display: none; gap: 12px; align-items: center; padding: 12px 14px; background: rgba(36,24,40,0.78); border: 1px solid var(--card-edge); border-radius: 18px; backdrop-filter: blur(8px); max-width: min(440px, 62vw); }
+.pgResult.open { display: flex; }
+/* On the left when the throw went right, so it never covers what it's describing. */
+.pgResult.left { right: auto; left: max(10px, env(safe-area-inset-left)); }
+.pgResultMap svg { width: 116px; height: 116px; display: block; }
+.pgResultMap .isl { fill: #8e8a7c; stroke: #fff3dc; stroke-width: 1.5; }
+.pgResultMap .ringInner { fill: #a8a294; stroke: #fff; stroke-width: 2; }
+.pgResultMap .ringBull { fill: #f0b83c; stroke: #5a3018; stroke-width: 1.5; }
+.pgResultMap .line { stroke: rgba(255,255,255,0.45); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.pgResultMap .ghost { fill: rgba(159,220,255,0.55); }
+.pgResultMap .end { fill: #fff; stroke: #2a1a24; stroke-width: 1.5; }
+.pgResultMap .endHalo { fill: rgba(42,26,36,0.55); }
+.pgResultMap .outArrow { fill: #ff8a6a; stroke: #fff; stroke-width: 1.2; }
+.pgResultMap .windArrow { fill: #9fdcff; stroke: #2a1a24; stroke-width: 1; }
+.pgResultBody { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.pgResult .title { font-size: 1.6em; font-weight: 900; line-height: 1.05; }
+.pgResult .title.good { color: var(--gold); }
+.pgResult .title.ok { color: #c6f0a8; }
+.pgResult .title.miss { color: #ffc2a8; }
+.pgResult .why { font-size: 0.98em; font-weight: 600; opacity: 0.95; }
+.pgResult .why div { display: flex; gap: 6px; align-items: center; }
+.pgResult .why .ico { width: 1.1em; height: 1.1em; flex: none; color: #9fdcff; }
+.pgResult .stars { font-size: 1.4em; letter-spacing: 2px; }
+.pgResult .btns { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+@media (max-height: 420px) {
+  .pgResult .btns .pgBtn { padding: 6px 11px; min-height: 40px; }
+  .pgResultMap svg { width: 92px; height: 92px; }
+  .pgResult .title { font-size: 1.35em; }
+  .pgResult { padding: 8px 10px; }
+}
+
+/* looks panel */
+.pgLooks { position: absolute; top: calc(max(8px, env(safe-area-inset-top)) + 62px); right: max(8px, env(safe-area-inset-right)); display: none; flex-direction: column; gap: 8px; padding: 10px 12px; background: rgba(36,24,40,0.86); border: 1px solid var(--card-edge); border-radius: 14px; backdrop-filter: blur(8px); max-height: calc(100% - 90px); overflow-y: auto; width: 290px; font-size: 0.86em; }
+.pgLooks.open { display: flex; }
+.pgLooks .grp { display: flex; flex-direction: column; gap: 4px; }
+.pgLooks .lbl { opacity: 0.8; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; }
+.pgLooks .opts { display: flex; gap: 4px; flex-wrap: wrap; }
+.pgLooks .opts button { padding: 6px 10px; min-height: 34px; border-radius: 9px; border: 1px solid rgba(255,240,220,0.3); background: rgba(255,255,255,0.08); }
+#game .pgLooks .opts button.sel { background: #fff3dc; color: #3a2430; font-weight: 800; }
+.pgLooks .tmp { font-size: 0.8em; opacity: 0.65; }
+.pgLooks input[type=range] { width: 100%; }
+.pgLooks .slider { display: flex; flex-direction: column; }
+
+/* loading and start */
+.pgLoading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #5a3a52; }
+.pgLoading .t { font-size: 2em; font-weight: 900; letter-spacing: 0.02em; }
+.pgLoading .bar { width: 220px; height: 8px; border-radius: 4px; background: rgba(255,255,255,0.15); overflow: hidden; }
+.pgLoading .bar i { display: block; height: 100%; width: 0; background: #fff3dc; transition: width 0.2s; }
+.pgTapStart { position: absolute; left: 50%; top: 58%; transform: translateX(-50%); display: none; }

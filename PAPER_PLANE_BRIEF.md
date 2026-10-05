@@ -20,9 +20,9 @@ them. Everything else in the repo is fair game, especially Sky Path itself
 
 ## The game in one paragraph
 
-After a team reaches the temple island at the end of Sky Path, players stand at the
-island's edge and throw paper planes at smaller islands nearby, at varying distances and
-heights. There are three planes, and the choice of plane matters. Wind, shown in the
+After a team reaches the Temple Island at the end of Sky Path, players stand **on the
+edge of the Temple Island itself** and throw paper planes out from it at smaller islands
+nearby, at varying distances and heights. There are three planes, and the choice of plane matters. Wind, shown in the
 world, pushes planes noticeably as they fly. Each throw is two decisions: an upward angle
 first, then direction and power at the moment of launch. The player should always be
 able to see what their plane did and why.
@@ -69,8 +69,8 @@ able to see what their plane did and why.
    camera should frame plane, path and target together where it can. A short replay or
    slow-motion moment at the end is welcome if it helps understanding.
 7. **Planes and target islands that look good.** These are the stars of the scene, not
-   placeholders. Paper planes should read as folded paper: crisp creases, a little
-   shading painted on, slight variation. Target islands should be attractive, clearly
+   placeholders. Paper planes should read as folded paper: crisp creases, each
+   facet catching the light differently, slight variation. Target islands should be attractive, clearly
    readable as targets, and fit Sky Path's world. Aim for polish over quantity.
 
 ## Input (Luke's decisions from earlier rounds; keep these)
@@ -107,13 +107,21 @@ Keep these temporary and clearly marked.
 
 - **Three.js**, already in `app/` (Vite + React shell). See `CLAUDE.md` for where things
   live and the conventions.
-- **Unlit** rendering (`MeshBasicMaterial`) with shading painted into colours or
-  textures. That's the whole game's style. A lit material will look wrong next to it.
-- **Setting:** the temple island at the end of Sky Path, at dusk, high above the cloud
-  sheet. Sky Path builds its sky, cloud layers and island models in
-  `app/src/skypath/skyPath.js` (search for the backdrop, the temple island and
-  `island-basic-v2.glb`). Match that world. Prefer importing or extracting shared pieces
-  over copying them, and say what you extracted.
+- **Lighting is allowed here.** `CLAUDE.md` says the rest of the game is unlit
+  (`MeshBasicMaterial` with painted shading); **that rule does not apply to this page**
+  (Luke, 2026-10-04: lighting is good, as long as it doesn't affect performance). Use
+  real lights where they make the planes and islands look better, but keep it cheap on
+  phones: a small number of lights, simple materials (e.g. Lambert or a light-touch
+  Standard), shadows only if measured to be affordable (baked or a single fake blob
+  shadow is fine). Measure the frame rate with and without, and say what it costs. Make
+  sure lit pieces still sit comfortably next to Sky Path's unlit sky and Temple Island.
+- **Setting: the edge of Sky Path's Temple Island**, at dusk, high above the cloud sheet.
+  The throwing spot is on the Temple Island's rim, with the island (and its temple)
+  visible underfoot or behind the player, and the target islands out in the open sky
+  around it. Use the real Temple Island and Sky Path's real sky and clouds, not
+  look-alikes: they're built in `app/src/skypath/skyPath.js` (search for the backdrop,
+  the temple island and `island-basic-v2.glb`). Prefer importing or extracting shared
+  pieces over copying them, and say what you extracted.
 - **Standalone page is authorised** for this minigame (an exception to `CLAUDE.md`'s
   "build it in the game" rule, which Luke made for this game). Make it a new page with
   its own folder, for example `app/plane-game.html` and `app/src/planeGame/`. Don't

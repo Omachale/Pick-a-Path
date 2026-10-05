@@ -1486,3 +1486,151 @@ too, so they pace a little slower after a fall). `fallPosition()` is shared by t
 and the camera. Local player only; bots' falls don't move the camera. Checked with a
 forced fall: camera swings out beside the bridge and tracks the figure down toward the
 lava.
+
+### Paper Planes: fresh build from PAPER_PLANE_BRIEF.md (2026-10-05)
+
+Standalone page `app/plane-game.html`, code in `app/src/planeGame/`, proof in
+`app/scripts/planeGameSim.mjs`. None of the earlier plane/throw code was read or reused.
+
+- **Setting:** the thrower stands on the front rim of Sky Path's Temple Island (same model,
+  same scale and temple placement as skyPath.js), facing out over open sky. Opening shot
+  starts wide on the temple at sunset and glides in to the thrower. The sky is a full ring
+  made from the dusk third of `skybig.jpg` (mirrored on the far side, second sun painted
+  out). Sky Path's cloud sheets blow with this game's wind. The sky, cloud-sheet and deck
+  code was COPIED from skyPath.js (it lives inside mountSkyPath's closure); extracting it
+  into a shared module is a follow-up.
+- **Flight model (flight.js):** throw, then glide, all from explicit per-plane numbers.
+  The throw climbs and loses speed. Too slow at the top means a stall: the nose drops and
+  it loses distance, so a throw can be too steep. After the top it settles to its own
+  cruise speed and sink rate. Wind catches the plane over time: drift relaxes toward the
+  wind speed x `windCatch` at rate `windGrip`. Fixed step, deterministic. Flights are
+  computed whole at launch and played back. Dart: fast, steep glide, hardly bent by wind.
+  Classic: middle, forgiving. Glider: slow and floaty, long flights, carried a long way.
+- **Course (course.js):** 8 islands, 3 throws each, best stars count (3 bullseye, 2 inner
+  ring, 1 on the island). The sim (angle +-5 deg, power +-0.07, turn +-3 deg of human
+  wobble) says all 8 are achievable. Best plane: Classic on 3 (first, breeze, crosswind),
+  Glider on 3 (far away, ride the wind, the last one), Dart on 2 (up high, into the wind).
+  "Ride the wind" sits beyond the 45 deg aiming limit: only wind drift reaches it.
+- **Input:** sweeping angle needle, tap to lock (no numbers; the last 3 angles are ghost
+  ticks). Then press, drag and let go: a plain arrow, direction = left/right (camera
+  relative, held at the 45 deg limit), length = power. Drag back to the start point to
+  cancel. A "redo angle" button. Hold during a flight to fast-forward.
+- **Results (results.js):** words plus a little top-down map. Title (Bullseye!, Too short!,
+  Wrong island!, It hit the side!...), up to two direction lines, and the cause when it's
+  clear ("The wind blew it right", "Too steep: it stalled and dropped"). No numbers, no
+  suggested values. After two scoreless throws: "Try a different plane?". The card sits on
+  the side away from where the throw went; the camera pulls back behind the thrower to
+  show the whole path.
+- **Lighting:** planes, target islands, flags and lanterns are lit (Lambert, one sun plus
+  a hemisphere fill). Sky, clouds, Temple Island and thrower card stay unlit, as in Sky
+  Path. Measured at 844x390 on the Intel UHD laptop: about 8-10 ms per frame, the same lit
+  or unlit (within noise). About 130 draw calls, about 35k triangles.
+- **Looks panel (variations):** flight camera (Follow & frame / Chase / Side on), wind in
+  the air (Streaks / Petals / Flags only), paper (Coloured / Notebook / White), target
+  islands (Sky Path cobbles / Stone target), paths shown (all throws here / last only).
+  Two temporary sliders: wind strength and flight speed (the sim proves the course at 1.0).
+  Choices are remembered per device (localStorage).
+- **Readability fixes found in testing:** white paper vanished against the white cloud
+  floor, so coloured paper is the default and a ring in the plane's colour marks it when
+  it's far away. A light beam marks the current target; other flags are pale. Misses end
+  once the plane has sunk below the target, instead of gliding on to the clouds.
+- **Open:** real-phone test (touch feel, sweep speed, frame rate); whether 3 throws per
+  island is right; whether the result camera reads well on every miss; sounds; wiring into
+  the game after the Temple. Dev hooks (`window.__pg`, DEV only) include
+  `advance(seconds)` for stepping the game in a hidden browser pane.
+- **Dial behaviour + QR button (2026-10-05):** dials turn by which half is clicked (right =
+  clockwise/next, left = back); 0.67 s per turn; clicks stack (each click moves the target,
+  tween restarts from the current angle, ease-out if already moving); past either end the
+  dial and its wheel nudge a quarter step and back (0.3 s). Number dials moved left to the
+  40 px margin. New `buttons` config: QR push button right of them, a 110 px hand-cut square
+  block standing 50 px (dial height) in a cut hole, sinking 2 px below the board while held
+  (`__lobbyButton(id, down)` debug). Press does nothing yet; its action is the next step.
+- **QR card (2026-10-05):** `app/src/lobby/qrCard.js` `buildQrCard(url)` stamps a QR (level Q)
+  onto `textures/qr-backing.png` (Luke's hand-held card) at runtime: multiplied dark ink,
+  per-module jitter, dry specks, light/dark rims for a pressed-in look, placed clear of the
+  thumb. Prototype URL: https://omachale.github.io/Pick-a-Path/ (the Pages root = the lobby).
+  Preview: `qr-card-preview.png`. NOT machine-verified (no decoder available here) — needs a
+  phone scan. Not yet wired to the QR button. QR button nudged right by half its width.
+  Note: `vite.config.js` has a dev-only POST `/__shot` endpoint that writes a data-URL to
+  `app/shots/` — the reliable way to capture renders when the preview pane is hidden.
+- **QR card in the lobby (2026-10-05):** code margin halved (left limited by the thumb:
+  66/48/30/35 px). QR button toggles the card: slides in from the left over the mode window
+  and its dial (1.3 s, ease-out with a slight overshoot, tilt unwinding), out in 0.7 s; a
+  reversal mid-way takes the time for the distance left. It's a 3D plane 90 px off the board,
+  so it casts a real shadow over the dials, and it swallows clicks over itself. Placement in
+  `LOBBY_BOARD_DEFAULTS.qrCard` (card centre 342,265; card 620 px across; image proportions
+  untouched). Four styles in `qrCard.js` QR_STYLES: stamp, marker, crayon, scorched; a
+  TEMPORARY "QR style: ... - next" button top-right of the page cycles them (delete it and
+  `setQrStyle`/`qrStyles` from the board API once Luke picks). Debug: `__lobbyQr(p)`,
+  `__lobbyCapture()` (POST its result to `/__shot`). Only "stamp" has been phone-tested.
+- **QR crayon + finder options (2026-10-05):** Luke picked CRAYON (other styles deleted from
+  qrCard.js), "though I hoped for more creativity", and asked for six finder-pattern
+  replacements. `QR_FINDERS`: square (standard), target, wobbly, cog, eye, heart, spiral;
+  the temporary top-right button now cycles these. Each keeps the ring / gap / centre
+  structure scanners look for, but finders aren't covered by error correction, so every
+  option needs a phone test. Contact sheet: `finder-options.png`.
+- **Cog finder baked in (2026-10-05):** other finder shapes and the picker deleted.
+- **Player lobby, first pass (2026-10-05):** right half of the board. Rules in
+  `app/src/lobby/lobbyRoster.js` (pure; read its header): boxes hold players+2, team over
+  `players` = overfull (red); arrivals join the smallest team with room, else Unassigned
+  (cap 8, bottom of the stack); dial changes keep placements, moving displaced players and
+  the newest extras to teams with room (an extra with nowhere to go stays, red); randomise
+  deals everyone incl. Unassigned; drags into a full box are refused (tag snaps back).
+  Drawing in `lobbyBoard.js` (search "the player lobby"): stacked boxes shrinking with team
+  count, pencil-line outlines, titles spelled "Team One" (letter art has no digits), name
+  tags from the game's `buildNameTagCanvas` in a per-box grid sized for the dials' maximum.
+  Dial changes apply 1.5 s after the last dial stops (clicking again cancels). New "Shuffle"
+  push button; both buttons now labelled ("Join", "Shuffle"). Dev "+ player (dev)" browser
+  button top-right adds a random name. Drag a tag: it lifts with a shadow.
+  Found: `nameTag.js` references an undefined `GLOW_COLOR_DEFAULT` (the game always passes
+  `glowColor`, so it never trips); the lobby passes '#ffe9b8' rather than editing game code.
+  Debug: `__lobbyRoster()`.
+- **Lobby tweaks (2026-10-05):** Join/Shuffle buttons 25% smaller (82.5 px), centred level
+  with the number dials (y 737) just right of them; team boxes now start at x 678 (40 px
+  clear of the mode window), Unassigned included, so no toggle was needed. Tags: bordered in
+  a random colour from the game's palette (copied from skyPath.js PALETTE), trimmed 22 px of
+  card margin all round, sized from the widest name actually present (not a worst-case 10
+  letters), and given more of the box height. In the 4x6 case the box HEIGHT is the limit
+  (~49 px tags); shrinking Unassigned would be the next lever.
+- **Tag size + glide (2026-10-05):** tags drawn 15% over the grid's fit, then held to 97% of
+  the cell width / 95% height so they never touch. With real 10-letter names (Maximilian,
+  Bartholome) width binds and the full 15% (or even 10%) would overlap, so those get ~5%.
+  Names glide (0.35 s ease-out) on drop, gap-closing, dial changes and Shuffle; instant on
+  resize/first appearance. Debug: `__lobbyAdd(name)`, `__lobbySettings({teams, players})`
+  (applies at once, no glide, for when the pane can't animate). Glide not yet watched live:
+  the preview pane was hidden (no animation frames) while testing.
+- **Tag sizing, option 3 (2026-10-05):** tags sized for a typical 6-letter name
+  (TYPICAL_TAG_RATIO 3.4, measured), not the widest name present; a name too long for its
+  cell shrinks on its own. Sizes no longer change as names arrive or move. Luke chose this
+  over dynamic per-row packing (which would make the whole lobby resize on arrivals/drags).
+- **Player colours (2026-10-05):** lobby name tags now glow in the player's colour (as the
+  game does: skyPath.js attachNameTag passes colorHex as glowColor) and are bordered in it.
+  WHEN WIRING REAL ARRIVALS: pass each player's own colorHex to `addPlayer(name, colorHex)`;
+  only the dev button uses a random colour. Caveat: players currently pick their colour in
+  the game's character select (round start), not on joining, so the lobby needs the
+  name/avatar/colour pick moved to the join flow (as Luke's original brief describes).
+- **Dial label readability:** six treatments compared in `label-options.png`; Luke picked D,
+  a cream halo (`LABEL.halo` in lobbyBoard.js), now on every board label (dials, buttons,
+  team titles).
+- **Join flow, decided 2026-10-05 (build when the lobby is wired to real players):** players
+  pick avatar + colour on a loading screen right after joining, not at round start. A
+  player's name appears in the lobby as soon as they connect, in the default colour
+  (the game's fallback 0xffe9b8), and changes to their colour once they pick it. Needs a
+  small `setPlayerColour(id, hex)` on the board API that rebuilds that one tag's texture
+  (same size and place, so nothing else moves).
+- **Team boxes as pressed trays (2026-10-05):** real geometry: each box's opening is cut into
+  the board sheet, with a sloping card wall down to a slightly darker floor 5 px down
+  (`roster.tray`: depth 5, slope 3, corner radius 8; board is 6 thick). The sheet geometry is
+  re-made only when the box layout changes (`setTrays`, keyed on the box rects), not on
+  drags or arrivals. Pencil outlines removed; titles, red tint and tags sit on the floor.
+- **Raised tags (2026-10-05):** name tags rest 15 px above the tray floor (`roster.tagRaise`,
+  Luke asked 10-20) and cast shadows onto it; dragging lifts a further 25 (`tagLift`).
+- **Tags raised to 25 px (2026-10-05)**, since 15 was hard to see. TEMPORARY "Tag borders: on/off" browser
+  button (LobbyBoard.jsx -> board `setTagBorders`) to judge whether the coloured borders
+  hide the raised effect; delete it (and keep or drop the borders) once Luke decides.
+- **Tag shadows fixed (2026-10-05):** raised tags cast NO shadow until now. three.js renders a
+  single-sided plane's shadow from its back face (shadowSide null -> opposite of `side`),
+  which faces away from the light. Tag material now has `shadowSide: DoubleSide`. Worth
+  remembering for any other flat plane that should cast a shadow. Kept at 25 px.
+- **Tag borders dropped (2026-10-05):** Luke chose borders off; toggle and border code removed.
+  Player colour now shows only in the letters' glow (as in the game).
