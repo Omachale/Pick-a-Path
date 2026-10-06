@@ -32,6 +32,10 @@ export default function SkyPath({
   canAct = true,
   crowd = 0,
   displayName = null,
+  // { characterKey, colorHex } chosen on the join screen; see skyPath.js's
+  // presetLook. Read once at mount (kept in a ref, out of the effect's
+  // dependencies) so it can never cause a remount mid-round.
+  presetLook = null,
   initialGuideIsland = null,
   roster = [],
   myToken = null,
@@ -46,6 +50,8 @@ export default function SkyPath({
   gameRef,
 }) {
   const containerRef = useRef(null);
+  const presetLookRef = useRef(presetLook);
+  presetLookRef.current = presetLook;
   const callbacks = useRef({ onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets, getDisplayName });
   callbacks.current = { onForkChoice, onRoundEnd, onPlayerState, onGameEvent, getAbductionTargets, getDisplayName };
 
@@ -57,6 +63,7 @@ export default function SkyPath({
       canAct,
       crowd,
       displayName,
+      presetLook: presetLookRef.current,
       initialGuideIsland,
       roster,
       myToken,

@@ -109,3 +109,12 @@ export function movePlayer(r, settings, id, to) {
   target.push(id);
   return true;
 }
+
+/** Takes a player out of the lobby entirely (gone for good: see the board's grace period). */
+export function removePlayer(r, id) {
+  for (const box of [...r.teams, r.unassigned]) {
+    const k = box.indexOf(id);
+    if (k >= 0) box.splice(k, 1);
+  }
+  r.names.delete(id);
+}

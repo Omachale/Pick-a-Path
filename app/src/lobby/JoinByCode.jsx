@@ -13,6 +13,7 @@
  */
 import { useEffect, useState } from 'react';
 import { supabase } from '../supabase.js';
+import { TEACHER_SIGN_IN } from './sessionConfig.js';
 
 export default function JoinByCode({ onCodeResolved, joined }) {
   const [code, setCode] = useState(() => new URLSearchParams(location.search).get('join') ?? '');
@@ -25,6 +26,18 @@ export default function JoinByCode({ onCodeResolved, joined }) {
     if (!trimmed) return;
     setResolving(true);
     setError(null);
+    // With teacher sign-in off (sessionConfig.js), games aren't recorded in
+    // the `sessions` table at all, so there's nothing to look a code up in:
+    // any well-formed code is accepted as it is. The lookup below is kept
+    // for when sign-in comes back.
+    if (!TEACHER_SIGN_IN) {
+      if (/^[A-Z]{5}$/.test(trimmed)) {
+        setResolvedCode(trimmed);
+        onCodeResolved(trimmed);
+      } else setError('That code should be 5 letters.');
+      setResolving(false);
+      return;
+    }
     try {
       const { data: session, error: sessionError } = await supabase
         .from('sessions')

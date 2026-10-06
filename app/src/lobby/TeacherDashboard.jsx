@@ -41,40 +41,11 @@ import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { supabase } from '../supabase.js';
 import GroupEditor from './GroupEditor.jsx';
-import { loadWordPairs, assignForkWords } from '../skypath/wordPairs.js';
+import { randomJoinCode, createRoundState, startRounds } from './roundStart.js';
 
-const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I/O — easy to misread on a projector
 const SESSION_CODE_STORAGE_KEY = 'skypath.teacherSessionCode';
-// Must match Sky Path's own N_FORKS (see app/src/skypath/skyPath.js) and
-// useLobby.js's own copy of the same constant — the two modules don't share
-// a build-time config yet, same pre-existing gap, not new to this change.
-const SKY_PATH_N_FORKS = 6;
-
-function randomJoinCode() {
-  let code = '';
-  for (let i = 0; i < 5; i++) code += CODE_LETTERS[Math.floor(Math.random() * CODE_LETTERS.length)];
-  return code;
-}
-
-/**
- * `crypto.randomUUID()` — same restriction that broke "Copy link" and the
- * QR/localhost warning before it — only exists in a secure context (https,
- * or http://localhost specifically), and this dashboard is deliberately
- * used over plain http:// on the teacher's own LAN address. Luke, 2026-09-13:
- * pressing "Start game" did nothing at all, for every player — found via the
- * browser console: `Uncaught (in promise) TypeError: crypto.randomUUID is
- * not a function` at the `roundId = crypto.randomUUID()` line, an unhandled
- * rejection in an async click handler with no visible error, so the whole
- * function silently stopped right there before a single broadcast went out.
- * identity/token.js's generateToken() already has this exact fallback for
- * exactly this reason — mirrored here rather than imported, since reusing a
- * "device identity token" generator to mint a *round* id would read
- * confusingly the moment anyone inspects a payload or a log.
- */
-function randomRoundId() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return `round_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-}
+// randomJoinCode / randomRoundId / the round-start logic now live in
+// roundStart.js, shared with the lobby board (2026-10-05).
 
 function AuthForm({ onError, error }) {
   const [email, setEmail] = useState('');
@@ -221,15 +192,12 @@ function SessionPanel({ joinCode, onEndSession }) {
   // derived from replayed broadcasts, the way the old per-student-initiated
   // design needed) — there is exactly one initiator now (this panel), so
   // there's exactly one place that needs to remember whose turn is next.
-  const guideHistoryRef = useRef(new Map()); // groupId -> Set<token>
-  // Loaded once and reused for every group/round in this session — the same
-  // word-pairs.json file every Sky Path instance already reads, fetched
-  // here too because this panel is now the one place that decides a
-  // round's actual words (see startGame() below).
-  const wordPairsRef = useRef(null);
+  // (Guide history and the loaded word pairs, kept between rounds; see
+  // roundStart.js.)
+  const roundStateRef = useRef(createRoundState());
   // Luke, 2026-09-13: "pressing Start game did nothing" — an unhandled
   // rejection (crypto.randomUUID missing in this insecure-context page, see
-  // randomRoundId() above) killed this whole async function with zero
+  // roundStart.js's randomRoundId()) killed this whole async function with zero
   // on-screen sign anything had gone wrong. That particular cause is fixed,
   // but the silence itself was the real problem — any future failure here
   // (a bad word-pairs.json fetch, a dropped connection) deserves the same
@@ -268,23 +236,9 @@ function SessionPanel({ joinCode, onEndSession }) {
 
   /**
    * Starts (or restarts) the game for every group that has at least one
-   * player in it — this is also what "next round" is now: Luke, 2026-09-11,
-   * "the teacher will then be the one to start the game," for every round,
-   * not just the first. A device reacts to a fresh `game-started` for its
-   * group regardless of what phase it was previously in (see useLobby.js),
-   * so one button covers both cases.
-   *
-   * Words are picked HERE, once per group, and broadcast alongside `forks` —
-   * Luke, after the first live multiplayer test: "the words the guide sees
-   * are different from the words the players in their teams [see]... [and
-   * players see] Heat on the left, Hit on the right, while [another player]
-   * sees Heat on the right, and Hit on the left." Every device used to call
-   * assignForkWords() itself, so each one drew its own random pair AND its
-   * own random left/right layout independently — nothing about the actual
-   * words was ever shared, only which SIDE was correct (`forks`). This is
-   * the fix: one draw per group, sent to everyone in it, same as `forks`
-   * already was. Different groups still get independently random words —
-   * only a single group's own members need to agree.
+   * player in it; also what "next round" is (Luke, 2026-09-11: the teacher
+   * starts every round). The round's shared facts are decided in
+   * roundStart.js, shared with the lobby board.
    */
   async function startGame() {
     setStartGameError(null);
@@ -293,51 +247,11 @@ function SessionPanel({ joinCode, onEndSession }) {
       for (const p of participants) {
         if (p.groupId === null || p.groupId === undefined) continue;
         if (!byGroup.has(p.groupId)) byGroup.set(p.groupId, []);
-        byGroup.get(p.groupId).push(p);
+        byGroup.get(p.groupId).push(p.token);
       }
       if (byGroup.size === 0) return;
-
-      if (!wordPairsRef.current) wordPairsRef.current = await loadWordPairs();
-      const wordPairs = wordPairsRef.current;
-
-      const letters = 'LR';
-      for (const [groupId, members] of byGroup) {
-        if (!guideHistoryRef.current.has(groupId)) guideHistoryRef.current.set(groupId, new Set());
-        const guided = guideHistoryRef.current.get(groupId);
-        let candidates = members.filter((p) => !guided.has(p.token));
-        if (candidates.length === 0) {
-          guided.clear();
-          candidates = members;
-        }
-        const guideToken = candidates[Math.floor(Math.random() * candidates.length)].token;
-        guided.add(guideToken);
-
-        // Fixed seating, 2026-09-13 — Luke: "each person will be assigned a
-        // position, and that won't change through the round." This one
-        // array, broadcast once, IS the assignment: every device in the
-        // group builds its seat-offset table from the SAME array by index
-        // (see skyPath.js's own `seatOffsets`), so nobody needs to agree on
-        // anything further over the wire. The guide isn't in it — it has no
-        // seat, and never reports a position at all (see "no physical
-        // presence" in TODO.md).
-        const roster = members.filter((p) => p.token !== guideToken).map((p) => p.token);
-
-        const forks = Array.from({ length: SKY_PATH_N_FORKS }, () => letters[Math.random() < 0.5 ? 0 : 1]).join('');
-        const words = assignForkWords(wordPairs, SKY_PATH_N_FORKS);
-        const roundId = randomRoundId();
-        // The island-2 pickup, 2026-09-15 — Luke: "a very simple icon on the
-        // second island, picked up by the first player to reach the island.
-        // 50% chance of being the jetpack, 50% the abduction trigger."
-        // Decided HERE, once per group, for the same reason `words` is: every
-        // device in the group has to show the same item, and this is the one
-        // place that already broadcasts the round's shared facts.
-        const pickup = Math.random() < 0.5 ? 'jetpack' : 'abduction';
-        channelRef.current?.send({
-          type: 'broadcast',
-          event: 'game-started',
-          payload: { groupId, forks, words, guideToken, roundId, roster, pickup },
-        });
-      }
+      const send = (event, payload) => channelRef.current?.send({ type: 'broadcast', event, payload });
+      await startRounds(send, byGroup, roundStateRef.current);
     } catch (err) {
       setStartGameError(err.message ?? String(err));
     }

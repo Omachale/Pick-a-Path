@@ -637,4 +637,34 @@ export const SKY_PATH_CSS = `
   box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
 }
 .skypath-surface #charStart:active { transform: translateY(2px); }
+/* Landscape (2026-10-05, Luke: choosing in portrait then turning the phone
+   was "an ugly solution"): two columns instead of one tall stack, the
+   character on the left, colour/name/Start on the right, all sized from the
+   screen's height so a phone held sideways fits it without scrolling. Real
+   players now choose on the lobby's join screen (lobby/PlayerJoin.jsx), which
+   uses the same layout; this screen is still used in solo play. */
+@media (orientation: landscape) {
+  .skypath-surface #charSelect.show {
+    display: grid;
+    grid-template-columns: auto auto;
+    grid-template-rows: auto auto auto auto auto;
+    column-gap: min(6vw, 56px);
+    row-gap: min(2.4vh, 14px);
+    align-content: center;
+    justify-content: center;
+    justify-items: center;
+    padding: 2vh 3vw;
+  }
+  .skypath-surface #charSelect > h2:nth-of-type(1) { grid-column: 1; grid-row: 1; }
+  .skypath-surface #charList { grid-column: 1; grid-row: 2 / 5; align-self: center; }
+  .skypath-surface #charNavRow { grid-column: 1; grid-row: 5; margin-top: 0 !important; }
+  .skypath-surface #charSelect > h2:nth-of-type(2) { grid-column: 2; grid-row: 1; }
+  .skypath-surface #paletteList { grid-column: 2; grid-row: 2; max-width: calc(4 * min(9vh, 44px) + 3 * 12px); }
+  .skypath-surface #charSelect > h2:nth-of-type(3) { grid-column: 2; grid-row: 3; align-self: end; }
+  .skypath-surface #nameInput { grid-column: 2; grid-row: 4; height: min(11vh, 44px); }
+  .skypath-surface #charStart { grid-column: 2; grid-row: 5; margin-top: 0; min-height: min(12vh, 52px); }
+  .skypath-surface .charOption img { width: auto; height: min(46vh, 240px); }
+  .skypath-surface .swatch { width: min(9vh, 44px); height: min(9vh, 44px); }
+  .skypath-surface #charSelect h2 { font-size: min(4.6vh, 17px); }
+}
 `;

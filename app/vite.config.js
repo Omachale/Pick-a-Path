@@ -1,4 +1,5 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import react from '@vitejs/plugin-react';
 
 /**
@@ -39,8 +40,33 @@ function shotPlugin() {
  * a GitHub Pages project subpath without a rebuild (handoff: static hosting
  * on GitHub Pages, no server logic).
  */
+/**
+ * This computer's address on the local network (e.g. 192.168.0.51), for the
+ * lobby's QR code during development: a page opened as `localhost` can't find
+ * out its own network address, and "localhost" means nothing to a phone. Luke,
+ * 2026-10-05, testing on his phone: the QR "is sending me to the Github
+ * address", not the local build. Prefers a private 192.168/10/172.16-31
+ * address, skipping virtual adapters (WSL, Hyper-V, VirtualBox), which are
+ * unreachable from a phone. Null if there's none.
+ */
+function lanAddress() {
+  const candidates = [];
+  for (const [name, addrs] of Object.entries(networkInterfaces())) {
+    if (/vEthernet|VirtualBox|VMware|WSL|Hyper-V|docker|Loopback/i.test(name)) continue;
+    for (const a of addrs ?? []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      const rank = a.address.startsWith('192.168.') ? 0 : a.address.startsWith('10.') ? 1 : /^172\.(1[6-9]|2\d|3[01])\./.test(a.address) ? 2 : 3;
+      candidates.push({ rank, address: a.address });
+    }
+  }
+  candidates.sort((x, y) => x.rank - y.rank);
+  return candidates[0]?.address ?? null;
+}
+
 export default {
   base: './',
+  // Only read in development (see sessionConfig.js's joinUrl).
+  define: { __DEV_LAN_HOST__: JSON.stringify(lanAddress()) },
   plugins: [react(), shotPlugin()],
   // 5181 while the old standalone prototype still runs on 5180 — the two need
   // to be up side by side for Stage A's "plays identically" comparison.

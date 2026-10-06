@@ -30,6 +30,7 @@
  */
 
 import * as THREE from 'three';
+import { CHARACTERS, PALETTE as CHARACTER_PALETTE } from './characters.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
 import { attachCrowdHarness } from './crowdHarness.js';
@@ -94,6 +95,12 @@ export function mountSkyPath(container, options = {}) {
     // undefined for solo/dev play, where that input is still the only
     // source of a name.
     displayName = null,
+    // The character and colour this player already chose on the lobby's join
+    // screen ({ characterKey, colorHex }), 2026-10-05: choosing moved from
+    // round start to joining (Luke: players choose "as soon as they join").
+    // Given this, the character-select screen is skipped, as it already is
+    // for Watch mode. Left null for solo/dev play, which still uses the screen.
+    presetLook = null,
     // Fired whenever this device's OWN resting position (which fork it's
     // standing at, having arrived and stopped) or look changes — the host
     // (GameRoom.jsx) relays this over the room channel so teammates' own
@@ -736,40 +743,16 @@ export function mountSkyPath(container, options = {}) {
   // Each character loads a single texture (the front-facing art).
   // New characters just need an entry here — the selection screen and rig are
   // both built from this list, not hardcoded to any one character.
-  const ROSTER = [
-    { key: 'woman2', tex: 'figure-woman2', ext: 'webp' },
-    { key: 'indy', tex: 'figure-indy', ext: 'png' },
-    { key: 'woman1', tex: 'figure-woman1', ext: 'webp' },
-    { key: 'alien', tex: 'figure-alien', ext: 'webp' },
-    { key: 'bat', tex: 'figure-bat', ext: 'webp' },
-    { key: 'dolphin', tex: 'figure-dolphin', ext: 'webp' },
-    { key: 'ghost', tex: 'figure-ghost', ext: 'webp' },
-    { key: 'man1', tex: 'figure-man1', ext: 'webp' },
-    { key: 'man2', tex: 'figure-man2', ext: 'webp' },
-    { key: 'meerkat', tex: 'figure-meerkat', ext: 'webp' },
-    { key: 'monkey', tex: 'figure-monkey', ext: 'webp' },
-    { key: 'robot', tex: 'figure-robot', ext: 'webp' },
-    { key: 'wizard', tex: 'figure-wizard', ext: 'webp' },
-  ];
+  // The character list now lives in characters.js, shared with the join
+  // screen (lobby/PlayerJoin.jsx), where players choose since 2026-10-05.
+  const ROSTER = CHARACTERS;
   const CHAR_TEX = {};
   for (const c of ROSTER) {
     CHAR_TEX[c.key] = { front: tex(c.tex, { ext: c.ext }) };
   }
 
-  // A small fixed palette rather than a free colour picker — every option here
-  // has been checked against the backing art, which a free picker couldn't
-  // guarantee (very low saturation, for instance, would wash out the fold
-  // shading the split preserves).
-  const PALETTE = [
-    { key: 'blue', label: 'Blue', hex: 0x5a9fe0 },
-    { key: 'red', label: 'Red', hex: 0xd9564a },
-    { key: 'green', label: 'Green', hex: 0x5cb86c },
-    { key: 'yellow', label: 'Yellow', hex: 0xe0b93c },
-    { key: 'purple', label: 'Purple', hex: 0x9a6fd6 },
-    { key: 'orange', label: 'Orange', hex: 0xe08a3c },
-    { key: 'teal', label: 'Teal', hex: 0x3fb8b0 },
-    { key: 'pink', label: 'Pink', hex: 0xe07fb0 },
-  ];
+  // The palette lives in characters.js too (see ROSTER above).
+  const PALETTE = CHARACTER_PALETTE;
 
   // ---------------------------------------------------------------- panel helpers
 
@@ -8306,7 +8289,14 @@ export function mountSkyPath(container, options = {}) {
     // of what manager.onLoad means.
     startJourney();
     $('loader').classList.add('done');
-    if (role === 'watching') {
+    if (presetLook && role !== 'watching') {
+      // Chosen on the join screen already (see presetLook above): same end
+      // state as pressing Start, without the screen. The guide included, so
+      // its choice is still stored for its turns as a player (see below).
+      if (ROSTER.some((c) => c.key === presetLook.characterKey)) pickedCharacter = presetLook.characterKey;
+      if (PALETTE.some((p) => p.hex === presetLook.colorHex)) pickedColorHex = presetLook.colorHex;
+      finishCharacterSelect();
+    } else if (role === 'watching') {
       // A fallen player's Watch mode already picked a character/colour
       // earlier in this same round, back when it was still playing — asking
       // again would be a confusing, meaningless extra step, so skip straight

@@ -144,6 +144,12 @@ export default function Lobby({ lobby, onCodeResolved, onOpenTeacherView }) {
         </p>
       )}
 
+      {lobby.full && (
+        <p style={{ color: '#a00', border: '1px solid #a00', padding: '0.5rem 0.75rem', borderRadius: 4, fontWeight: 'bold' }}>
+          Sorry, this game is full (24 players). Ask your teacher what to do.
+        </p>
+      )}
+
       <JoinByCode joined={lobby.joined} onCodeResolved={onCodeResolved} />
 
       <p>

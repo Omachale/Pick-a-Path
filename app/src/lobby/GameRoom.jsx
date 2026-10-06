@@ -42,6 +42,7 @@ export default function GameRoom({
   round,
   failed = false,
   displayName,
+  look = null, // { characterKey, colorHex } from the join screen; see SkyPath's presetLook
   myToken,
   sendForkChoice,
   onForkChoiceReceived,
@@ -89,6 +90,7 @@ export default function GameRoom({
         role={role}
         canAct={role === 'player'}
         displayName={displayName}
+        presetLook={look}
         roster={roster}
         myToken={myToken}
         pickup={pickup}

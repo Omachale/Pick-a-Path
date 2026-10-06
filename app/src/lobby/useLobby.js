@@ -217,8 +217,23 @@ export function useLobby(sessionCode) {
     setRound(nextRound);
   }, []);
 
+  // The character and colour chosen on the join screen (PlayerJoin.jsx),
+  // 2026-10-05. Sent in this device's presence, so the teacher's lobby board
+  // shows the name in the player's own colour, and handed to the game so it
+  // skips its own character select. Null when joining another way (the dev
+  // lobby), in which case the game still asks.
+  const [look, setLook] = useState(null);
+  const lookRef = useRef(null);
   const trackPayload = useCallback(
-    (p) => ({ token, displayName: p.displayName, score: p.score, equipment: p.equipment, groupId: p.groupId }),
+    (p) => ({
+      token,
+      displayName: p.displayName,
+      score: p.score,
+      equipment: p.equipment,
+      groupId: p.groupId,
+      characterKey: lookRef.current?.characterKey ?? null,
+      colorHex: lookRef.current?.colorHex ?? null,
+    }),
     [],
   );
 
@@ -227,9 +242,17 @@ export function useLobby(sessionCode) {
     setParticipant(p ?? null);
   }, []);
 
+  // Set when the teacher's game turns this device away (more than
+  // sessionConfig.js's PLAYER_CAP players); see the `lobby-full` handler.
+  const [full, setFull] = useState(false);
+
   const applyGroupAssignment = useCallback(
     (assignments) => {
       if (!(token in assignments)) return; // this device wasn't part of the assignment
+      // Known at once, not only after the presence round-trip below: the
+      // lobby board sends the teams and the round start close together, and
+      // the game-started handler reads this ref.
+      myGroupIdRef.current = assignments[token];
       const p = identityStore.setGroup(token, assignments[token]);
       setParticipant(p);
       channelRef.current?.track(trackPayload(p));
@@ -244,10 +267,12 @@ export function useLobby(sessionCode) {
   }, [participants]);
 
   const join = useCallback(
-    (name) => {
+    (name, chosenLook = null) => {
       const trimmed = name.trim();
       if (!trimmed) return;
       if (channelRef.current) return; // already joined this session
+      lookRef.current = chosenLook;
+      setLook(chosenLook);
 
       const p = identityStore.setDisplayName(token, trimmed);
       setParticipant(p);
@@ -286,6 +311,14 @@ export function useLobby(sessionCode) {
         }
         setParticipants(deduped);
       });
+      // The teacher's game is full (sessionConfig.js's PLAYER_CAP): leave it,
+      // and say so on screen.
+      ch.on('broadcast', { event: 'lobby-full' }, ({ payload }) => {
+        if (!(payload.tokens ?? []).includes(token)) return;
+        setFull(true);
+        setStatus('this game is full');
+        ch.untrack();
+      });
       ch.on('broadcast', { event: 'groups-updated' }, ({ payload }) => {
         applyGroupAssignment(payload.assignments);
       });
@@ -295,7 +328,13 @@ export function useLobby(sessionCode) {
         // that its players are all back on island 1 with no one out.
         guideByGroupRef.current.set(payload.groupId, payload.guideToken);
         for (const tok of payload.roster ?? []) islandsRef.current.set(tok, { forkIndex: 1, out: false });
-        if (payload.groupId !== myGroupIdRef.current) return; // addressed to a different group
+        // Addressed to this device if it's named in the round (its guide, or
+        // in its roster), or failing that if it's for this device's group.
+        // By name first: the lobby board sends teams and the round start
+        // close together, and the group alone could still be out of date.
+        const named = payload.guideToken === token || (payload.roster ?? []).includes(token);
+        if (!named && payload.groupId !== myGroupIdRef.current) return; // addressed to a different group
+        myGroupIdRef.current = payload.groupId;
         setRoundResultsByToken({}); // fresh round, fresh scoreboard — see this state's own comment above
         transition('playing', {
           roundId: payload.roundId,
@@ -566,6 +605,8 @@ export function useLobby(sessionCode) {
     status,
     participants,
     myGroupId,
+    full,
+    look,
     roundPhase,
     round,
     roundResultsByToken,

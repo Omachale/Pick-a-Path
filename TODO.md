@@ -1634,3 +1634,111 @@ Standalone page `app/plane-game.html`, code in `app/src/planeGame/`, proof in
   remembering for any other flat plane that should cast a shadow. Kept at 25 px.
 - **Tag borders dropped (2026-10-05):** Luke chose borders off; toggle and border code removed.
   Player colour now shows only in the letters' glow (as in the game).
+
+### Plan 2026-10-05: lobby board becomes the real landing (decided with Luke, NOT built)
+Flow review done; decisions:
+- **Teacher sign-in: OFF for now, reinstated later.** Don't delete AuthForm / the
+  `classes`+`sessions` insert in TeacherDashboard.jsx: disable and mark them. Plan: no DB
+  writes at all while off (a join code just names the realtime channel `lobby-CODE`), so no
+  SQL migration. Side effect: `?join=` can't be validated against the `sessions` table
+  while sign-in is off (a mistyped code lands in an empty room; the existing
+  "no real session" warning partly covers it). Reinstate = re-enable sign-in + insert +
+  lookup.
+- **Create game** button (separate from Join): mints the join code / game instance; the QR
+  URL becomes `https://omachale.github.io/Pick-a-Path/?join=CODE` (it's the bare root now,
+  which won't work for real). Show the code as text on the QR card too (camera fallback).
+  Natural home later for End game / New game.
+- **Routing:** board = default landing; `?join=CODE` -> player flow. Keep the dev bypasses
+  (`?solo=1`, `?cavern=1`, `?victory=1`, `?debugKeyboard=1`) and the multi-tab Dev player.
+- **Player join:** loading screen with name + avatar + colour (letters only, 10 max, no
+  duplicate names in a session; `fetchCurrentDisplayNames` exists). Name shows on the
+  board on connect in the default colour, recolours when they pick. The game must accept
+  the lobby's character choice and skip its own character select.
+- **Disconnects:** grey the name out for a grace period (~1 min) rather than removing it;
+  a returning token slots back into its place. If the GUIDE drops mid-round, restart that
+  team's round with a new guide after 20 s (needs rounds, below).
+- **Cap 24 players** (= dials' max 4x6, so everyone can always be placed); player 25 gets
+  "This game is full". **Start is blocked** while any box is red or anyone is Unassigned.
+- **Guide:** automatic (existing round-robin in TeacherDashboard's startGame).
+- **Volcano:** "Coming soon" note, blocked at Start (Cavern isn't wired to the lobby or
+  game-started at all).
+- **Second screen (QR):** Chromium (Chrome/Edge): Window Management API, one-time
+  permission, opens the QR full-screen on the second screen when Create game / Join is
+  pressed (needs that click). Other browsers: Join opens a QR window to drag across.
+  Mirrored display = one screen, so QR stays on the board. Open question to Luke: should
+  the second screen be a full "audience view" of the lobby (names arriving, teams), not
+  just the QR?
+- Also still to do: remove-player / fix-name control; undo for Shuffle; save the board's
+  arrangement in the browser so a teacher reload doesn't lose it; teacher's screen during a
+  round (locked board?); late joiners wait for the next round; phone orientation for the
+  loading screen.
+- **Rounds (Luke, not built):** each team plays once per guide, rotating until everyone has
+  guided. Scoring idea: accumulate across rounds, scale smaller teams. Note: a 5/4
+  multiplier undercompensates (team of N = N rounds x (N-1) runners: 20 vs 12 runs = 1.67x);
+  suggested a per-team AVERAGE per player-run instead (also absorbs drop-outs). Open:
+  guide's own points, what finished small teams do while big teams play on, what triggers
+  the next round and what the between-rounds screen shows.
+- **Scoring note (2026-10-05):** team score = average of players' scores (each summed over
+  their runs) with the GUIDE's own score included (Luke: the guide must see it count).
+  For team-size fairness use per-run averaging (Claude's suggestion, agreed). If ever done
+  as a multiplier instead it must be (Nmax-1)/(N-1), not Nmax/N. Early finishers: the
+  Paper Planes game (other chat) is meant for them, not ready; leave the gap.
+
+### Built 2026-10-05: lobby board connected to real players
+- **Default landing is now the board** (App.jsx): no `?join` -> board; `?join=CODE`,
+  `?devJoin=`, `?player=1` -> the existing player screens. Dev bypasses unchanged.
+- **Sign-in off** via `sessionConfig.js` TEACHER_SIGN_IN=false (sign-in + DB code kept, not
+  deleted). Create mints a code with no DB writes; JoinByCode accepts any 5-letter code
+  while sign-in is off. The old player lobby's "Teacher?" button goes to the board.
+- **New files:** `sessionConfig.js` (sign-in switch, PLAYER_CAP 24, PUBLIC_URL, joinUrl,
+  default colour), `roundStart.js` (round start moved out of TeacherDashboard, now shared),
+  `teacherSession.js` (teacher observes the `lobby-CODE` channel without tracking).
+- **Board:** Create + Start buttons (row above Join/Shuffle); "Code ABCDE" lettering by the
+  mode dial; "Coming soon" over the window for Volcano; QR carries
+  `https://omachale.github.io/Pick-a-Path/?join=CODE` (from localhost) or the page's own
+  address otherwise. Presence -> names appear; missing players grey out, removed after
+  60 s, un-greyed if back. Over 24: `lobby-full` broadcast, the phone shows "game is full".
+  Game code + dials + placements saved per game in localStorage; a teacher reload
+  reconnects and returning players land back in place.
+- **Start:** blocked (with a message) for no game, Volcano, no players, a red box, anyone
+  Unassigned, or a team under 2. Sends `groups-updated`, waits 1.2 s, then `game-started`
+  per team via roundStart.js. Pressing Start again = next round (stand-in for rounds).
+- **useLobby fix:** a phone accepts a round start naming it (guide or roster) even if its
+  group hasn't caught up; groups-updated sets the group ref immediately. The 1.2 s wait
+  covers phones on the old published build.
+- **Tested in the browser (3 tabs):** create -> two players joined via `?join=` -> both
+  appeared in Team One -> Start -> one got Guide view, the other Player view; teacher
+  reload reconnected; closing a tab greyed the name, then removed it after 60 s; Start
+  blocked for Volcano and a 1-player team. NOT tested: the 25th-player turn-away.
+- **Players' phones load the PUBLISHED Pages build**, so the player-side changes reach real
+  phones only after a push to main.
+- **Still to do from the plan:** loading screen (name/avatar/colour on join, game skips its
+  own character select), remove-player / fix-name, Shuffle undo, duplicate-name check,
+  second-screen QR, rounds, the 20 s guide-drop restart, teacher screen during a round.
+
+### Built 2026-10-05: player join screen (loading screen)
+- `?join=CODE` now opens `app/src/lobby/PlayerJoin.jsx`: the Sky Temple painting full-screen
+  with a landscape panel (character + arrows left; colour, name, Join right), then "You're
+  in! Waiting for the game to start..." with their avatar and name. Name input is letters
+  only, 10 max. Held upright: stacks and shows "Turn your phone sideways". DEV-only "New
+  device" button for multi-player testing in one browser (tabs share one identity token).
+- The choice (characterKey, colorHex) rides in presence (useLobby `join(name, look)`), so
+  the board shows the name in the player's colour from the start; and it reaches the game
+  as `presetLook` (GameRoom -> SkyPath -> mountSkyPath), which skips the in-game select.
+- Character list and palette moved to `app/src/skypath/characters.js` (shared by the game,
+  the join screen and the board).
+- The in-game select (still used in solo play) has a two-column landscape layout (CSS media
+  query in chrome.js); measured to fit 780x360.
+- `?player=1` / `?devJoin=` still use the old plain lobby (no look, so the game asks).
+- Tested: join at 780x360 -> name cleaned -> waiting screen -> board tag glows in the
+  chosen colour -> second player -> Start -> both games skipped char select, roles right.
+- **To test on a real phone before pushing:** open the board via this computer's LAN
+  address (http://192.168.x.x:5181), not localhost; then the QR carries the LAN address
+  and phones load this local build. From localhost the QR points at GitHub Pages, which
+  only has these screens after a push to main.
+- **QR link in development (2026-10-05):** from `localhost`, the QR now carries this
+  computer's LAN address (found by vite.config.js `lanAddress()`, passed as
+  `__DEV_LAN_HOST__`), e.g. http://192.168.0.51:5181/?join=CODE, so phones load the local
+  build (Luke found it went to GitHub Pages). Published builds use their own address.
+  Phones must be on the same Wi-Fi; Windows Firewall may need to allow Node on private
+  networks. Join now clears the board's message line (it sat under the QR card).

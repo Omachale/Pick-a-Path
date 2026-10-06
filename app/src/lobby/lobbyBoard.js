@@ -99,7 +99,9 @@
 import * as THREE from 'three';
 import { buildQrCard } from './qrCard.js';
 import { buildNameTagCanvas, normalizePlayerName } from '../skypath/nameTag.js';
-import { createRoster, addPlayer as rosterAdd, applySettings, randomise, movePlayer, boxCap, isOverfull, UNASSIGNED_CAP } from './lobbyRoster.js';
+import { createRoster, addPlayer as rosterAdd, applySettings, randomise, movePlayer, removePlayer, boxCap, isOverfull, UNASSIGNED_CAP } from './lobbyRoster.js';
+import { PLAYER_CAP, DEFAULT_PLAYER_COLOUR } from './sessionConfig.js';
+import { PALETTE } from '../skypath/characters.js';
 
 // ---------------------------------------------------------------- tuning
 
@@ -196,6 +198,14 @@ export const LOBBY_BOARD_DEFAULTS = {
     { id: 'qr', place: { x: 380 + 40 + 82.5 / 2, y: 737 }, size: 82.5, label: ['Join'] },
     // Randomise the teams (Luke, 2026-10-05). Unassigned players are dealt in too.
     { id: 'shuffle', place: { x: 380 + 40 + 82.5 + 40 + 82.5 / 2, y: 737 }, size: 82.5, label: ['Shuffle'] },
+    // Create a game (a fresh join code), and Start the round (Luke,
+    // 2026-10-05). A row above Join/Shuffle, same sizes and spacing. Pressing
+    // Start again starts the next round with the next guide: the stand-in
+    // for proper rounds, which aren't built yet.
+    // (y 590 rather than level with the number windows: lower, the Join and
+    // Shuffle labels sat right under these buttons and read as theirs.)
+    { id: 'create', place: { x: 380 + 40 + 82.5 / 2, y: 590 }, size: 82.5, label: ['Create'] },
+    { id: 'start', place: { x: 380 + 40 + 82.5 + 40 + 82.5 / 2, y: 590 }, size: 82.5, label: ['Start'] },
   ],
   buttonPressedDepth: 2, // design px below the board's face, while held
   // The player lobby: the right half of the board. Team boxes stacked
@@ -231,7 +241,6 @@ export const LOBBY_BOARD_DEFAULTS = {
   // We might have to fiddle with the exact placement." The card keeps the
   // backing image's own proportions; only its overall scale is set here.
   qrCard: {
-    url: 'https://omachale.github.io/Pick-a-Path/', // prototype: the Pages root, i.e. the lobby
     centre: { x: 342, y: 265 }, // the CARD's centre (not the image's), design px from the frame's inside top-left
     cardSize: 620, // design px across the card itself (515 px in the backing image)
     height: 90, // design px off the board: above the dials, so it shadows them too
@@ -868,7 +877,14 @@ function ringWallGeometry(A, zA, B, zB, uTile) {
 
 // ---------------------------------------------------------------- the board
 
-export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS) {
+/**
+ * `hooks` are how the board reports what only the page around it can act on
+ * (LobbyBoard.jsx holds the realtime connection): onCreate() / onStart() when
+ * those buttons are pressed, onJoin() when Join shows or hides the QR card,
+ * onJoinWithoutGame() when Join is pressed before a game exists, and onRosterChange(state) after any change to the teams,
+ * for saving (see exportState).
+ */
+export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS, hooks = {}) {
   let params = initialParams;
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.localClippingEnabled = true; // per-wheel window clipping, see build()
@@ -1016,10 +1032,10 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   const trayWallMat = new THREE.MeshStandardMaterial({ color: 0xa2805a, roughness: 1, side: THREE.DoubleSide });
   const overfullMat = new THREE.MeshBasicMaterial({ color: 0xc0392b, transparent: true, opacity: 0.22, depthWrite: false });
   const titleMats = new Map(); // text -> Promise<{ mat, aspect }>
-  // The game's character-select palette (skyPath.js's PALETTE, not exported
-  // from there; keep the two in step). A dev player gets one at random; real
-  // arrivals will bring the colour they picked.
-  const PLAYER_COLOURS = [0x5a9fe0, 0xd9564a, 0x5cb86c, 0xe0b93c, 0x9a6fd6, 0xe08a3c, 0x3fb8b0, 0xe07fb0];
+  // The players' colour palette (shared with the game and the join screen).
+  // A dev player gets one at random; real players bring the colour they
+  // picked on the join screen.
+  const PLAYER_COLOURS = PALETTE.map((p) => p.hex);
   const playerColours = new Map(); // id -> hex
   const NUMBER_WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight'];
   // The cardboard letters have no digits, so titles are spelled: "Team One".
@@ -1254,7 +1270,52 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     }
     layout = { boxes };
     setTrays(boxes, trayHoles);
+    renderExtras();
     requestRender();
+  }
+
+  // Board lettering that isn't part of a dial or button: the current game's
+  // join code (so a student whose camera won't scan can type it), and
+  // "Coming soon" over the mode window while a mode that isn't playable yet
+  // is selected (Luke, 2026-10-05: Volcano is blocked until the Cavern is
+  // wired into the lobby).
+  let gameCode = null;
+  const extrasGroup = new THREE.Group();
+  rosterGroup.add(extrasGroup);
+  function currentMode() {
+    const d = dials.find((x) => x.modes?.some(Boolean));
+    if (!d) return null;
+    const stepRad = (d.step * Math.PI) / 180;
+    const idx = d.target ?? Math.round(-d.group.rotation.z / stepRad);
+    return d.modes[Math.max(0, Math.min(d.modes.length - 1, idx))] ?? null;
+  }
+  const PLAYABLE_MODES = new Set(['skypath']);
+  let extrasGen = 0; // bumped each render, so a label still loading from an older render is dropped
+  function renderExtras() {
+    if (!boardSize.w) return;
+    const s = Math.min(boardSize.w / 1600, boardSize.h / 900);
+    const F = params.frameWidth * s;
+    const wx = (x) => -boardSize.w / 2 + F + x * s;
+    const wy = (y) => boardSize.h / 2 - F - y * s;
+    for (const c of [...extrasGroup.children]) {
+      extrasGroup.remove(c);
+      c.geometry.dispose();
+    }
+    const gen = ++extrasGen;
+    const add = (text, x, y, cap, z) =>
+      titleMaterial(text).then(({ mat, aspect, capFrac }) => {
+        if (gen !== extrasGen) return;
+        const h = (cap * s) / capFrac;
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(h / aspect, h), mat);
+        plane.position.set(wx(x), wy(y), z);
+        extrasGroup.add(plane);
+        requestRender();
+      });
+    // The code: right of the mode dial, in the same lettering as the labels.
+    if (gameCode) add(`Code ${gameCode}`, 520, 437, 22, 0.2);
+    // Coming soon: across the bottom of the mode window, in front of it.
+    const mode = currentMode();
+    if (mode && !PLAYABLE_MODES.has(mode)) add('Coming soon', 40 + 598 / 2, 40 + 337 - 40, 34, 1);
   }
 
   // Re-makes the board sheet with the trays' openings, only when the boxes
@@ -1267,6 +1328,66 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     const old = sheetState.mesh.geometry;
     sheetState.mesh.geometry = sheetGeometry(sheetState.baseHoles, holes);
     old.dispose();
+  }
+
+  // ---- real players (fed from the game's realtime presence by LobbyBoard.jsx)
+  // A player whose connection drops is greyed out, not removed (Luke,
+  // 2026-10-05): phones sleep and classroom wifi blips, and a name that
+  // vanished and reappeared would lose its place. Back within AWAY_SECONDS:
+  // un-greyed, same place. Not back: removed.
+  const AWAY_SECONDS = 60;
+  const awayTimers = new Map(); // id -> timeout
+  const AWAY_OPACITY = 0.35;
+  // Where each player was last placed, by token, restored from a save after a
+  // teacher reload (see importState) so returning players land back in place.
+  let savedPlacement = new Map();
+  const isDevPlayer = (id) => id.startsWith('dev_');
+
+  function setAway(id, away) {
+    const t = tags.get(id);
+    if (away) {
+      if (awayTimers.has(id)) return;
+      awayTimers.set(id, setTimeout(() => dropPlayer(id), AWAY_SECONDS * 1000));
+      if (t) t.mesh.material.opacity = AWAY_OPACITY;
+    } else {
+      clearTimeout(awayTimers.get(id));
+      awayTimers.delete(id);
+      if (t) t.mesh.material.opacity = 1;
+    }
+    requestRender();
+  }
+  function dropPlayer(id) {
+    clearTimeout(awayTimers.get(id));
+    awayTimers.delete(id);
+    removePlayer(roster, id);
+    playerColours.delete(id);
+    const t = tags.get(id);
+    if (t) {
+      rosterGroup.remove(t.mesh);
+      t.mesh.material.map?.dispose();
+      t.mesh.material.dispose();
+      tags.delete(id);
+    }
+    rosterChanged();
+  }
+  // Adds a player under a given id, respecting the cap. Returns false if full.
+  function admit(id, name, colourHex) {
+    if (roster.names.size >= PLAYER_CAP) return false;
+    playerColours.set(id, colourHex);
+    rosterAdd(roster, settings, id, normalizePlayerName(name) || 'Player');
+    const saved = savedPlacement.get(id);
+    if (saved !== undefined) movePlayer(roster, settings, id, saved === 'u' ? 'unassigned' : Number(saved));
+    return true;
+  }
+  function exportState() {
+    const placement = {};
+    roster.teams.forEach((t, i) => t.forEach((id) => (placement[id] = i)));
+    roster.unassigned.forEach((id) => (placement[id] = 'u'));
+    return { settings: { ...settings }, placement };
+  }
+  function rosterChanged() {
+    renderRoster();
+    hooks.onRosterChange?.(exportState());
   }
 
   function rosterBoxAt(worldX, worldY) {
@@ -1298,7 +1419,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     settleTimer = setTimeout(() => {
       settings = dialSettings();
       applySettings(roster, settings);
-      renderRoster();
+      rosterChanged();
     }, params.roster.settleSeconds * 1000);
   }
 
@@ -1325,15 +1446,23 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   const qr = { p: 0, target: 0, mesh: null, shownPos: null, hiddenPos: null };
   qr.mat = new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.5, side: THREE.DoubleSide });
   qr.mat.visible = false; // until its texture exists
-  buildQrCard(params.qrCard.url).then((canvas) => {
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 8;
-    qr.mat.map = tex;
-    qr.mat.visible = true;
-    qr.mat.needsUpdate = true;
-    requestRender();
-  });
+  // The card is drawn once a game exists: its QR carries that game's join
+  // link (see setGame).
+  let joinLink = null;
+  function loadQrCard(url) {
+    buildQrCard(url).then((canvas) => {
+      if (url !== joinLink) return; // a newer game replaced this one meanwhile
+      const old = qr.mat.map;
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 8;
+      qr.mat.map = tex;
+      qr.mat.visible = true;
+      qr.mat.needsUpdate = true;
+      old?.dispose();
+      requestRender();
+    });
+  }
   // In: decelerates into place with the slightest overshoot, as a hand
   // placing something does. Out: accelerates away. The tilt unwinds as it
   // arrives, which sells the "carried in by the hand" swing.
@@ -1688,6 +1817,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
         slotCount: h.d.slots?.length ?? 0,
         setting: h.d.setting,
         values: h.d.slots?.map((sl) => sl.value),
+        modes: h.d.slots?.map((sl) => sl.mode),
         faceMat,
         turning: false,
       });
@@ -1931,6 +2061,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       else {
         dial.turning = false;
         if (dial.setting) settingsDialMoved(true);
+        if (dial.modes?.some(Boolean)) renderExtras();
       }
     };
     requestAnimationFrame(frame);
@@ -1986,18 +2117,25 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       const box = p && rosterBoxAt(p.x, p.y);
       if (box) movePlayer(roster, settings, drag.id, box.key);
       drag = null;
-      renderRoster();
+      rosterChanged();
     }
   };
   const onPointerDown = (ev) => {
     const button = buttonAt(ev);
     if (button) {
       pressButton(button, true);
-      if (button.id === 'qr') moveQr(qr.target === 0);
+      if (button.id === 'qr') {
+        if (joinLink) {
+          moveQr(qr.target === 0);
+          hooks.onJoin?.();
+        } else hooks.onJoinWithoutGame?.();
+      }
       if (button.id === 'shuffle') {
         randomise(roster, settings);
-        renderRoster();
+        rosterChanged();
       }
+      if (button.id === 'create') hooks.onCreate?.();
+      if (button.id === 'start') hooks.onStart?.();
       return;
     }
     // While the card is up, it covers what's under it.
@@ -2058,6 +2196,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     grid: layout?.boxes[0]?.grid,
     teams: roster.teams.map((t) => t.map((id) => roster.names.get(id))),
     unassigned: roster.unassigned.map((id) => roster.names.get(id)),
+    away: [...awayTimers.keys()].map((id) => roster.names.get(id)),
   });
   window.__lobbyCapture = () => {
     renderer.render(scene, camera);
@@ -2072,6 +2211,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     d.target = null; // re-derived from the angle on the next click
     d.group.rotation.z = (deg * Math.PI) / 180;
     if (d.wheel) d.wheel.rotation.z = d.group.rotation.z;
+    renderExtras();
     requestRender();
   };
   renderer.domElement.addEventListener('contextmenu', onContextMenu);
@@ -2084,15 +2224,84 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
      * colorHex the game uses for their name tag), so their name looks the
      * same here as in the game. Only the dev button relies on the random default.
      */
+    /**
+     * DEV: adds a made-up player (not a real device), with a random colour.
+     * Returns its id, or null if the game is full. Dev players are never
+     * greyed out by presence, since they have none.
+     */
     addPlayer(rawName, colourHex = PLAYER_COLOURS[Math.floor(Math.random() * PLAYER_COLOURS.length)]) {
-      const id = `p${nextPlayerId++}`;
-      playerColours.set(id, colourHex);
-      rosterAdd(roster, settings, id, normalizePlayerName(rawName) || 'Player');
-      renderRoster();
+      const id = `dev_${nextPlayerId++}`;
+      if (!admit(id, rawName, colourHex)) return null;
+      rosterChanged();
       return id;
+    },
+    /**
+     * The players actually connected right now ({ token, displayName }, from
+     * presence). Newcomers are added; anyone missing is greyed out (and
+     * removed if they don't come back); anyone back is un-greyed. Returns the
+     * tokens turned away because the game is full, for the page to tell them.
+     * Every newcomer shows in the default colour until they pick one.
+     */
+    syncPlayers(players) {
+      const present = new Set();
+      const turnedAway = [];
+      let changed = false;
+      for (const p of players) {
+        present.add(p.token);
+        if (roster.names.has(p.token)) {
+          if (awayTimers.has(p.token)) setAway(p.token, false);
+          continue;
+        }
+        if (admit(p.token, p.displayName, p.colorHex ?? DEFAULT_PLAYER_COLOUR)) changed = true;
+        else turnedAway.push(p.token);
+      }
+      for (const id of roster.names.keys()) if (!present.has(id) && !isDevPlayer(id)) setAway(id, true);
+      if (changed) rosterChanged();
+      return turnedAway;
+    },
+    /** A new game: forget every player and the saved placements. */
+    setGame(code, link) {
+      for (const id of [...roster.names.keys()]) dropPlayer(id);
+      savedPlacement = new Map();
+      gameCode = code;
+      joinLink = link;
+      if (link) loadQrCard(link);
+      else {
+        qr.mat.visible = false;
+        moveQr(false);
+      }
+      renderExtras();
+      requestRender();
+    },
+    /** Teams as they stand, for Start: settings, teams (arrays of ids), unassigned, names. */
+    getTeams() {
+      return {
+        settings: { ...settings },
+        teams: roster.teams.map((t) => [...t]),
+        unassigned: [...roster.unassigned],
+        names: new Map(roster.names),
+        mode: currentMode(),
+        playable: PLAYABLE_MODES.has(currentMode()),
+      };
+    },
+    /** Restores dials and placements saved by onRosterChange, after a reload. */
+    importState(state) {
+      if (!state?.settings) return;
+      settings = { ...settings, ...state.settings };
+      applySettings(roster, settings);
+      savedPlacement = new Map(Object.entries(state.placement ?? {}));
+      for (const d of dials) {
+        if (!d.setting) continue;
+        const idx = d.values.indexOf(settings[d.setting]);
+        if (idx < 0) continue;
+        d.target = idx;
+        setAngle(d, (-idx * d.step * Math.PI) / 180);
+      }
+      renderRoster(true);
     },
     dispose() {
       clearTimeout(settleTimer);
+      for (const t of awayTimers.values()) clearTimeout(t);
       ro.disconnect();
       delete window.__lobbyDials;
       delete window.__lobbyDialSet;
@@ -2130,6 +2339,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     settings = { ...settings, ...st };
     applySettings(roster, settings);
     renderRoster(true);
+    hooks.onRosterChange?.(exportState());
   };
   return api;
 }

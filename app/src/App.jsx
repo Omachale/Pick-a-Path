@@ -36,6 +36,8 @@ import LavaCavern from './cavern/LavaCavern.jsx';
 import TeacherDashboard from './lobby/TeacherDashboard.jsx';
 import KeyboardTestHarness from './keyboard/KeyboardTestHarness.jsx';
 import LobbyBoard from './lobby/LobbyBoard.jsx';
+import PlayerJoin from './lobby/PlayerJoin.jsx';
+import { TEACHER_SIGN_IN } from './lobby/sessionConfig.js';
 
 const params = new URLSearchParams(location.search);
 
@@ -130,10 +132,14 @@ export default function App() {
   if (params.get('victory') === '1') return <SoloVictoryStage />;
   if (params.get('solo') === '1') return <SoloSkyPath />;
   if (params.get('debugKeyboard') === '1') return <KeyboardTestHarness />;
-  // The new lobby's 3D backdrop, being built up in place (2026-10-04). Behind
-  // a flag until it has real screens on it, so the working plain lobby below
-  // stays the default for multi-device testing meanwhile.
-  if (params.get('lobbyBoard') === '1') return <LobbyBoard />;
+  // The teacher's lobby board is the default landing page (Luke, 2026-10-05:
+  // "this Lobby... will become the default landing"). Players arrive on the
+  // QR card's `?join=CODE` link and get the player screens below. `?player=1`
+  // keeps the old player lobby reachable with no code at all (the shared
+  // no-session room, for multi-tab testing), and `?devJoin=` is the Dev
+  // player button's own reload. `?lobbyBoard=1` still works for old links.
+  const playerRoute = params.has('join') || params.has('devJoin') || params.get('player') === '1';
+  if (!playerRoute) return <LobbyBoard />;
 
   if (teacherView) return <TeacherDashboard onExit={() => setTeacherView(false)} />;
 
@@ -187,6 +193,7 @@ export default function App() {
         round={lobby.round}
         failed={failed}
         displayName={lobby.participant?.displayName}
+        look={lobby.look}
         myToken={lobby.token}
         sendForkChoice={lobby.sendForkChoice}
         onForkChoiceReceived={lobby.onForkChoiceReceived}
@@ -212,5 +219,15 @@ export default function App() {
     );
   }
 
-  return <Lobby lobby={lobby} onCodeResolved={setSessionCode} onOpenTeacherView={() => setTeacherView(true)} />;
+  // A player arriving from the teacher's QR code: the join screen, where they
+  // choose a character, colour and name, then wait (PlayerJoin.jsx). The
+  // older plain lobby below stays for `?player=1` and the Dev player button's
+  // `?devJoin=` reloads (multi-tab testing), where the game still asks for a
+  // character at round start.
+  if (params.has('join') && !params.has('devJoin')) return <PlayerJoin lobby={lobby} />;
+
+  // With teacher sign-in off, "Teacher?" goes to the lobby board (the
+  // default page); the old sign-in dashboard is kept for when it comes back.
+  const openTeacher = TEACHER_SIGN_IN ? () => setTeacherView(true) : () => (location.href = location.pathname);
+  return <Lobby lobby={lobby} onCodeResolved={setSessionCode} onOpenTeacherView={openTeacher} />;
 }
