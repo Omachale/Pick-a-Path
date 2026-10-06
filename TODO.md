@@ -1742,3 +1742,265 @@ Flow review done; decisions:
   build (Luke found it went to GitHub Pages). Published builds use their own address.
   Phones must be on the same Wi-Fi; Windows Firewall may need to allow Node on private
   networks. Join now clears the board's message line (it sat under the QR card).
+
+### 3D temple: parked test, NOT in the game (2026-10-06)
+
+**Status:** decision deferred. Luke, 2026-10-06: finish the rest of the game first, check load
+times, then decide whether the 3D temple replaces the flat one. The real game is untouched;
+everything lives in a separate test page.
+
+**To look at it again:** start the dev server, open http://localhost:5181/temple-3d.html (wide
+window), pick an avatar and press Start. You begin on island 6 of the normal 6-island world
+(solo, player view); pick the right word and hold ▲. The panel (top left) shows build time,
+texture download size, triangles, a temple on/off toggle and "Measure frame cost" (renders the
+current view 60× with and 60× without the temple; the game freezes a few seconds).
+
+**What it is:** a procedural temple Luke had made in a separate chat (originals on his Desktop:
+`templeBuilder.js`, `Temple.jsx`, `README.md`). `Temple.jsx` is unusable here (React Three
+Fiber + Rapier React bindings, which this project doesn't use) and isn't needed;
+`templeBuilder.js` is plain three.js.
+
+**Files (all new, all test-only; nothing in the real game imports them):**
+- `app/temple-3d.html`: the page. Entry `app/src/temple3d/main.jsx` mounts
+  `SkyPathTemple3d.jsx` (copy of `skypath/SkyPath.jsx`, imports the copy below).
+- `app/src/temple3d/skyPathTemple3d.js`: copy of the committed `skyPath.js` (as of
+  2026-10-06). Every change is marked `TEMPLE 3D TEST` (grep it). It is a snapshot: it will
+  drift from the real `skyPath.js` as the game moves on. Changes: flat temple + 2D door art
+  hidden; `buildTemple3d()` places the 3D temple when Start is pressed on the avatar screen
+  (`finishCharacterSelect`); start on island 6 (`startJourney`); the ending opens the real doors
+  and walks the player up the real ramp to the centred doorway (`startTempleEntry`,
+  `updateTempleEntry`); camera rises with the player during the ending only; `restart()` closes
+  the doors.
+- `app/src/temple3d/templeInSkyPath.js`: `prebuildTemple()` (build + baked lighting, cached,
+  callable early) and `placeTemple3d()` (size, position, test panel). `SIZE = 0.8`.
+- `app/src/temple3d/templeBuilder.js`: Luke's builder, copied, changes listed in its header:
+  courtyard ground, path, side walls and gateway removed (at Sky Path scale they reached back
+  over the last island); lanterns and the two huabiao pillars moved beside the stairs; the one
+  central brazier (which blocked the path) is now two, one either side of the stairs, each
+  with its own smoke; ramp support made a wedge (the original box stood above the slope and
+  swallowed the walker); slow textures can load from files (`FILE_TEXTURES`,
+  `opts.textureFiles`); `exportTempleTextures()`; build timings (`api.timings`).
+- `app/src/temple3d/exportTextures.js`: regenerates the texture files. Only needed if a texture
+  generator or the seed changes; instructions in its header (one console line, then move eight
+  files from `app/shots/` into place).
+- `app/public/textures/temple3d/*.webp`: the 8 pre-generated textures (stone, relief, tiles,
+  wood, door, rafter, scales, lattice), 79 KB total.
+
+**Decisions made (Luke, 2026-10-06):**
+- Size: 80% of the flat temple's width (temporary slider used to pick it, removed). The foot of
+  the stairs sits 1.5 units past where the walk stops; the building is placed behind that.
+- Lighting: baked only. Each mesh's lighting is computed once from a fixed late-afternoon sun
+  into vertex colours, then drawn unlit like the rest of Sky Path (CLAUDE.md's unlit rule).
+  The lit original was tried: under Sky Path's dim dusk sun it went nearly black, and cost
+  ~3.5 ms a frame up close. Bump maps are never made (only useful under real lights).
+- Load: slow textures pre-generated as WebP files (they were ~88% of the build).
+- Build timing: when a player has chosen their avatar, while they wait for a game. Possible
+  because nothing about the temple depends on the round (teams, words, route): every round's
+  temple is identical. The build freezes the page for its duration, so it must run at a quiet
+  moment like that.
+
+**Measurements (this laptop, 844×390):**
+- 121k triangles, 21 draw calls. Frame cost baked: within noise (≈0–1 ms) at the start and
+  right at the steps.
+- Build: originally 0.8 s with the page in front / 3.6–7.7 s with the browser pane in the
+  background. After the texture files: 0.8–1.6 s in the background (shapes ~0.7–0.9 s, bake
+  ~0.1 s, small textures ~0.02 s). Not measured on a phone; expect slower.
+- Saving the shapes as a model file too was considered and rejected: that part is under a
+  second, and the file would probably be over 1 MB, slower than building it on school Wi-Fi.
+
+**If Luke decides YES, to put it in the real game:**
+1. Move `templeBuilder.js`, `templeInSkyPath.js` (minus the test panel and frame measurement)
+   and the texture files to their permanent homes (e.g. `src/skypath/templeGen.js` per the
+   `*Gen.js` convention, with `SIZE` in a `TEMPLE_DEFAULTS` object).
+2. Port the `TEMPLE 3D TEST` changes from `skyPathTemple3d.js` into the real `skyPath.js`
+   (re-apply them by hand: the copy is a stale snapshot), and delete the flat temple, its 2D
+   door art (`doorFrameMesh`, `doorLeftMesh`/`doorRightMesh`, `doorTuneState`) and their
+   textures rather than just hiding them. Drop the start-on-island-6 change.
+3. Call `prebuildTemple()` from the lobby once the player has confirmed their avatar (the
+   lobby's avatar/join screen, before Sky Path mounts), keep the result at module level, and
+   have Sky Path place it at mount. Each device builds its own; nothing is networked.
+4. Check the guide and watching views, the jetpack rescue at the last fork, and a real phone.
+5. Delete `app/temple-3d.html` and `app/src/temple3d/`.
+
+**If NO:** delete `app/temple-3d.html`, `app/src/temple3d/` and `app/public/textures/temple3d/`.
+Nothing else references them.
+
+## Built 2026-10-06: QR card expands
+
+Backup for rooms with no second screen. With the QR card in place, hovering
+the card itself (not the hand, and not an 18 px rim of the card's edge,
+`qrCard.hoverMargin`) lights it with a soft warm additive wash (`QR_GLOW`,
+0.32) and shows a zoom-in cursor. A click brings the card toward the camera:
+it really moves (no scaling), so perspective does the growing and more of the
+hand comes into view. It ends centred, covering 94% of the screen height
+(`zoomCover`), over 0.8 s; any click anywhere sends it back in 0.6 s and does
+nothing else. To allow that close approach, the camera's near plane dropped
+from 0.5 to 0.15 of its distance. Debug: `__lobbyQrZoom(z, lit)`.
+
+Revised 2026-10-06 (Luke): the hover light was the wrong reading of
+"highlight"; he meant a sign that the card has noticed the cursor. Replaced
+with waves: square outlines in the code's ink leave the code's edge and move
+out across a 20 px band, fading, three at a time staggered over 1.4 s
+(`qrCard.waves`). Expanded is now bigger: the CODE is sized to 90% of the
+screen height and centred (`zoomCodeCover`), with the card's edges running
+slightly out of frame. Debug: `__lobbyQrZoom(z, waves, tMs)`.
+
+Waves revised 2026-10-06 (Luke: "a bit thicker and significantly slower, and
+more rounded, especially at the corners... 30px"): band 30, line 3.5, rounded
+corners (22 px inside, a line-width more outside so the bend keeps an even
+thickness), 2.8 s per wave (was 1.4).
+
+### Coming (Luke, 2026-10-06, NOT designed yet): projector view during the game
+A sizeable feature: the projector / second screen shows a dynamic camera moving between
+the teams' game instances, showing highlights of what's happening. Details to come. It
+doesn't necessarily replace a separate teacher screen during a round, which should stay
+for player management (the board, possibly locked). Design rounds and the teacher's
+during-round screen with this in mind. Also planned: once rounds exist, a simulation with
+AI/bot players to test many connections at once (Luke can't test with a class himself).
+
+### Victory stage: model-town setting, LAYOUT BLOCKOUT (2026-10-06, test page only)
+Luke: the victory stage moves off the space hemisphere onto a table with a miniature
+trainset (small town, small mountain with a tunnel, train coming out of the tunnel and
+running behind the central stage), table edges just visible, a full-size window on the far
+wall to sell the scale. Teams on an arc under 180°; the camera pans slightly to each team
+in turn, its platform rises, players pop up as now; at the end the winning team rises
+higher and the avatars wobble on their daises as if dancing. Teacher's screen only, loads
+once, so it can use real lighting and more processing. Style: cardboard, less realistic
+than his two model-railway reference photos (style guide only, copy nothing specific).
+Built separately first, per Luke, as a basic layout to arrange/comment on before any
+real art: http://localhost:5181/model-town.html (`app/model-town.html`,
+`app/src/modelTown/main.js`). Plain blocks only; all layout numbers in its `LAYOUT`
+object (metres, real-room scale). Buttons: Overview / Team N (smooth pans) / Free look
+(orbit) / Teams 1-4 / Labels. Nothing in the real game imports it.
+- Revised 2026-10-06 (Luke: "Have the train track loop around the stage area, so it passes
+  in front of the stage... Up the quality by one step"): the track is now a rounded
+  rectangle round the whole stage (front straight between the stage and the table edge,
+  back-left corner through the mountain, tunnel mouths placed wherever the track meets
+  it); the town moved inside the loop behind the stage, with a small station by the back
+  straight; ground in front of the stage kept clear of trees. One step up: card texture
+  on all card pieces, grass board with bare-card rim, wood table and floorboards, painted
+  view out of the window, curtains, buildings with pitched or parapet roofs + windows +
+  doors, faceted papier-mâché mountain (green on gentle slopes, rock on steep), ballast
+  and instanced sleepers, a proper engine (boiler, cab, chimney, dome, wheels) and three
+  coaches, chimney smoke (stops inside the tunnel), tiered conifers and round
+  broadleaves, ACES tone mapping and 4096 soft shadows. Debug: `__view(name|i)`,
+  `__advance(seconds)`, `__capture()`.
+- Tilt-shift added 2026-10-06 (Luke: "Add the tilt-shift blur"): screen-space, a sharp
+  band centred on wherever the camera is looking (follows team pans and free look),
+  blurring above and below (`TILT` in main.js: band 0.1, ramp 0.3 screen heights, max
+  1.7 px per tap, 2 H+V passes). Own shader because three's tilt-shift has no sharp
+  band. "Tilt-shift" button toggles it for comparison.
+- Victory platforms placed 2026-10-06 (Luke: "Now put the victory platforms into the
+  scene"): `app/src/modelTown/teamPodium.js` builds one team from the real pieces
+  (victory-base-small.glb, victory-pedestal.glb, avatar cards, nameTag.js tags, rings,
+  score numbers) laid out with victoryStage.js's own numbers (seat spacing 0.28, stagger
+  0.34, 0.09 per point, guide = team average, rightmost), then scaled onto its arc spot
+  (base 0.36 m wide). FINAL state only, no reveal yet. Lit materials (avatars partly
+  self-lit, since the window light is behind them; tags/rings/scores unlit to keep their
+  colours). Demo teams of 3/4/5/6 incl. guide. To fit them, arc radius 0.7 (centre z 0.6),
+  track widened to x ±0.94, z ±0.54. Team buttons now give a real close-up (camera comes
+  in along the team's facing line), since names don't read from the overview. Fixed:
+  tilt-shift focus was projected with last frame's camera matrices.
+- Next (Luke's described sequence, not built): camera to each team in turn, its platform
+  raises a bit, players pop up as now; at the end the winner rises higher and avatars
+  wobble as if dancing. Then move it into the real victory stage.
+- 2026-10-06 (Luke): the view out of the window becomes a cyberpunk city ("Tall buildings,
+  neon, flying cars"), then: "Make the outside world more realistic, more clean-cut. Not
+  like toys or cardboard. Not retro" (a first pass had copied the room's toy style).
+  `app/src/modelTown/cyberCity.js`: real-scale 3D beyond the window (street 150 m below
+  the room; towers 420-2100 m out on a street grid), glass towers with curtain-wall
+  facades (continuous lit floor bands, fine mullions) reflecting a dusk-sky env map,
+  setbacks / round towers / spires with red aviation lights, LED corner lines and roof
+  bands, holographic billboards, traffic light-streams on the avenues, streamlined
+  flying cars with light trails; magenta haze via scene fog. Bloom (UnrealBloomPass,
+  threshold 3) catches only the city's over-bright lights (`GLOW`), not the room. The
+  tilt-shift is half strength above the focus band so the city stays recognisable.
+  NOTE: the overview frames only the lower part of the window, so the city is seen
+  looking slightly down across rooftops, not as a skyline against the sky.
+- Name tags never blurred (Luke: "it's important that they be legible"): tags live on
+  `SHARP_LAYER` (teamPodium.js) and are drawn in their own pass after the tilt-shift,
+  without depth test. The scene's background colour became the renderer's clear colour,
+  because scene.background forces a clear that wiped the picture under that pass.
+- City revised 2026-10-06 (Luke: "a bit too bright and crowded. Reduce the number of
+  towers to 5: 2 nearby, three at varying distances. Include some light haze/cloud to
+  obscure the distance. Make the look much more dystopian/dark"): no street grid now; five
+  huge dark towers (`TOWERS` in cyberCity.js: near pair at 170/240 m across the window's
+  left/right edges, others at 650/1050/1500 m), concrete fins/ribs, sparse dim lit floors,
+  blinking aviation lights, one dim neon line and one dim sign, 7 cars; smog sky with a
+  dull glow at the horizon; `FogExp2(SMOG, 0.001)`; six drifting haze banks whose tops sit
+  just below eye level. Debug: `__look(px,py,pz, tx,ty,tz)` (e.g. `__look(0,1.6,0.5,
+  0,1.9,-10)` looks straight out of the window).
+- City revised again 2026-10-06 (Luke: "the close towers are too close. Imagine the
+  apartment is an extremely high elevation, and only clouds are visible, except that a
+  few sleek, dark, futuristic towers are poking through. The closest should still be far
+  enough away that we can see its entire width"): the room is above the clouds. A cloud
+  sea 90 m below the floor (a glow-patched base plus four drifting billow layers) to the
+  horizon; dark starry sky; five sleek faceted towers tapering to needles (nearest 650 m,
+  then 1.15/1.8/2.7/3.8 km), near-black glass with a sky sheen, cyan edge lines, a pink
+  ring at the needle, blinking red tips; six flying cars above the cloud. Fog
+  `FogExp2(SMOG 0x262a36, 0.00032)`, camera far 12 km, and the renderer now uses a
+  logarithmic depth buffer (cm to km range).
+- 2026-10-06 (Luke: "lower the cloud level: we should be able to see further down the
+  towers. And add a few more horizontal bands of dull neon light"): cloud top now 380 m
+  below the floor (was 90), tower heights raised by the same so the tops stay put; 3-6
+  dull neon bands per tower (cyan/pink/amber/violet at 1.5x white), each a polygon ring
+  matching the shaft's facets at its height; edge lines thickened (they broke into dashes
+  at overview distance). Cars now fly between 150 m below and 30 m above eye level.
+- Team-by-team reveal built 2026-10-06 (Luke: "Now add the team-by-team reveal
+  animation"; his spec from earlier: camera pans to each team in turn, its platform
+  raises a bit, players pop up as now; at the end the winners rise higher and the
+  avatars wobble on their daises as if crudely dancing). main.js `REVEAL` + one clock
+  (`reveal.t`): 1 s on the overview, then per team: camera move (1.6 s), platform rises
+  3.5 cm on a growing cardboard riser, players pop up left to right (overshoot), then
+  the game's own score stages (teamPodium.js `STAGES`, victoryStage.js timings minus its
+  3 s opening delay: 15 s) with the stage name above the team, then 1.6 s hold. Finale:
+  back to the overview, the winning team (best average score incl. guide; ties all
+  win) rises 8 cm more and its avatars rock, twist and hop. teamPodium.js now returns
+  { group, teamScore, pose(popS, stageMs, showLabel), dance(time, amount) }. Buttons:
+  Play reveal (auto-plays on load), Skip to end, Speed 1x/2x/4x. Debug:
+  `__revealAt(t)`, `__revealTimes()`. Total with 4 teams: about 80 s plus the finale.
+- Interior models detailed 2026-10-06 (Luke: "up the detail on the interior models. The
+  train, the buildings, the hill... Those were examples. Also the greenery"). New
+  `app/src/modelTown/models.js` (built from main.js's own materials):
+  - Train: engine (banded boiler, smokebox door, flared chimney, brass steam dome, sand
+    dome, cab with roof, red cowcatcher and buffer beam, buffers, lamp, red spoked
+    driving wheels that turn with distance, moving coupling rods), a coal tender, three
+    coaches (cream window band, framed panes, lining, door lines, curved roof, bogies,
+    buffers). Wheels sit on the rail tops.
+  - Buildings: shingle-textured pitched roofs with ridge, chimney stacks with pots,
+    corner trims, base course, framed windows with glazing bars and sills, door with
+    frame and step; flat roofs get a parapet, water tank and vent; shops (BAKERY,
+    GROCER, POST OFFICE, HOTEL, CAFE) get big windows, a sign board and a striped
+    awning. Slight hand-built wonkiness.
+  - Street and station: road with dashed line and kerbs, lamp posts, two parked cars;
+    station with safety line, canopy on posts with a fringe, bench, name board.
+  - Hill: a noise heightfield with ridges and gullies, coloured grass/scrub/rock/crag by
+    slope and height, rock outcrops and pines on it; stone tunnel portals with an arch
+    of voussoirs, keystone and a dark tunnel inside. `inMountain` now asks the hill's
+    height.
+  - Greenery: shaggy multi-tier pines, clumped broadleaf trees on forked trunks, bushes
+    (only low bushes in front of the stage), plus ~thousands of instanced grass tufts
+    and patches of flowers.
+- Reveal revised 2026-10-06 (Luke: "speed *1.5, and any empty categories... can be
+  skipped. Also, if two teams win... bring their platforms to the front... add fireworks
+  above the winning team(s)"): default speed 1.5x (button cycles 1.5/3/6/1x); each team
+  only runs the categories somebody on it scored in (teamPodium.js `stagesMs`), so turns
+  differ in length (main.js `turnStarts()`); tied winners slide forward onto the open
+  ground in front of the stage (z 0.3, side by side, turning to face the camera), the
+  camera's finale view looks forward at them; winners then rise and dance; fireworks
+  (`app/src/modelTown/fireworks.js`: rockets with spark trails bursting into
+  twinkling, drooping stars, one points pool, bloomed) go up over the winners in turn.
+  "Test: tie" button forces teams 1 and 2 to draw. NB the demo teams 1 and 3 genuinely
+  tie (both average 6), so the default run shows the tie.
+- 2026-10-06 (Luke): on-screen part labels removed; the test buttons are hidden (press D
+  to show them). Each team now has a cardboard placard on the stage in front of its
+  platform ("Team One  6") showing the team total (average of every seat incl. guide),
+  updated once each category finishes rising (teamPodium.js `teamShown`); "–" until the
+  team's turn. It stays on the ground when the platform rises, and goes forward with
+  tied winners.
+- 2026-10-06 (Luke: placards "blurry. Make sure they're in focus. Also make the text a
+  little thicker"): placards moved onto SHARP_LAYER (unlit, since layers filter lights
+  too). The sharp pass is now a custom `SharpPass` that re-lays the scene's depth (no
+  colour) before drawing the sharp layer, so placards stay correctly hidden behind
+  anything in front of them; name tags still skip the depth test. Lettering thickened by
+  stroking each glyph in its own colour (the font has no bold), name text 64->76 px.

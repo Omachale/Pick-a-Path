@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en-NZ">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Victory stage: model town layout</title>
+  <style>
+    /* The victory scores' handwriting, as in the game (see index.html). */
+    @font-face { font-family: 'Sue Ellen Francisco'; font-weight: 400; font-display: block; src: url('/fonts/sue-ellen-francisco.woff2') format('woff2'); }
+    html, body { margin: 0; height: 100%; background: #1d1712; overflow: hidden; font: 13px system-ui, sans-serif; }
+    #panel { position: fixed; top: 8px; left: 8px; z-index: 5; display: flex; flex-wrap: wrap; gap: 4px; max-width: 70vw; }
+    #panel button { padding: 4px 9px; border: 0; border-radius: 4px; background: rgba(20,14,8,0.8); color: #f3e6cf; cursor: pointer; }
+    #panel button.on { background: #c9813a; color: #1d1712; }
+  </style>
+</head>
+<body>
+  <div id="panel"></div>
+  <script type="module" src="/src/modelTown/main.js"></script>
+</body>
+</html>

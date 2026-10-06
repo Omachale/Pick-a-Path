@@ -97,7 +97,7 @@
  * layout experiment, not a final screen.
  */
 import * as THREE from 'three';
-import { buildQrCard } from './qrCard.js';
+import { buildQrCard, QR_CARD } from './qrCard.js';
 import { buildNameTagCanvas, normalizePlayerName } from '../skypath/nameTag.js';
 import { createRoster, addPlayer as rosterAdd, applySettings, randomise, movePlayer, removePlayer, boxCap, isOverfull, UNASSIGNED_CAP } from './lobbyRoster.js';
 import { PLAYER_CAP, DEFAULT_PLAYER_COLOUR } from './sessionConfig.js';
@@ -246,6 +246,27 @@ export const LOBBY_BOARD_DEFAULTS = {
     height: 90, // design px off the board: above the dials, so it shadows them too
     inSeconds: 1.3,
     outSeconds: 0.7,
+    // Expanding it, for a room with no second screen to put the code on.
+    // Luke, 2026-10-06: hovering the card (bar a thin margin) shows it has
+    // noticed the cursor; clicking then brings it "down and to the right, at
+    // the same time that it expands... as if it is approaching the camera...
+    // until it covers almost the entire height of the screen." Then, bigger
+    // still: "the edges of the cardboard (but not the QR code) can be
+    // slightly out of frame", so it's the CODE that's sized to the screen and
+    // centred, and the card runs off past it. Any click shrinks it back. It
+    // really does come toward the camera (no scaling), so the perspective
+    // does the growing, and more of the hand shows on its own.
+    hoverMargin: 18, // backing-image px of card edge that doesn't count as the card
+    zoomCodeCover: 0.9, // the code's share of the screen's height when expanded
+    // The hover sign. Luke: "a border around the code consisting of lines
+    // moving ever outward, disappearing and being replaced, like waves...
+    // fairly narrow, maybe just 20px". (A warm light over the card came
+    // first; he'd meant a sign of recognition, not lighting.)
+    // Then: "a bit thicker and significantly slower, and more rounded,
+    // especially at the corners... expand the width of the effect to 30px".
+    waves: { band: 30, gap: 4, line: 3.5, corner: 22, count: 3, seconds: 2.8, opacity: 0.75 }, // design px
+    zoomInSeconds: 0.8,
+    zoomOutSeconds: 0.6,
   },
 };
 
@@ -574,7 +595,7 @@ function makeRampCanvas() {
 // The QR backing image's own geometry (811x586; the card spans x 274-789,
 // y 65-567): enough to scale the image by the CARD's size and place it by
 // the card's centre rather than the image's.
-const QR_BACKING = { w: 811, h: 586, card: { w: 515, cx: 531.5, cy: 316 } };
+const QR_BACKING = { w: 811, h: 586, card: { w: 515, h: 502, x0: 274, y0: 65, cx: 531.5, cy: 316 } };
 
 // ---------------------------------------------------------------- dial labels
 
@@ -1443,9 +1464,17 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   }
 
   // The QR card: progress p runs 0 (hidden) to 1 (in place); see poseQr().
-  const qr = { p: 0, target: 0, mesh: null, shownPos: null, hiddenPos: null };
+  // zoom runs 0 (on the board) to 1 (expanded); see zoomQr().
+  // hovered/waveAmp: the hover waves, wanted and how far faded in (0-1).
+  const qr = { p: 0, target: 0, mesh: null, shownPos: null, hiddenPos: null, zoom: 0, zoomTarget: 0, zoomPos: null, hovered: false, waveAmp: 0, waves: [] };
   qr.mat = new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.5, side: THREE.DoubleSide });
   qr.mat.visible = false; // until its texture exists
+  // One material per wave, each fading on its own; in the code's own ink,
+  // so the waves look drawn onto the card like the code is.
+  qr.waveMats = Array.from(
+    { length: params.qrCard.waves.count },
+    () => new THREE.MeshBasicMaterial({ color: QR_CARD.ink, transparent: true, opacity: 0, depthWrite: false }),
+  );
   // The card is drawn once a game exists: its QR carries that game's join
   // link (see setGame).
   let joinLink = null;
@@ -1471,6 +1500,74 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     qr.mesh.visible = p > 0.001;
     qr.mesh.position.lerpVectors(qr.hiddenPos, qr.shownPos, p);
     qr.mesh.rotation.z = (1 - Math.min(1, p)) * 0.18;
+    if (qr.zoom > 0) qr.mesh.position.lerp(qr.zoomPos, qr.zoom);
+  }
+  // Smoothstep both ways: it's lifted up to the camera and set back down,
+  // not thrown, so it starts and ends at rest. A reversal mid-way restarts
+  // the curve from where the card is, so it doesn't jump.
+  function zoomQr(up) {
+    qr.zoomTarget = up ? 1 : 0;
+    const from = qr.zoom;
+    const to = qr.zoomTarget;
+    const q = params.qrCard;
+    const dur = (up ? q.zoomInSeconds : q.zoomOutSeconds) * Math.abs(to - from);
+    const start = performance.now();
+    const id = (qr.zoomId = (qr.zoomId ?? 0) + 1);
+    const frame = (now) => {
+      if (qr.zoomId !== id) return;
+      const t = dur > 0 ? Math.min(1, (now - start) / (dur * 1000)) : 1;
+      qr.zoom = from + (to - from) * t * t * (3 - 2 * t);
+      poseQr(qr.p);
+      renderer.render(scene, camera);
+      if (t < 1) requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+  // Square outlines leave the code's edge and travel outward across the
+  // band, fading as they go, evenly staggered so one is always setting off as
+  // another dies. Each grows from the code's centre, so its edge moves out
+  // while its line thickens by only band/code-size, too little to see.
+  function poseWaves(now) {
+    const w = params.qrCard.waves;
+    qr.waves.forEach((ring, i) => {
+      const phase = (now / 1000 / w.seconds + i / w.count) % 1;
+      ring.scale.setScalar(1 + phase * ring.userData.grow);
+      // Fades in over the first tenth so a new line doesn't pop in.
+      qr.waveMats[i].opacity = w.opacity * qr.waveAmp * Math.min(1, phase * 10) * (1 - phase);
+    });
+  }
+  // Runs only while the waves are showing or fading out (a quick 0.15 s
+  // either way), so the board isn't re-rendering every frame for nothing.
+  function hoverQr(on) {
+    if (qr.hovered === on) return;
+    qr.hovered = on;
+    if (qr.waveLoop) return;
+    qr.waveLoop = true;
+    let last = performance.now();
+    const frame = (now) => {
+      qr.waveAmp = Math.max(0, Math.min(1, qr.waveAmp + ((qr.hovered ? 1 : -1) * (now - last)) / 150));
+      last = now;
+      poseWaves(now);
+      renderer.render(scene, camera);
+      if (qr.hovered || qr.waveAmp > 0) requestAnimationFrame(frame);
+      else qr.waveLoop = false;
+    };
+    requestAnimationFrame(frame);
+  }
+  // True when the pointer is on the card itself, short of its edge margin
+  // (not on the hand, nor the card's rim), with the card resting in place.
+  function overQrCard(ev) {
+    if (!qr.mesh?.visible || qr.target !== 1 || qr.p !== 1 || qr.zoomTarget !== 0 || qr.zoom !== 0) return false;
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObject(qr.mesh, false)[0];
+    if (!hit?.uv) return false;
+    const x = hit.uv.x * QR_BACKING.w;
+    const y = (1 - hit.uv.y) * QR_BACKING.h;
+    const c = QR_BACKING.card;
+    const m = params.qrCard.hoverMargin;
+    return x > c.x0 + m && x < c.x0 + c.w - m && y > c.y0 + m && y < c.y0 + c.h - m;
   }
   function moveQr(show) {
     qr.target = show ? 1 : 0;
@@ -1921,6 +2018,52 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       // Hidden: the whole image just off the board's left edge, tipped back
       // a little, as if still on its way in from the side.
       qr.hiddenPos = new THREE.Vector3(-W / 2 - (QR_BACKING.w * k) / 2 - 20 * s, cardY + offY - 30 * s, q.height * s);
+      // Expanded: the CODE centred on the camera's axis, at the distance where
+      // its height fills zoomCodeCover of the view. The view is H tall at the
+      // board, so that distance is the camera's times codeH / (cover * H).
+      const code = QR_CARD.code;
+      const codeH = code.size * k;
+      const codeX = (code.x0 + code.size / 2 - QR_BACKING.w / 2) * k; // code centre, in the mesh
+      const codeY = (QR_BACKING.h / 2 - (code.y0 + code.size / 2)) * k;
+      const camZ = H / 2 / Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+      qr.zoomPos = new THREE.Vector3(-codeX, -codeY, camZ - (camZ * codeH) / (q.zoomCodeCover * H));
+      // The hover waves: square outlines around the code, starting just off
+      // its edge. They sit inside the card's margin round the code.
+      const wv = q.waves;
+      const inner = codeH / 2 + wv.gap * s;
+      // A rounded square, its outer edge's corners rounded a line-width more
+      // than the inner's, so the line keeps an even thickness round the bend.
+      const roundedSquare = (path, half, r, clockwise) => {
+        const pts = [
+          [half, half, 0],
+          [-half, half, 1],
+          [-half, -half, 2],
+          [half, -half, 3],
+        ];
+        if (clockwise) pts.reverse();
+        for (const [x, y, q] of pts) {
+          const a0 = (q * Math.PI) / 2;
+          const cx = x - Math.sign(x) * r;
+          const cy = y - Math.sign(y) * r;
+          if (clockwise) path.absarc(cx, cy, r, a0 + Math.PI / 2, a0, true);
+          else path.absarc(cx, cy, r, a0, a0 + Math.PI / 2, false);
+        }
+        path.closePath();
+        return path;
+      };
+      const r = wv.corner * s;
+      const outline = roundedSquare(new THREE.Shape(), inner + wv.line * s, r + wv.line * s, false);
+      outline.holes.push(roundedSquare(new THREE.Path(), inner, r, true));
+      const ringGeo = new THREE.ShapeGeometry(outline, 12);
+      qr.waves = qr.waveMats.map((mat) => {
+        const ring = new THREE.Mesh(ringGeo, mat);
+        ring.position.set(codeX, codeY, 0.5 * s);
+        ring.renderOrder = 6;
+        ring.userData.grow = ((wv.band - wv.gap) * s) / inner; // the scale that carries the edge across the band
+        qr.mesh.add(ring);
+        return ring;
+      });
+      poseWaves(performance.now());
       content.add(qr.mesh);
       poseQr(qr.p);
     }
@@ -1971,7 +2114,9 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
 
     camera.aspect = W / H;
     camera.position.set(0, 0, H / 2 / Math.tan(THREE.MathUtils.degToRad(FOV / 2)));
-    camera.near = camera.position.z * 0.5;
+    // Near enough for the expanded QR card, which comes most of the way to
+    // the camera (qrCard.zoomCodeCover).
+    camera.near = camera.position.z * 0.15;
     camera.far = camera.position.z * 2;
     camera.lookAt(0, 0, 0);
     camera.updateProjectionMatrix();
@@ -2121,6 +2266,19 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     }
   };
   const onPointerDown = (ev) => {
+    // Expanded, the card is all there is: a click anywhere puts it back, and
+    // does nothing else.
+    if (qr.zoomTarget === 1) {
+      zoomQr(false);
+      renderer.domElement.style.cursor = '';
+      return;
+    }
+    if (overQrCard(ev)) {
+      hoverQr(false);
+      zoomQr(true);
+      renderer.domElement.style.cursor = 'zoom-out';
+      return;
+    }
     const button = buttonAt(ev);
     if (button) {
       pressButton(button, true);
@@ -2177,12 +2335,26 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       requestRender();
       return;
     }
-    renderer.domElement.style.cursor = tagAt(ev) ? 'grab' : dialAt(ev) || buttonAt(ev) ? 'pointer' : '';
+    if (qr.zoomTarget === 1) {
+      renderer.domElement.style.cursor = 'zoom-out';
+      return;
+    }
+    const onCard = overQrCard(ev);
+    hoverQr(onCard);
+    renderer.domElement.style.cursor = onCard ? 'zoom-in' : tagAt(ev) ? 'grab' : dialAt(ev) || buttonAt(ev) ? 'pointer' : '';
   };
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointerup', onPointerUp);
   // Debug only: hold a button down (true) or let it up (false).
   window.__lobbyButton = (id, down) => pressButton(buttons.find((b) => b.id === id), down);
+  // Debug only: the expanded pose (z 0 on the board, 1 expanded) and the
+  // hover waves (at time t ms), without animating.
+  window.__lobbyQrZoom = (z, waves = false, t = 0) => {
+    qr.zoom = qr.zoomTarget = z;
+    qr.waveAmp = waves ? 1 : 0;
+    poseWaves(t);
+    poseQr(qr.p);
+  };
   // Debug only: pose the QR card at progress p (0 hidden, 1 in place), and
   // render a frame to a data URL, for checking it without a visible pane
   // (POST the result to the dev server's /__shot to save it).
@@ -2309,6 +2481,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       window.removeEventListener('pointerup', onPointerUp);
       delete window.__lobbyButton;
       delete window.__lobbyQr;
+      delete window.__lobbyQrZoom;
       delete window.__lobbyCapture;
       delete window.__lobbyRoster;
       delete window.__lobbyAdd;
@@ -2318,6 +2491,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       disposeContent();
       qr.mat.map?.dispose();
       qr.mat.dispose();
+      for (const m of qr.waveMats) m.dispose();
       for (const m of slotMats.values()) {
         m.map?.dispose();
         m.dispose();

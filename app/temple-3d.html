@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en-NZ">
+<head>
+  <meta charset="utf-8" />
+  <!--
+    viewport-fit + user-scalable=no: the game surface is a phone (handoff:
+    "gameplay happens on the students' phones"), and a double-tap zoom in the
+    middle of a fork choice is a bad failure mode.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <title>Sky Path – 3D temple test</title>
+  <!-- Luke, 2026-09-21: lets a student who adds this to their phone's home
+       screen launch it with zero browser chrome — the only way to get a
+       true fullscreen (and, via orientation:"landscape" below, a real OS
+       orientation lock) on iOS Safari, which refuses both in an ordinary
+       tab no matter what JS does. No service worker on purpose: that would
+       risk serving a stale cached build after a deploy, and the plain
+       manifest + meta tags below get the standalone/fullscreen behaviour
+       without that risk — the page always loads fresh either way. -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="theme-color" content="#05070a" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <!-- Orbitron — Luke, 2026-09-20, for the abduction UI's team-name label
+       (see chrome.js's #abductTeamBox). Shipped as a local file
+       (public/fonts/orbitron-700.woff2) rather than fetched from Google
+       Fonts, so the game doesn't need internet access to render it (this
+       game runs on students' phones, often on school wifi/hotspots).
+       Sue Ellen Francisco — 2026-09-24, the plain-black handwriting font
+       for cardboard-background text (teacher's lobby interface and
+       elsewhere) — same local-file treatment, same reason. Everywhere
+       else in the app still uses system-ui on purpose. -->
+  <style>
+    @font-face {
+      font-family: 'Orbitron';
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url('/fonts/orbitron-700.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Sue Ellen Francisco';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url('/fonts/sue-ellen-francisco.woff2') format('woff2');
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/temple3d/main.jsx"></script>
+</body>
+</html>
