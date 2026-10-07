@@ -88,6 +88,9 @@ const SKY_PATH_N_FORKS = 6;
 // landing here again is obvious immediately instead of looking like success.
 const NO_SESSION_CODE = 'no-session';
 
+/** This device's name and look for a game, for rejoining it after a reload (PlayerJoin.jsx). */
+export const joinedKey = (code) => `skypath.joined.${code.toUpperCase()}`;
+
 /**
  * Reads who's currently present in a session's lobby channel WITHOUT this
  * device joining it — for Lobby.jsx's "Dev player" button, which needs to
@@ -172,6 +175,9 @@ export function useLobby(sessionCode) {
   // Same pattern again for the generic `game-event` relay (pickup claims,
   // abduction targeting) — see the handler in join().
   const gameEventHandlerRef = useRef(null);
+  // And for the projector's `report-state` request (GameRoom.jsx registers
+  // the live game's reportState).
+  const reportStateHandlerRef = useRef(null);
   // Abduction targeting, 2026-09-15 — the target menu lists players on
   // OTHER teams with "which island the player is currently on, updating
   // only once they have fully reached the island" (Luke). The channel is
@@ -211,6 +217,39 @@ export function useLobby(sessionCode) {
   // it was in when the handler was first registered.
   const myGroupIdRef = useRef(null);
 
+  // Per-team channel for movement pings (2026-10-07). Supabase Realtime
+  // counts a message once sent and once per device it's delivered to, with
+  // a per-second cap per plan (Free 100, Pro 500). On the one session-wide
+  // channel, every phone received every team's ~7-a-second walking pings:
+  // one walking player in a class of 25 was ~170 messages a second. So
+  // 'moving' pings go to `lobby-CODE-team-N` (the team, plus the projector),
+  // and only the rare discrete reports ('resting', 'departing', 'gone') stay
+  // on the main channel, where other teams still need them (abduction
+  // targeting's island table). Each report carries `seq`, rising per
+  // sender (seeded from the clock, so it keeps rising across a reload): two
+  // channels can deliver out of order, and a late 'moving' ping landing
+  // after a 'resting' would pull the rig back off its seat.
+  const teamChannelRef = useRef(null); // { ch, groupId, ready }
+  const playerStateListenerRef = useRef(null); // the shared handler, set in join()
+  const lastSeqRef = useRef(new Map()); // sender token -> highest seq seen
+  const seqRef = useRef(Date.now());
+  const ensureTeamChannel = useCallback(
+    (groupId) => {
+      if (teamChannelRef.current?.groupId === groupId) return;
+      if (teamChannelRef.current) supabase.removeChannel(teamChannelRef.current.ch);
+      teamChannelRef.current = null;
+      if (groupId == null || !hasRealSession) return;
+      const ch = supabase.channel(`lobby-${code}-team-${groupId}`);
+      const entry = { ch, groupId, ready: false };
+      ch.on('broadcast', { event: 'player-state' }, ({ payload }) => playerStateListenerRef.current?.(payload));
+      ch.subscribe((st) => {
+        if (st === 'SUBSCRIBED') entry.ready = true;
+      });
+      teamChannelRef.current = entry;
+    },
+    [code, hasRealSession],
+  );
+
   const transition = useCallback((phase, nextRound) => {
     roundStateRef.current = { phase, round: nextRound };
     setRoundPhase(phase);
@@ -233,6 +272,10 @@ export function useLobby(sessionCode) {
       groupId: p.groupId,
       characterKey: lookRef.current?.characterKey ?? null,
       colorHex: lookRef.current?.colorHex ?? null,
+      // The round this device is in, if any, so the teacher's lobby board
+      // can tell a player who is back but no longer in their round (a
+      // reloaded phone) from one still playing (LobbyBoard.jsx's outSet).
+      roundId: roundStateRef.current.round?.roundId ?? null,
     }),
     [],
   );
@@ -245,6 +288,22 @@ export function useLobby(sessionCode) {
   // Set when the teacher's game turns this device away (more than
   // sessionConfig.js's PLAYER_CAP players); see the `lobby-full` handler.
   const [full, setFull] = useState(false);
+  // Set when the teacher's series of rounds is over (every team member has
+  // guided): the victory scene is on the teacher's screen, and this device
+  // says so (App.jsx's RoundOver). Cleared by the next round start.
+  const [seriesEnded, setSeriesEnded] = useState(false);
+  // The teacher's board says this round is over (`round-over`): sent when a
+  // team's round ends because a runner dropped out, so teammates stop
+  // waiting for them (see teamComplete below), or when a dropped guide's
+  // round can't be restarted.
+  const [overRoundId, setOverRoundId] = useState(null);
+  // Set when this device's team has started a round without it (it was
+  // away when the round was planned, or is a newcomer not yet in a team's
+  // series): PlayerJoin.jsx says it'll play from the next round.
+  const [sittingOut, setSittingOut] = useState(false);
+  // Set when the teacher removes this player from the game (LobbyBoard.jsx's
+  // Remove): it leaves, forgets how to rejoin, and says so.
+  const [removed, setRemoved] = useState(false);
 
   const applyGroupAssignment = useCallback(
     (assignments) => {
@@ -253,16 +312,18 @@ export function useLobby(sessionCode) {
       // lobby board sends the teams and the round start close together, and
       // the game-started handler reads this ref.
       myGroupIdRef.current = assignments[token];
+      ensureTeamChannel(assignments[token]);
       const p = identityStore.setGroup(token, assignments[token]);
       setParticipant(p);
       channelRef.current?.track(trackPayload(p));
     },
-    [trackPayload],
+    [trackPayload, ensureTeamChannel],
   );
 
   useEffect(() => {
     const mine = participants.find((p) => p.token === token);
     myGroupIdRef.current = mine?.groupId ?? null;
+    if (mine?.groupId != null) ensureTeamChannel(mine.groupId);
     participantsRef.current = participants;
   }, [participants]);
 
@@ -319,6 +380,25 @@ export function useLobby(sessionCode) {
         setStatus('this game is full');
         ch.untrack();
       });
+      ch.on('broadcast', { event: 'series-ended' }, () => {
+        setSeriesEnded(true);
+        setSittingOut(false);
+      });
+      ch.on('broadcast', { event: 'removed' }, ({ payload }) => {
+        if (!(payload.tokens ?? []).includes(token)) return;
+        setRemoved(true);
+        setStatus('removed from this game');
+        try {
+          localStorage.removeItem(joinedKey(code));
+        } catch {
+          // Nothing saved to forget.
+        }
+        ch.untrack();
+      });
+      // The projector opened or reloaded mid-round and needs everyone's
+      // position: phones only report on a change (skyPath.js reportState).
+      ch.on('broadcast', { event: 'report-state' }, () => reportStateHandlerRef.current?.());
+      ch.on('broadcast', { event: 'round-over' }, ({ payload }) => setOverRoundId(payload.roundId));
       ch.on('broadcast', { event: 'groups-updated' }, ({ payload }) => {
         applyGroupAssignment(payload.assignments);
       });
@@ -333,8 +413,18 @@ export function useLobby(sessionCode) {
         // By name first: the lobby board sends teams and the round start
         // close together, and the group alone could still be out of date.
         const named = payload.guideToken === token || (payload.roster ?? []).includes(token);
-        if (!named && payload.groupId !== myGroupIdRef.current) return; // addressed to a different group
+        if (!named) {
+          // A round start always names its runners now (roundStart.js), so
+          // one for this device's own team that leaves it out means it sits
+          // this round out; only a start with no roster goes by group alone.
+          const mine = payload.groupId === myGroupIdRef.current;
+          if (mine && payload.roster && roundStateRef.current.phase !== 'playing') setSittingOut(true);
+          if (payload.roster || !mine) return;
+        }
         myGroupIdRef.current = payload.groupId;
+        ensureTeamChannel(payload.groupId);
+        setSeriesEnded(false);
+        setSittingOut(false);
         setRoundResultsByToken({}); // fresh round, fresh scoreboard — see this state's own comment above
         transition('playing', {
           roundId: payload.roundId,
@@ -411,7 +501,13 @@ export function useLobby(sessionCode) {
         if (payload.token !== token) return;
         forkChoiceHandlerRef.current?.(payload.forkIndex, payload.side);
       });
-      ch.on('broadcast', { event: 'player-state' }, ({ payload }) => {
+      // One handler for player-state from either channel (see teamChannelRef).
+      const onPlayerState = (payload) => {
+        if (payload.seq != null) {
+          const last = lastSeqRef.current.get(payload.token);
+          if (last != null && payload.seq <= last) return; // overtaken by a later report
+          lastSeqRef.current.set(payload.token, payload.seq);
+        }
         // Session-wide island table for abduction targeting — see islandsRef.
         // Only a 'resting' report moves someone; 'departing'/'moving' leave
         // them on the island they left.
@@ -435,7 +531,9 @@ export function useLobby(sessionCode) {
         const sender = participantsRef.current.find((p) => p.token === payload.token);
         if (!sender || sender.groupId !== myGroupIdRef.current || myGroupIdRef.current === null) return;
         playerStateHandlerRef.current?.(payload.token, payload);
-      });
+      };
+      playerStateListenerRef.current = onPlayerState;
+      ch.on('broadcast', { event: 'player-state' }, ({ payload }) => onPlayerState(payload));
       ch.on('broadcast', { event: 'round-ended' }, ({ payload }) => {
         // Anyone whose own round has ended (reached the temple, or fell
         // without a 'gone' having arrived) is no longer an abduction target
@@ -475,8 +573,16 @@ export function useLobby(sessionCode) {
       });
       channelRef.current = ch;
     },
-    [code, applyGroupAssignment, trackPayload, transition],
+    [code, applyGroupAssignment, trackPayload, transition, ensureTeamChannel],
   );
+
+  // Presence carries the current round (see trackPayload), so re-announce it
+  // whenever this device moves into or out of a round.
+  const roundIdNow = round?.roundId ?? null;
+  useEffect(() => {
+    if (!joined) return;
+    channelRef.current?.track(trackPayload(identityStore.getParticipant(token)));
+  }, [roundIdNow, joined, trackPayload]);
 
   const addPoint = useCallback(() => {
     const p = identityStore.addScore(token, 1);
@@ -500,7 +606,17 @@ export function useLobby(sessionCode) {
 
   /** Reports THIS device's own resting position (see skyPath.js's notifyPlayerState) so teammates can show a real avatar for it. */
   const sendPlayerState = useCallback((state) => {
-    channelRef.current?.send({ type: 'broadcast', event: 'player-state', payload: { token, ...state } });
+    const payload = { token, seq: ++seqRef.current, ...state };
+    // Movement pings to the team's own channel once it's up (see
+    // teamChannelRef); everything else, and pings before then, to the main one.
+    const team = teamChannelRef.current;
+    const ch = state.phase === 'moving' && team?.ready ? team.ch : channelRef.current;
+    ch?.send({ type: 'broadcast', event: 'player-state', payload });
+  }, []);
+
+  /** Registers the handler that re-sends this device's state when the projector asks (see `report-state`). */
+  const onReportStateRequested = useCallback((handler) => {
+    reportStateHandlerRef.current = handler;
   }, []);
 
   /** Registers the handler for relayed in-round game events (see the `game-event` handler in join() for the kinds and their routing). */
@@ -595,7 +711,7 @@ export function useLobby(sessionCode) {
   // above. Checked here, not inside the channel handler, so it stays
   // reactive to `round` changing too (e.g. this device's own `round.roster`
   // only exists once its `game-started` has actually landed).
-  const teamComplete = !!round?.roster?.length && round.roster.every((tok) => tok in roundResultsByToken);
+  const teamComplete = !!round?.roster?.length && (round.roster.every((tok) => tok in roundResultsByToken) || overRoundId === round.roundId);
 
   return {
     token,
@@ -606,6 +722,9 @@ export function useLobby(sessionCode) {
     participants,
     myGroupId,
     full,
+    seriesEnded,
+    sittingOut,
+    removed,
     look,
     roundPhase,
     round,
@@ -619,6 +738,7 @@ export function useLobby(sessionCode) {
     onPlayerStateReceived,
     sendGameEvent,
     onGameEventReceived,
+    onReportStateRequested,
     getAbductionTargets,
     getDisplayName,
     getCharacter,

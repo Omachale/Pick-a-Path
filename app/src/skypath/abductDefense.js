@@ -522,6 +522,7 @@ export function createAbductDefense(stageEl) {
   let onResistCb = null;
   let onTimeoutCb = null;
   let onWordMatchedCb = null;
+  let onTextChangeCb = null; // the projector's typing overlay (skyPath.js)
   let resolved = false;
 
   function renderText() {
@@ -541,6 +542,7 @@ export function createAbductDefense(stageEl) {
     else if (name === 'SPACE') text += ' ';
     else text += name;
     renderText();
+    onTextChangeCb?.(text);
     if (text.trim().toUpperCase() === TARGET_WORD) {
       resolved = true;
       rig.stopCountdown();
@@ -557,24 +559,26 @@ export function createAbductDefense(stageEl) {
 
   return {
     /** Opens the screen, lowers the panel, then starts the countdown once it's down. `avatarSrc` is the target player's own character art. */
-    open({ avatarSrc, durationMs = DEFAULT_SHIP_DURATION_MS, onResist, onTimeout, onWordMatched }) {
+    open({ avatarSrc, durationMs = DEFAULT_SHIP_DURATION_MS, onResist, onTimeout, onWordMatched, onTextChange, onCountdownStart }) {
       text = '';
       resolved = false;
       onResistCb = onResist;
       onTimeoutCb = onTimeout;
       onWordMatchedCb = onWordMatched;
+      onTextChangeCb = onTextChange;
       rig.setAvatarSrc(avatarSrc);
       rig.resetShip();
       stageEl.style.display = 'block';
       rig.measure();
       renderText();
-      rig.lower(() =>
+      rig.lower(() => {
+        onCountdownStart?.(durationMs);
         rig.startCountdown(durationMs, () => {
           if (resolved) return;
           resolved = true;
           rig.liftAway(() => onTimeoutCb?.());
-        }),
-      );
+        });
+      });
     },
     /** Hides immediately, no lift-away animation — for a restart/reset while the screen happens to be open, not the normal resist/timeout close. */
     forceClose() {

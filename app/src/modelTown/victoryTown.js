@@ -37,7 +37,25 @@ import { buildTeamPodium, PODIUM, SHARP_LAYER } from './teamPodium.js';
 import { createFireworks } from './fireworks.js';
 import { buildCyberCity, SMOG } from './cyberCity.js';
 import { makeModels } from './models.js';
-import { CHARACTERS, PALETTE } from '../skypath/characters.js';
+
+/**
+ * Mounts the scene into `container` (which it fills) for the given teams,
+ * plays the reveal, and returns { dispose }. Used by the teacher's lobby
+ * board at the end of a series of rounds (LobbyBoard.jsx), and by the test
+ * page (model-town.html, testPage.js) with made-up teams.
+ *
+ * teams: up to 4, each { seats: [{ name, characterKey, colorHex, breakdown }] }
+ *   (see teamPodium.js). demo: the test page's extras (buttons, press D to
+ *   show them; window.__ debug hooks).
+ */
+export function mountVictoryTown(container, { teams: TEAM_DATA, demo = false } = {}) {
+const VW = () => container.clientWidth || innerWidth;
+const VH = () => container.clientHeight || innerHeight;
+const listeners = [];
+const listen = (target, type, fn) => {
+  target.addEventListener(type, fn);
+  listeners.push([target, type, fn]);
+};
 
 // ------------------------------------------------------------- layout numbers
 // Gathered here so the arrangement can be changed in one place.
@@ -70,7 +88,8 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
-document.body.appendChild(renderer.domElement);
+container.appendChild(renderer.domElement);
+renderer.domElement.style.display = 'block';
 
 const scene = new THREE.Scene();
 // A clear colour rather than scene.background: a background forces a clear
@@ -423,39 +442,9 @@ const puffs = Array.from({ length: 30 }, () => {
 });
 let puffTimer = 0;
 
-// ---------------------------------------------------------------- demo teams
-// Made-up teams for the test page: 3, 4, 5 and 6 people (each including a
-// guide), so every team size is on show. Names keep to letters and 10 at
-// most, like real ones.
-const DEMO_TEAMS = (() => {
-  const names = ['Zara', 'Milo', 'Indy', 'Bea', 'Sam', 'Kit', 'Hana', 'Omar', 'Lucia', 'Kenji', 'Amara', 'Felix', 'Priya', 'Tomas', 'Yuki', 'Noor', 'Mateo', 'Ines'];
-  let n = 0;
-  const pr = mulberry32(3);
-  const person = () => {
-    const k = n++;
-    return {
-      name: names[k % names.length],
-      characterKey: CHARACTERS[(k * 5) % CHARACTERS.length].key,
-      colorHex: PALETTE[k % PALETTE.length].hex,
-    };
-  };
-  return [3, 4, 5, 6].map((size) => ({
-    players: Array.from({ length: size - 1 }, () => ({
-      ...person(),
-      result: {
-        correctCount: 2 + Math.floor(pr() * 5),
-        itemsCollected: pr() < 0.5 ? 1 : 0,
-        jetpackKeptAtFinish: pr() < 0.3,
-        resistCount: Math.floor(pr() * 2),
-      },
-    })),
-    guide: person(),
-  }));
-})();
-
 // ----------------------------------------------------------------- team arc
 const teamSpots = []; // world positions of each platform's centre, for the camera
-let teamCount = 4;
+let teamCount = Math.min(4, TEAM_DATA.length);
 const stage = new THREE.Group();
 scene.add(stage);
 // The team's total score, on a card placard standing on the stage in front
@@ -570,7 +559,7 @@ function buildStage() {
     g.add(sign.mesh);
     const team = { g, riser, sign, baseY: g.position.y, basePos: g.position.clone(), baseRot: g.rotation.y, podium: null };
     teams.push(team);
-    buildTeamPodium(DEMO_TEAMS[i]).then((podium) => {
+    buildTeamPodium(TEAM_DATA[i]).then((podium) => {
       if (forBuild !== stageBuild) return; // the team count changed meanwhile
       podium.group.scale.setScalar(A.platform.w / PODIUM.baseWidth);
       podium.pose(-1, 0); // hidden and flat until its turn
@@ -725,14 +714,25 @@ controls.target.copy(cam.look);
 // ------------------------------------------------------------------ controls
 // The test controls. Hidden (Luke: remove "the values in the top left"),
 // so the page shows only the scene; press D to show or hide them.
-const panel = document.getElementById('panel');
-panel.style.display = 'none';
-addEventListener('keydown', (e) => {
-  if (e.key === 'd' || e.key === 'D') panel.style.display = panel.style.display === 'none' ? '' : 'none';
-});
+const panel = document.createElement('div');
+panel.style.cssText = 'position:absolute;top:8px;left:8px;z-index:5;display:none;flex-wrap:wrap;gap:4px;max-width:70%';
+panel.className = 'mt-panel';
+if (!document.getElementById('mt-panel-css')) {
+  const st = document.createElement('style');
+  st.id = 'mt-panel-css';
+  st.textContent = '.mt-panel button.on { background: #c9813a !important; color: #1d1712 !important; }';
+  document.head.appendChild(st);
+}
+if (demo) {
+  container.appendChild(panel);
+  listen(window, 'keydown', (e) => {
+    if (e.key === 'd' || e.key === 'D') panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+  });
+}
 function button(text, onClick) {
   const b = document.createElement('button');
   b.textContent = text;
+  b.style.cssText = 'padding:4px 9px;border:0;border-radius:4px;background:rgba(20,14,8,0.8);color:#f3e6cf;cursor:pointer;font:13px system-ui,sans-serif';
   b.onclick = () => onClick(b);
   panel.appendChild(b);
   return b;
@@ -775,7 +775,7 @@ function rebuildViewButtons() {
   setActive(ov);
 }
 button(`Teams: ${teamCount}`, (b) => {
-  teamCount = (teamCount % 4) + 1;
+  teamCount = (teamCount % Math.min(4, TEAM_DATA.length)) + 1;
   b.textContent = `Teams: ${teamCount}`;
   buildStage();
   rebuildViewButtons();
@@ -1052,8 +1052,8 @@ function syncSharpCam() {
 }
 let tiltOn = true;
 function sizeTilt() {
-  const w = innerWidth * renderer.getPixelRatio();
-  const h = innerHeight * renderer.getPixelRatio();
+  const w = VW() * renderer.getPixelRatio();
+  const h = VH() * renderer.getPixelRatio();
   for (const p of tiltPasses) p.uniforms.dir.value.set(p.axis === 'x' ? 1 / w : 0, p.axis === 'y' ? 1 / h : 0);
 }
 // The band follows the camera's point of interest, projected to the screen.
@@ -1083,15 +1083,15 @@ rebuildViewButtons();
 
 // --------------------------------------------------------------------- loop
 function resize() {
-  renderer.setSize(innerWidth, innerHeight);
+  renderer.setSize(VW(), VH());
   composer.setPixelRatio(renderer.getPixelRatio());
-  composer.setSize(innerWidth, innerHeight);
-  bloom.resolution.set(innerWidth, innerHeight);
+  composer.setSize(VW(), VH());
+  bloom.resolution.set(VW(), VH());
   sizeTilt();
-  camera.aspect = innerWidth / innerHeight;
+  camera.aspect = VW() / VH();
   camera.updateProjectionMatrix();
 }
-addEventListener('resize', resize);
+listen(window, 'resize', resize);
 resize();
 
 let trainDist = 0;
@@ -1160,10 +1160,11 @@ function frame() {
     camera.lookAt(cam.look);
   }
   render();
-  requestAnimationFrame(frame);
+  rafId = requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+let rafId = requestAnimationFrame(frame);
 
+if (demo) {
 // Debug: a frame as a data URL (POST to the dev server's /__shot to save).
 window.__capture = () => {
   render();
@@ -1202,3 +1203,18 @@ window.__advance = (s) => {
     scene.updateMatrixWorld();
   }
 };
+}
+
+return {
+  dispose() {
+    cancelAnimationFrame(rafId);
+    for (const [target, type, fn] of listeners) target.removeEventListener(type, fn);
+    controls.dispose();
+    composer.dispose?.();
+    renderer.dispose();
+    renderer.forceContextLoss();
+    renderer.domElement.remove();
+    panel.remove();
+  },
+};
+}

@@ -26,6 +26,26 @@ function shotPlugin() {
           res.end(name);
         });
       });
+      // Dev-only, likewise: POST JSON to /__save?name=NAME to write
+      // recordings/NAME.json — movement recorded for the bots
+      // (src/dev/recordTracks.js) and whole sessions recorded for replaying
+      // into the projector (src/dev/sessionRecorder.js).
+      server.middlewares.use('/__save', (req, res) => {
+        if (req.method !== 'POST') return res.end('POST only');
+        const name = new URL(req.url, 'http://x').searchParams.get('name') ?? '';
+        if (!/^[a-z0-9_-]{1,80}$/i.test(name)) {
+          res.statusCode = 400;
+          return res.end('bad name');
+        }
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          mkdirSync('recordings', { recursive: true });
+          const file = `recordings/${name}.json`;
+          writeFileSync(file, body);
+          res.end(file);
+        });
+      });
     },
   };
 }

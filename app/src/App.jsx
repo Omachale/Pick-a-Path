@@ -29,7 +29,6 @@ import { useRef, useState } from 'react';
 import { useLobby } from './lobby/useLobby.js';
 import Lobby from './lobby/Lobby.jsx';
 import GameRoom from './lobby/GameRoom.jsx';
-import RoundResults from './lobby/RoundResults.jsx';
 import VictoryStage from './victory/VictoryStage.jsx';
 import SkyPath from './skypath/SkyPath.jsx';
 import LavaCavern from './cavern/LavaCavern.jsx';
@@ -37,6 +36,9 @@ import TeacherDashboard from './lobby/TeacherDashboard.jsx';
 import KeyboardTestHarness from './keyboard/KeyboardTestHarness.jsx';
 import LobbyBoard from './lobby/LobbyBoard.jsx';
 import PlayerJoin from './lobby/PlayerJoin.jsx';
+import RoundOver from './lobby/RoundOver.jsx';
+import RunScore from './lobby/RunScore.jsx';
+import Projector from './lobby/Projector.jsx';
 import { TEACHER_SIGN_IN } from './lobby/sessionConfig.js';
 
 const params = new URLSearchParams(location.search);
@@ -132,6 +134,9 @@ export default function App() {
   if (params.get('victory') === '1') return <SoloVictoryStage />;
   if (params.get('solo') === '1') return <SoloSkyPath />;
   if (params.get('debugKeyboard') === '1') return <KeyboardTestHarness />;
+  // The projector: the public view on the big screen, in its own window on
+  // the teacher's PC (lobby/Projector.jsx).
+  if (params.has('projector')) return <Projector code={params.get('projector')} />;
   // The teacher's lobby board is the default landing page (Luke, 2026-10-05:
   // "this Lobby... will become the default landing"). Players arrive on the
   // QR card's `?join=CODE` link and get the player screens below. `?player=1`
@@ -172,18 +177,19 @@ export default function App() {
   // otherwise just sit on the live `GameRoom` canvas forever — swaps to the
   // team-wide victory screen. Checked before the 'playing'/'failed' branch
   // below so it pre-empts both that live canvas (the guide's case) and an
-  // individual player's own already-shown `RoundResults` (the case where
+  // individual player's own already-shown `RunScore` (the case where
   // this device finished before its teammates and was waiting).
-  if (lobby.teamComplete && lobby.round) {
-    return (
-      <VictoryStage
-        round={lobby.round}
-        roundResultsByToken={lobby.roundResultsByToken}
-        getDisplayName={lobby.getDisplayName}
-        getCharacter={lobby.getCharacter}
-        onBackToLobby={lobby.leaveGame}
-      />
-    );
+  //
+  // 2026-10-06: the victory scene moved to the teacher's screen, once, at the
+  // end of the whole series of rounds (see lobby/series.js); a phone now
+  // shows RoundOver here instead: waiting for the next round, or, after the
+  // last one, "look at the big screen". (VictoryStage stays for `?victory=1`.)
+  // Removed by the teacher (LobbyBoard.jsx's Remove): out of any round at
+  // once, onto the join screen's "you've been removed".
+  if (lobby.removed) return <PlayerJoin lobby={lobby} />;
+
+  if ((lobby.teamComplete && lobby.round) || lobby.seriesEnded) {
+    return <RoundOver seriesEnded={lobby.seriesEnded} result={lobby.round?.result ?? null} />;
   }
 
   const failed = lobby.roundPhase === 'results' && lobby.round?.result && !lobby.round.result.success;
@@ -201,6 +207,7 @@ export default function App() {
         onPlayerStateReceived={lobby.onPlayerStateReceived}
         sendGameEvent={lobby.sendGameEvent}
         onGameEventReceived={lobby.onGameEventReceived}
+        onReportStateRequested={lobby.onReportStateRequested}
         getAbductionTargets={lobby.getAbductionTargets}
         getDisplayName={lobby.getDisplayName}
         onRoundEnd={lobby.reportRoundEnd}
@@ -208,15 +215,14 @@ export default function App() {
     );
   }
 
+  // Reached the temple, teammates still running: this player's score and
+  // who they're waiting for (RunScore.jsx; Luke, 2026-10-06). Replaced the
+  // old RoundResults screen, whose "Back to lobby" button no longer fits a
+  // series of rounds the teacher runs. (A player who fell is still watching,
+  // above; they see their score once the team is done, in RoundOver.)
   if (lobby.roundPhase === 'results' && lobby.round) {
-    return (
-      <RoundResults
-        round={lobby.round}
-        participants={lobby.participants}
-        myToken={lobby.token}
-        onBackToLobby={lobby.leaveGame}
-      />
-    );
+    const stillRunning = (lobby.round.roster ?? []).filter((tok) => !(tok in lobby.roundResultsByToken)).map((tok) => lobby.getDisplayName(tok) ?? 'a teammate');
+    return <RunScore result={lobby.round.result} stillRunning={stillRunning} />;
   }
 
   // A player arriving from the teacher's QR code: the join screen, where they

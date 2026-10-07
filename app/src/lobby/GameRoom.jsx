@@ -50,6 +50,7 @@ export default function GameRoom({
   onPlayerStateReceived,
   sendGameEvent,
   onGameEventReceived,
+  onReportStateRequested,
   getAbductionTargets,
   getDisplayName,
   onRoundEnd,
@@ -77,6 +78,13 @@ export default function GameRoom({
     });
     return () => onGameEventReceived(null);
   }, [onGameEventReceived]);
+
+  // The projector asking where everyone is (useLobby.js's `report-state`).
+  useEffect(() => {
+    if (!onReportStateRequested) return;
+    onReportStateRequested(() => gameRef.current?.reportState());
+    return () => onReportStateRequested(null);
+  }, [onReportStateRequested]);
 
   useEffect(() => {
     if (failed) gameRef.current?.becomeSpectator();

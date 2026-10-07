@@ -143,7 +143,8 @@ async function tagMesh(text, glow, height) {
 }
 
 /**
- * team: { players: [{name, characterKey, colorHex, result}], guide: {name, characterKey, colorHex} }
+ * team: { seats: [{name, characterKey, colorHex, breakdown}] }, or one round's
+ *   { players: [{name, characterKey, colorHex, result}], guide: {name, characterKey, colorHex} }
  * Resolves to the team's podium: `group` in victory-stage units (front
  * facing +z, base at y 0), `teamScore` (the average of every seat's total,
  * guide included), `stagesMs` (how long its score stages take: only the
@@ -158,8 +159,10 @@ export async function buildTeamPodium(team) {
   base.rotation.y = Math.PI / 2; // as victoryStage.js: long axis left-to-right
   group.add(base);
 
-  const people = [...team.players, team.guide];
-  const breakdowns = seatBreakdowns(team);
+  // Either seats with their breakdowns already worked out (a series of
+  // rounds, see lobby/series.js), or one round's runners plus a guide.
+  const people = team.seats ?? [...team.players, team.guide];
+  const breakdowns = team.seats ? team.seats.map((x) => x.breakdown) : seatBreakdowns(team);
   const n = people.length;
   const H = PODIUM.avatarHeight;
   const ringGeo = new THREE.RingGeometry(T.footprint - 0.006, T.footprint + 0.006, 48);

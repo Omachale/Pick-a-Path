@@ -6,8 +6,22 @@
  */
 import { supabase } from '../supabase.js';
 
-export function openTeacherSession(code, { onPlayers }) {
+export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {}, onRoundsChanged, roundIsOver, seriesIsOver, victory }) {
   const ch = supabase.channel(`lobby-${code}`);
+  // The latest round started for each team (its whole game-started
+  // payload), for the projector (Projector.jsx): opened or reloaded
+  // mid-round, it asks (`projector-hello`), and gets them back as
+  // `rounds-now`, which only it acts on. Re-sending `game-started` itself
+  // would restart every phone's round. Kept by the page across reloads
+  // (`rounds` in, `onRoundsChanged` out); `roundIsOver(roundId)` marks the
+  // ones already finished, and `seriesIsOver()` says whether the whole series
+  // is; `victory()` gives the victory scene's teams once it is.
+  const latest = new Map(Object.entries(rounds).map(([g, r]) => [Number(g), r]));
+  const sendRoundsNow = () => {
+    const list = [...latest.values()].map((r) => ({ ...r, over: !!roundIsOver?.(r.roundId) }));
+    ch.send({ type: 'broadcast', event: 'rounds-now', payload: { rounds: list, seriesEnded: !!seriesIsOver?.(), victory: victory?.() ?? null } });
+  };
+  ch.on('broadcast', { event: 'projector-hello' }, sendRoundsNow);
   ch.on('presence', { event: 'sync' }, () => {
     // Newest meta per key, then de-dup by token: a reconnecting player can
     // transiently double up in presence state before the old entry times
@@ -22,9 +36,18 @@ export function openTeacherSession(code, { onPlayers }) {
     }
     onPlayers(players);
   });
-  ch.subscribe();
+  // Each runner's result as their round ends (useLobby.js's reportRoundEnd),
+  // for the lobby board's series of rounds (series.js).
+  ch.on('broadcast', { event: 'round-ended' }, ({ payload }) => onRoundEnded?.(payload));
+  // Sent on connecting too: a projector opened while this page was
+  // reloading asked before anyone was listening.
+  ch.subscribe((st) => st === 'SUBSCRIBED' && sendRoundsNow());
   return {
     send(event, payload) {
+      if (event === 'game-started') {
+        latest.set(payload.groupId, payload);
+        onRoundsChanged?.(Object.fromEntries(latest));
+      }
       ch.send({ type: 'broadcast', event, payload });
     },
     close() {

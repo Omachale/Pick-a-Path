@@ -2004,3 +2004,331 @@ object (metres, real-room scale). Buttons: Overview / Team N (smooth pans) / Fre
   colour) before drawing the sharp layer, so placards stay correctly hidden behind
   anything in front of them; name tags still skip the depth test. Lettering thickened by
   stroking each glyph in its own colour (the font has no bold), name text 64->76 px.
+
+### Built 2026-10-06: victory scene wired into the game, at the end of a series of rounds
+Luke: "wire it into the game. Make sure it only happens at the end of each round, after
+each player has had a chance to be a guide."
+- **Series of rounds** (`app/src/lobby/series.js`, pure): the first Start fixes the teams
+  for the series; each Start plays the next round for every team that still has someone
+  to guide (guide rotation now taken from the series, so it survives a teacher reload).
+  A team of N plays N rounds; smaller teams finish early and wait (Paper Planes gap).
+  Start while runners are still out asks to confirm. The series is saved per game in
+  localStorage (`skypath.board.series.CODE`), as is the last seen name/look of everyone
+  who joined (`skypath.board.people.CODE`).
+- **Scoring:** runner = own run; guide = average of that round's runners per category;
+  each person's podium breakdown = their average per round; team score = average of its
+  people (= per-run average incl. guide).
+- **Teacher's screen:** the teacher's session now hears `round-ended`; when every team's
+  last round is in, it sends `series-ended` and the model town (`modelTown/victoryTown.js`
+  `mountVictoryTown`, via `lobby/VictoryTown.jsx`) takes over the screen with the real
+  names, avatars, colours and scores. "Back to lobby" closes it and clears the series. A
+  reload mid-victory shows it again.
+- **Phones:** the old per-round VictoryStage is gone from the player flow; after a round
+  they show `RoundOver.jsx` ("Round complete! Waiting for your teacher...") and after the
+  last round "Look at the big screen to see who won." (`?victory=1` dev view kept.)
+- **Model town refactor:** `main.js` -> `victoryTown.js` exporting `mountVictoryTown(container,
+  {teams, demo})` (returns dispose); the test page is `modelTown/testPage.js`.
+  teamPodium.js takes `{seats:[{name, characterKey, colorHex, breakdown}]}`.
+- **Bots** (`app/src/dev/bots.js`, dev only, not imported by the app): `startBots(code, n)`
+  joins n bot players to a game; as runners they report a random result 1-2.5 s after a
+  round starts. Tested: 6 bots, 2 teams of 3 -> 3 rounds each, every member guided once,
+  all bots got series-ended, victory scene showed with their names/looks, Back to lobby
+  worked. Debug: board `__lobbyPress('start')`.
+- **Not tested:** a real phone through a whole series (RoundOver screen); the victory
+  framing on a non-16:9 screen (it's framed for widescreen; a portrait window crops it).
+- **Open:** board rearranged mid-series is ignored until the next series (no warning);
+  a player who leaves mid-series still gets a guide turn scheduled (their round would
+  have no guide); no "end series early" button.
+- Series arrivals/departures 2026-10-06 (Luke: "Once a series has started, lock teams,
+  except for a new player arriving. They can be added to a team, and will start at the
+  beginning of the next run, and will be added to the roster to act as Guide. If a player
+  leaves, move them to the last position as a Guide, and if they haven't rejoined by
+  then, remove them from the team, and treat the team's score as if they were never
+  there"):
+  - Board lock (`lobbyBoard.js` `setLocked`): series players can't be dragged; Shuffle and
+    all dials do nothing; each shows a message. A locked player who drops out stays
+    greyed in place (not removed after 60 s), so they return to their own team.
+    Newcomers can be placed freely; at the next Start they join that team
+    (`series.js addMembers`) as runners and get a guide turn (team plays one more round).
+  - Guides are now picked by the series (`planRound`) from members who are connected and
+    haven't guided; away members sit out and their guide turn falls to the end. A
+    runner who has left doesn't hold a round open.
+  - "Left" = away for more than 60 s (`LEFT_AFTER_MS`; DEV override localStorage
+    `dev.leftAfterMs`), so a sleeping phone or a teacher reload's first presence sync
+    doesn't count. When only left members remain to guide, `settleAbsent` removes them
+    from the team and from every past round (roster and results), so guide averages and
+    the team score exclude them. Someone who has already guided and then leaves stays,
+    with the rounds they played.
+  - `startRounds` takes an optional plan (groupId -> guide + roster). Debug:
+    `__lobbyPress(id)` now runs the real button code; `__lobbyTagAt(name)` gives a tag's
+    screen position for sending real pointer events. Bots: `leave(name)`, `rejoin(name)`,
+    `startBots(code, n, {offset})` for late arrivals.
+  - Tested with bots: Milo left before guiding -> sat out rounds 2-3 -> removed after round
+    3 and taken out of round 1's scores -> series ended; Hana arrived late -> joined Team
+    One and guided round 2; teacher reload showed the finished series again; Shuffle and a
+    real drag on a locked player refused with the message; a newcomer (Omar) dragged to
+    Team Two joined it at the next round.
+  - NOT tested: a player rejoining after being away (code path: present again, so
+    eligible to guide); real phones.
+
+- Built 2026-10-06: score screen while waiting for teammates (`lobby/RunScore.jsx`). Luke:
+  "a temporary screen for when a player finishes a run, and is waiting for the rest of
+  their team to finish. Show individual players their score, with a simple breakdown...
+  without separating the sections by time."
+  - A runner who reaches the temple sees: correct answers, item, jetpack bonus, abductions
+    resisted (all at once, zeros dimmed), their total, and "Waiting for Zara to finish...".
+    Points from `scoring.js`, the same as the victory scene's.
+  - Once the team is done, `RoundOver.jsx` keeps the same card under "Round complete!"
+    (fallen players see theirs here too; the guide sees no card).
+  - Replaced `RoundResults.jsx` (deleted: its "Back to lobby" button doesn't fit a
+    teacher-run series). A player who falls still watches in-game, as before.
+  - Tested with a real join tab + bots: guide in round 1 saw "Round complete!" with no
+    card; runner in round 2 (finish faked with a round-ended broadcast) saw the score and
+    "Waiting for Zara", then the card under "Round complete!" once Zara finished.
+  - Known gap: if a runner leaves mid-run, the teacher's series closes the round after
+    the 60 s grace, but phones aren't told, so their teammates' screens keep saying
+    "Waiting for X" until the next Start.
+
+- Built 2026-10-06: dropping out of a round. Luke: "it's probably more important to keep
+  the game flowing for others relatively smoothly, and let players reconnect later within
+  a reasonable timeframe, restarting their round as guide later in the queue and/or
+  averaging their score over fewer rounds."
+  - Phones put their current `roundId` in presence (useLobby.js). The board (LobbyBoard.jsx
+    `outSet`) counts a guide/runner "out" of their round once gone, or back but not in it
+    (reloaded), for DROPPED_AFTER_MS = 30 s (DEV override `dev.droppedAfterMs`).
+  - Runner out: stops holding the round open; no result, so that round is left out of
+    their average. Teacher broadcasts `round-over` {roundId} for every finished team
+    round, so teammates' phones stop "Waiting for X".
+  - Guide out while runners are still going: the round is thrown away (`discardRound`)
+    and the team restarts at once with another unguided guide; the dropped guide keeps
+    their turn (`planRound` `notGuide`) and runs meanwhile if back. Nobody to restart
+    with: `round-over` frees the runners, and the teacher's next Start picks up.
+  - A reloaded phone rejoins by itself with the same name and look (PlayerJoin.jsx,
+    localStorage `skypath.joined.CODE`). A device whose team starts a round without it
+    shows "you'll join in from the next one" (`sittingOut`). A round start that names a
+    roster no longer pulls in unnamed group members.
+  - Bots: presence carries roundId; `reload(name)`, `hold(name)`.
+  - Tested with bots + one real join tab: guide reload -> round restarted with Milo
+    guiding, Zara running; runner reload -> round finished without them and the waiting
+    phone moved to "Round complete!" (twice, 6-11 s with a 6 s test grace); the guide's
+    phone likewise; reloading the real tab mid-round -> rejoined by itself, round went on,
+    series ended, its dropped round left out of its average. One early run: the phone
+    hadn't moved on 13 s after the drop (the teacher had sent round-over; a resend worked);
+    not reproduced in the later runs.
+  - NOT tested: the sitting-out message; real phones; production timings (30 s).
+
+- Built 2026-10-06: teacher's controls during a series (Luke agreed to: status on the name
+  tags; End round, End series, Remove as small cardboard buttons with confirmation; no
+  time limit — "Players can't get too separated as they need all players to complete one
+  island before the guide can help them move forward").
+  - Badges (`lobbyBoard.js` setStatuses/placeBadge, a child mesh of each tag): Guiding /
+    Running / ✓ score / Dropped / Next round; after the round, the guide shows "Guided ✓
+    N" (runners' average, to the half point); a round the teacher ended shows "Ended
+    early" for those still running. Computed in LobbyBoard.jsx `showStatuses` on every
+    checkProgress. Plain system font on coloured pills: a first look, open to restyling.
+  - Buttons: End round and End series right of the mode dial, Remove far left of it
+    (58 px, labelCap 16, per-button `labelCap`); the game code text moved left of the dial
+    (186, 440) to make room.
+  - End round (`closeRounds`): unfinished rounds close; stragglers get no score for it,
+    later reports are ignored. End series (`endSeries`): that, then the victory scene;
+    members with no rounds aren't on the podium, a team with none is left out; if nobody
+    played at all, a message instead.
+  - Remove: press Remove, click a tag (Remove again or any other click cancels), confirm.
+    Taken out as if never there (`removeMember`); a removed guide mid-round -> their
+    team's round restarts with another guide. The token is kept in
+    `skypath.board.removed.CODE`, filtered out of presence, and sent `removed`; the phone
+    leaves, forgets its auto-rejoin, and shows "Your teacher has removed you from this
+    game" (also after joining again under another name from that device).
+  - Tested with bots (in a separate tab, so teacher reloads don't kill them) + one real
+    join tab: badges in a live round; End round; Remove a guide mid-round (restart, their
+    earlier score gone); Remove a real player (message, reload, rejoin refused); End series
+    -> victory with only those who played, bots received series-ended.
+  - NOT tested: real phones; the badges' look at classroom projector size.
+
+- Built 2026-10-07: role note at the start of each round. Luke: "For the guide, it should
+  say 'You are the guide. Read the word to your team to guide them to safety.' For the
+  players: '[Name] is the guide. Listen to them and choose the path with the correct
+  word.' ... a note written in cardboard that comes onto the screen from the right and
+  leaves once clicked on."
+  - `#roleNote` in chrome.js: a hand-cut (clip-path) piece of cardboard-panel.png, cropped
+    below the sign's string holes, written in Sue Ellen Francisco like #paperMessage, with
+    a small "tap to close". Slides in from the right to the centre, tilted -2°; a tap
+    sends it back out. showRoleNote()/hideRoleNote() in skyPath.js, called at the end of
+    finishCharacterSelect (so once per round, guide and players; not Watch mode), 900 ms
+    late so it arrives after the scene/character screen. Text fitted like the paper
+    message.
+  - Guide's name from getDisplayName(guideToken), the lookup the "[Guide] is helping"
+    defence message uses; without one (solo tests) players get "Listen to your guide
+    and choose the path with the correct word."
+  - Tested in ?solo=1 as guide and player at phone landscape size: shows, text fits,
+    tap dismisses. NOT tested: the named version in a real lobby round; real phones.
+  - 2026-10-07, Luke: "make the text significantly bigger. Let's try 50%". The note is now
+    min(90vw, 700px, 160vh) wide at 2.1:1, with less margin round the text: on a landscape
+    phone (844x390) the writing went from 36 px to 57.5 px (+60%); the longest name
+    ("Bartholome is the guide...") fits at 53 px (+47%). The card covers about three
+    quarters of the screen's height there.
+
+- PROJECTOR VIEW, planned 2026-10-07. Luke: a public view on a projector/large screen,
+  "following players around, and particularly focusing on major events such as falls,
+  aliens, and jetpack rescues", switching between the teams' worlds; a director using a
+  priority list (1 abduction, 2 about to fall with a jetpack, 3 fall, plus enough
+  successes), mild repetition penalty and randomness, rules for interrupting. Answers:
+  runs on the teacher's PC, sent to the screen (not the screen's own browser); QR code and
+  victory scene move to it; between rounds a placeholder; words shown one above the other
+  in random order, never tied to a bridge or a choice; captions yes, NO scoreboard
+  (scores secret until the end); defence typing progress yes; split screen for two big
+  events at once; sound will come from it later.
+  Order: 1 data additions -> 2 record/replay + moving bots -> 3 spectator mode for
+  skyPath + projector page, switched by hand -> 4 transitions between worlds (cloud
+  wipe) -> 5 director + debug overlay -> 6 captions/overlays.
+  - Step 1 done 2026-10-07 (game-event kinds phones never act on, so no phone can show
+    an outcome early): `choice-outcome` {forkIndex, correct, powerupKind} from
+    applyChoice; `defence-progress` {countdownMs} when the ship's countdown starts, then
+    {typed} on each key (abductDefense.js onCountdownStart/onTextChange); a `report-state`
+    broadcast makes every phone re-send its state (skyPath handle reportState(), wired
+    through useLobby onReportStateRequested and GameRoom). Loads clean; not yet exercised
+    (needs the projector side to listen).
+  - Supabase Realtime limits (docs, 2026-10-07): messages/second Free 100, Pro 500, Team
+    2,500; presence messages/s Free 20, Pro 50; a message counts when sent AND when
+    delivered to each client; over the limit, connections are dropped and reconnect.
+    Today every phone gets every team's 150 ms movement pings on one channel: one player
+    walking ~6.7 sends/s x ~25 receivers ~ 170/s. A full class is far over Free and over
+    Pro. Fix options: per-team channels for movement (receivers ~7), slower pings with
+    more smoothing, a bigger plan. Needs Luke's plan + decision.
+  - Step 2 done 2026-10-07 (with fix 1):
+    - Fix 1 (useLobby.js): 'moving' player-state pings go to `lobby-CODE-team-N`
+      (joined when the device's team is known); 'resting'/'departing'/'gone' stay on the
+      main channel (other teams' abduction targeting needs them). Every report carries a
+      rising `seq` (seeded from the clock), and a receiver drops one older than the last it
+      saw from that sender, since two channels can deliver out of order.
+    - Recording real movement: skyPath.js pushes each player-state to
+      `window.__stateLog` when a recorder sets it; `__sections()` now gives each fork's
+      frame; `__debugHold` cancels its previous timer; `__tick` cancels the pending frame
+      first. src/dev/recordTracks.js drives the solo game (steps frames itself off a
+      MessageChannel, because the preview pane throttles frames and timers to ~2/s).
+      Dev server: POST /__save?name=X writes app/recordings/X.json (vite.config.js).
+      Recorded: run-ok, fall-1..6, rescue-2..6, abduct. Forks are fixed positions
+      (straight line, 17.6 apart) and both bridges look the same, so a track plays in any
+      round. src/dev/buildTracks.mjs (node, from app/) cuts them into src/dev/tracks.json
+      (174 KB): cross[1-6], fall[1-6], rescue[2-6], abduct (relative to its island).
+    - Bots (src/dev/bots.js, rewritten): real movement from the tracks; wait for the team
+      at each island, think, choose right with pCorrect; choice-outcome; island-2 pickup
+      (first come); jetpack -> rescue; alien device -> abduct-target at another team's
+      player a few islands later; targeted -> green light, defence-request, wait for the
+      guide's defence-start, defence-progress letters, resisted/abducted (abduct track);
+      as guide, answer defence-requests in turn; answer report-state; round-ended with a
+      matching result. `unthrottled: true` for the preview pane. Old `finishMs` fast mode
+      kept.
+    - Session record/replay (src/dev/sessionRecorder.js): records every broadcast on the
+      main + team channels and presence snapshots; replays into another code at any
+      speed (a client per player for presence, applied in order).
+    - Tested 2026-10-07: board + 5 bots + one real join tab (driven from the console), 2
+      teams of 3. Pickups (jetpack, alien device), a cross-team abduction with the bot
+      guide answering the defence request, a jetpack rescue, falls, results; all 749
+      movement pings on team channels, none on main; the real phone showed a bot
+      teammate's live position, finished with its score screen, no console errors.
+      Recorded (recordings/test-session.json, 863 events) and replayed at 4x into another
+      code: every broadcast arrived on the right channel; presence correct after two
+      replayer fixes. NOT checked: by eye, that a phone draws a bot's fall/rescue/
+      abduction as it would a person's (same messages, so it should).
+  - Step 3 done 2026-10-07: the projector page, `?projector=CODE` (lobby/Projector.jsx).
+    - Listens to the main channel and all 4 team channels (no presence). One Sky Path
+      world per team, mounted on that team's game-started with skyPath.js's new
+      `projector` option: role 'watching' (Watch mode's follow camera), every phone
+      panel/button hidden (CSS `.skypath-projector > :not(canvas)`), no words on the
+      bridge signs, handle.watch(token|null), handle.setActive(on) (draw only the team
+      on screen; all keep updating), handle.snapshot() (who's where), dev step()/capture().
+      Player reports routed to their team's world by token (seq-filtered); pickup-claim
+      passed on.
+    - Words: the pair for the followed player's fork, while they stand deciding, one
+      above the other in a random order fixed per round+fork. Caption: team + followed
+      player. Controls (hand switching for now): team buttons/keys 1-4, player chips/arrows,
+      A auto, H hide, D the fps/msg-per-second readout. Waiting placeholder between rounds
+      (and "last round" after the series).
+    - Opened/reloaded mid-round: it sends `projector-hello`; the teacher's board answers
+      `rounds-now` (each team's latest game-started payload, kept in
+      `skypath.board.rounds.CODE`, plus which are over and whether the series has
+      ended; teacherSession.js) — re-sending game-started would restart phones. Each
+      world, once loaded, asks phones `report-state`.
+    - FOUND + FIXED: Chrome blocked WebGL for the projector page ("Web page caused
+      context loss and was blocked") after worlds were torn down and rebuilt a few times
+      (each world made its own renderer and destroyed it with forceContextLoss). Now the
+      projector keeps one renderer per team slot for the page's life and passes it in
+      (skyPath.js `renderer` option); a world with a provided renderer frees its scene's
+      geometry/materials/textures on dispose instead. Phones still make and destroy one
+      renderer per round: fine so far, but worth watching over a long lesson.
+    - Also fixed: after a teacher reload mid-round, that round's end was never announced.
+    - Tested with 6 bots in 2 teams: worlds load, bots walk/fall/are shown, switching teams,
+      words shown, catch-up after a projector reload mid-round, new rounds replace worlds
+      on the same renderers. The preview pane gives hidden pages no animation frames, so
+      frames were stepped by hand (dev handle.step()) for checking; real frame rates still
+      to be read on Luke's PC.
+  - 2026-10-07, Luke: projector words "slightly larger and look a bit nicer... slightly
+    more stylish" (not cardboard). Now 8.5vh (was 6vh) gold-gradient Palatino-family
+    serif (ships with Windows/macOS, no font file) on a dark plaque with a fine double
+    gold border, an italic "or" between the two words. Checked in a live bot round.
+  - Step 4 done 2026-10-07: the cloud wipe between teams (Projector.jsx goTo). The old
+    team's camera rises 9 units and tilts up ~30° (skyPath.js handle.setLift 0-1,
+    applied around the render only) while a bank of cloud (cloud-dense.webp edges on a
+    #e9ecf1 core, plus a nearer, faster cloud layer) sweeps down over the screen; fully
+    covered, the view cuts; the new team's camera starts lifted and settles as the
+    clouds clear upward. Timings WIPE = cover 800 / hold 150 / uncover 950 ms. A switch
+    asked for mid-wipe waits its turn. DEV: window.__wipeAt(c, lift) holds a moment of
+    it. Checked by screenshots at 45%, covered, and uncovering on the new team; a real
+    switch by key ran through and landed on the other team. Smoothness at a real frame
+    rate still to be seen on Luke's PC.
+  - Step 5 done 2026-10-07: the director (lobby/director.js, pure logic; Projector.jsx
+    feeds it choice-outcome, player-state, abduct-target, defence-end, round-ended and
+    round starts, and asks it 4x a second). On by default; any hand choice turns it off,
+    A toggles it. D shows the shot and the top candidates with scores.
+    - Stories: abduction 100 (x0.5 until the defence starts), rescue 85, fall 70 (x0.95/
+      x0.9 before the payoff), temple 50, crossing 35, deciding 15 (filler: someone at a
+      fork, so the words show). Score x repetition (-15% per same-type showing in the
+      last 45 s, fading) x fairness (team not shown: up to +20% over 40 s) x fixed +-8%.
+    - Cutting: 4 s minimum shot, except a fall/rescue/abduction may cut into a crossing or
+      filler at once; challenger must beat the shot by 30% (50% to change team); rescue
+      and abduction payoffs never cut; a fall may be after 2.5 s of falling; a story
+      ending frees the camera but it prefers its own team (50% margin); after a wipe it
+      stays with the team 10 s unless a fall/rescue/abduction calls elsewhere.
+    - Tuned live with bots (2 teams of 3, 3 rounds + a series): first runs wiped back and
+      forth for filler shots and short crossings (two wipes in two seconds) -> the
+      team-preference and MIN_TEAM_S rules. Final run: falls reached as the wrong choice
+      was made (~1 s before the fall), a jetpack rescue held 14 s to the landing, temple
+      walks, team changes only for big events or after a stay. Also fixed: last round's
+      runners (now the guide) were left in the director's list.
+    - Not yet: split screen for two big events at once, event captions (step 6). Real
+      frame rate and how it feels to watch: Luke's PC/TV.
+  - Step 6 done 2026-10-07 (Projector.jsx rewritten around "panels"; director.js split):
+    - Captions, per panel, in the word plaque's style (dark plaque, double gold border,
+      gold serif): team + followed player top left; an event caption that rises in at the
+      bottom: "X (Team N) sent the aliens after Y!" -> "Y is fighting off the aliens!" ->
+      "Y fought off the aliens!" / "Y was abducted by the aliens!"; "Y fell..." ->
+      "Saved by the jetpack!"; "Y fell!"; "Y reached the temple!". No scores (Luke).
+    - Defence overlay: RESIST as six letter slots filling as the defender types
+      (defence-progress), and the ship's countdown bar; the fork's word pair is hidden
+      while it's up.
+    - Split screen: director.decide() returns `second` — while the shot is a fall/rescue/
+      abduction, another on a DIFFERENT team (fall/rescue from its choice, abduction from
+      its defence) gets the right half until its story ends; whichever half outlasts the
+      other then takes the whole screen (no wipe). The second world slides in from the
+      right (600 ms); a gold divider between. Hand control is one team at a time.
+    - QR code + victory on the projector: before the game, the board's cardboard QR card
+      (qrCard.js) large beside "Scan to join" + code; between rounds, smaller, "Get ready
+      for the next round" (placeholder); at the series' end the victory scene
+      (VictoryTown.jsx, no Back button there). The board sends the victory teams with
+      `series-ended` and in `rounds-now`; it also sends `rounds-now` whenever it connects
+      (a projector opened while the board was reloading had asked into silence).
+    - Tested with bots: split with two falls, each panel captioned; abduction caption +
+      RESIST overlay filling; split screenshot (forced with dev __split) showing both
+      panels; QR screen; victory scene mounted after the last round (via rounds-now after
+      the board/projector reloads). Screenshots of live moments were hard (the preview
+      window often isn't drawing). Not seen at real speed: the caption animation, the
+      split slide.
+
+- Added 2026-10-07, TEMPORARY dev buttons on the lobby board (dev server only), for Luke's
+  TV test ("a temporary html button to add a bunch of bot players, and I'll add myself,
+  and press start"): "+ 5 bots (dev)" starts 5 real-playing bots (src/dev/bots.js) inside
+  the board's own page (more clicks = more bots; stopped on Create / page close; keep the
+  window visible or their timers slow); "Open projector (dev)" opens ?projector=CODE in a
+  pop-up window to drag onto the TV. Projector: F toggles full screen. Checked: bots join
+  and play a round from the board page. Delete the two buttons once testing is done.

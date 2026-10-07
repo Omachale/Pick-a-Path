@@ -116,6 +116,12 @@ export const SKY_PATH_CHROME = `
      lowered from the top of the screen and raised again. Driven by
      showPaperMessage()/hidePaperMessage() in skyPath.js. -->
 <div id="paperMessage"><img src="/textures/paper-message.png" alt="" draggable="false" /><div id="paperMessageText"></div></div>
+<!-- #roleNote: who's guiding, at the start of a round (2026-10-07) — a
+     hand-cut piece of the same photographed cardboard as the keyboard panel,
+     written on in Sue Ellen Francisco like #paperMessage. Slides in from the
+     right; a tap anywhere on it sends it back. Driven by showRoleNote() in
+     skyPath.js. -->
+<div id="roleNote"><div id="roleNoteCard"><div id="roleNoteText"></div><div id="roleNoteHint">tap to close</div></div></div>
 <div id="notice" class="hidden"></div>
 <!-- The temple-doors ending: opacity driven directly by updateTempleEntry()
      in skyPath.js, frame by frame — no CSS transition here, since the fade's
@@ -423,6 +429,75 @@ export const SKY_PATH_CSS = `
   line-height: 1.1;
   color: #2c2a26;
   overflow: hidden;
+}
+
+/* The projector's worlds (lobby/Projector.jsx): the 3D view only, none of a
+   phone's buttons, panels or messages. */
+.skypath-surface.skypath-projector > :not(canvas) { display: none !important; }
+
+/* The role note. Luke, 2026-10-07: "a note written in cardboard that comes
+   onto the screen from the right and leaves once clicked on." The card is
+   cut from cardboard-panel.png, scaled up and positioned below that sign's
+   string holes so only plain board shows; clip-path gives it slightly
+   uneven, hand-cut edges. clip-path also clips box-shadow, so the shadow is
+   a drop-shadow filter on the unclipped wrapper. Parked off the right edge;
+   .shown brings it to the centre, tilted a touch like a note put down by
+   hand. Above the defence panels and the paper message (z 32).
+   Sized up for bigger writing (Luke: "make the text significantly bigger.
+   Let's try 50%"): wider, and allowed to fill most of a landscape phone's
+   height (160vh), with less margin round the text. */
+.skypath-surface #roleNote {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(90vw, 700px, 160vh);
+  z-index: 34;
+  transform: translate(60vw, -50%) rotate(4deg);
+  opacity: 0;
+  transition: transform 700ms cubic-bezier(0.22, 1, 0.36, 1), opacity 250ms linear;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+  user-select: none;
+  cursor: pointer;
+}
+.skypath-surface #roleNote.shown {
+  transform: translate(-50%, -50%) rotate(-2deg);
+  opacity: 1;
+  pointer-events: auto;
+}
+.skypath-surface #roleNoteCard {
+  position: relative;
+  aspect-ratio: 2.1 / 1;
+  background-image: url('/textures/cardboard-panel.png');
+  background-size: 150% auto;
+  background-position: 40% 75%;
+  clip-path: polygon(0.6% 2.4%, 22% 0.8%, 49% 2%, 77% 0.4%, 99.4% 1.6%, 98.6% 34%, 99.6% 68%, 98.8% 98.4%, 71% 99.4%, 44% 98%, 18% 99.6%, 0.4% 98.2%, 1.4% 63%, 0.2% 31%);
+  box-shadow: inset 0 0 18px rgba(70, 45, 20, 0.35);
+}
+.skypath-surface #roleNoteText {
+  position: absolute;
+  left: 7%;
+  right: 7%;
+  top: 8%;
+  bottom: 17%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-family: 'Sue Ellen Francisco', cursive;
+  line-height: 1.1;
+  color: #2a2119;
+  overflow: hidden;
+}
+.skypath-surface #roleNoteHint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 5%;
+  text-align: center;
+  font-family: 'Sue Ellen Francisco', cursive;
+  font-size: clamp(13px, 3.4vh, 20px);
+  color: rgba(42, 33, 25, 0.6);
 }
 
 /* The cardboard target picker (2026-09-18) — see skyPath.js's "abduction

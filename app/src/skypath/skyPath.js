@@ -154,6 +154,26 @@ export function mountSkyPath(container, options = {}) {
     // "defence queue" section). Both null/absent in solo play.
     guideToken = null,
     getDisplayName = null,
+    // The projector (lobby/Projector.jsx, 2026-10-07): one of these per
+    // team on the teacher's PC, shown on the big screen. Mounted as
+    // role 'watching' (Watch mode's follow-a-teammate camera, which is
+    // exactly the shot wanted) with: none of the phone's buttons or panels;
+    // no words on the bridge signs (the projector shows each pair itself,
+    // stacked in a random order, so nothing ties a word to a bridge — Luke:
+    // "without the viewer on this screen seeing which word was chosen, or
+    // which is tied to which path"); who to follow chosen from outside
+    // (handle.watch); and drawing paused while another team is on screen
+    // (handle.setActive), while everything keeps updating.
+    projector = false,
+    // A renderer to draw with instead of making one, kept by the caller
+    // across mounts (the projector: one per team slot, reused round after
+    // round). Every mount making its own and throwing it away with
+    // forceContextLoss() is fine for a phone's one game at a time, but the
+    // projector does it for every team every round, and Chrome then blocks
+    // WebGL for the page ("Web page caused context loss and was blocked"),
+    // seen 2026-10-07. A provided renderer is left alive on dispose; the
+    // scene's own GPU resources are freed instead (see dispose).
+    renderer: providedRenderer = null,
   } = options;
   // Declared here, not down near soloRoleToggle where it originally lived —
   // setCharacter() (called during initial setup, long before that point)
@@ -172,6 +192,7 @@ export function mountSkyPath(container, options = {}) {
   const isSpectatorRole = (r) => r === 'guide' || r === 'watching';
 
   container.classList.add('skypath-surface');
+  if (projector) container.classList.add('skypath-projector');
   container.innerHTML = SKY_PATH_CHROME;
   if (!document.getElementById('skypath-css')) {
     const style = document.createElement('style');
@@ -183,6 +204,14 @@ export function mountSkyPath(container, options = {}) {
 
   let disposed = false;
   let rafId = null;
+  let drawing = true; // false while a projector world is off screen (see `projector` above)
+  // The projector's cloud wipe between teams (handle.setLift): 0 = the
+  // ordinary shot, 1 = risen CAM_LIFT_HEIGHT and tilted CAM_LIFT_PITCH up,
+  // into the clouds. Applied around the render only, so it never feeds back
+  // into the camera's own easing.
+  let camLift = 0;
+  const CAM_LIFT_HEIGHT = 9;
+  const CAM_LIFT_PITCH = 0.55; // radians
 
   // ---------------------------------------------------------------- journey shape
   //
@@ -405,7 +434,7 @@ export function mountSkyPath(container, options = {}) {
 
   let renderer;
   try {
-    renderer = createRenderer();
+    renderer = providedRenderer ?? createRenderer();
   } catch (err) {
     const loaderEl = $('loader');
     if (loaderEl) {
@@ -4668,6 +4697,10 @@ export function mountSkyPath(container, options = {}) {
     // before that — see `resistConfirmedEarly`'s own comment.
     const defending = abductPromptOpen && !resistConfirmedEarly;
     window.__lastPlayerState = { phase, livePos, powerupKind, firing, detached, abducting, defending, at: Date.now() }; // debug only — see e.g. window.__teammates for the receiving-side equivalent
+    // DEV: recording real movement for the bots (src/dev/recordTracks.js),
+    // which replay it so the projector has real walks, falls and rescues to
+    // show without a class of phones. Only when a recorder has set the array.
+    window.__stateLog?.push({ t: performance.now(), phase, forkIndex, livePos, powerupKind, firing, detached, abducting, defending });
     onPlayerState?.({
       phase,
       forkIndex,
@@ -5690,6 +5723,52 @@ export function mountSkyPath(container, options = {}) {
     els.paperMessage?.classList.remove('shown');
   }
 
+  // The role note (Luke, 2026-10-07): basic instructions at the start of a
+  // round, on a cardboard note that slides in from the right and leaves when
+  // tapped. Shown once per round, a moment after the scene appears (or the
+  // character screen closes), so it doesn't arrive hidden behind either.
+  // A player whose guide's name isn't known (a solo test) gets a version
+  // without it.
+  const ROLE_NOTE_DELAY_MS = 900;
+  const ROLE_NOTE_FONT_MAX = 0.1; // × the note's width — shrunk from here until the text fits
+  let roleNoteTimer = null;
+
+  function fitRoleNoteText() {
+    const box = els.roleNoteText;
+    const w = els.roleNote.clientWidth;
+    if (!w) return;
+    let size = w * ROLE_NOTE_FONT_MAX;
+    box.style.fontSize = `${size}px`;
+    while ((box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth) && size > 8) {
+      size *= 0.92;
+      box.style.fontSize = `${size}px`;
+    }
+  }
+
+  function showRoleNote() {
+    if (!els.roleNote || role === 'watching') return; // a fallen player already knows
+    const guideName = guideToken && getDisplayName?.(guideToken);
+    els.roleNoteText.textContent =
+      role === 'guide'
+        ? 'You are the guide. Read the word to your team to guide them to safety.'
+        : guideName
+          ? `${guideName} is the guide. Listen to them and choose the path with the correct word.`
+          : 'Listen to your guide and choose the path with the correct word.';
+    clearTimeout(roleNoteTimer);
+    roleNoteTimer = setTimeout(() => {
+      if (disposed) return;
+      els.roleNote.classList.add('shown');
+      fitRoleNoteText();
+      // As for the paper message: the font can arrive after the first fit.
+      document.fonts?.load("16px 'Sue Ellen Francisco'").then(fitRoleNoteText, () => {});
+    }, ROLE_NOTE_DELAY_MS);
+  }
+
+  function hideRoleNote() {
+    clearTimeout(roleNoteTimer);
+    els.roleNote?.classList.remove('shown');
+  }
+
   // ---------------------------------------------------------------- abduction cardboard UI
   //
   // The picker surface openAbductMenu()/chooseAbductTarget() actually show
@@ -6676,6 +6755,11 @@ export function mountSkyPath(container, options = {}) {
         if (!abductPromptOpen) return;
         abductDefense.open({
           avatarSrc: avatarSrcFor(characterKey),
+          // For the projector's overlay (Luke, 2026-10-07: show the typing
+          // progress): the ship's countdown starting, then each change to
+          // the typed text. Another kind phones never act on.
+          onCountdownStart: (durationMs) => onGameEvent?.('defence-progress', { countdownMs: durationMs, typed: '' }),
+          onTextChange: (typed) => onGameEvent?.('defence-progress', { typed }),
           onResist: () => resolveAbductPrompt('resist'),
           onTimeout: () => resolveAbductPrompt('go'),
           onWordMatched: () => {
@@ -7044,7 +7128,10 @@ export function mountSkyPath(container, options = {}) {
     // round, not the teammate being watched, so they don't apply here.
     let sec;
     let showCurrent;
-    if (role === 'watching') {
+    if (projector) {
+      sec = null; // the projector shows the words itself — see `projector` above
+      showCurrent = false;
+    } else if (role === 'watching') {
       const entry = watchToken ? teammates.get(watchToken) : null;
       sec = entry ? sections[entry.forkIndex - 1] : null;
       showCurrent = !!entry && entry.phase === 'resting' && !!sec?.words;
@@ -7665,6 +7752,8 @@ export function mountSkyPath(container, options = {}) {
     abductGuideStage: $('abductGuideStage'),
     paperMessage: $('paperMessage'),
     paperMessageText: $('paperMessageText'),
+    roleNote: $('roleNote'),
+    roleNoteText: $('roleNoteText'),
     // Watch mode's own top-left cycle panel — see the "watch cycling" section.
     watchPanel: $('watchPanel'),
     watchAvatar: $('watchAvatar'),
@@ -7872,7 +7961,12 @@ export function mountSkyPath(container, options = {}) {
     // into its own session-wide character table without ever reaching
     // updateTeammate(), so it can't cause that bug to come back.
     if (role === 'guide') onGameEvent?.('guide-character', { characterKey: pickedCharacter, colorHex: pickedColorHex });
+    showRoleNote();
   }
+  els.roleNote?.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation(); // a tap on the note isn't a tap on the game
+    hideRoleNote();
+  });
   els.charStart.addEventListener('click', () => {
     finishCharacterSelect();
     els.charSelect.classList.remove('visible');
@@ -7971,6 +8065,15 @@ export function mountSkyPath(container, options = {}) {
 
     const wasCorrect = side === sec.correct;
     notifyPlayerState('departing'); // before forkIndex moves on — real position pings follow while walking, see tick(); the outcome is deliberately NOT sent ahead
+    // ...except to the projector (Luke, 2026-10-07: the public view should
+    // be there for falls and jetpack rescues, so it has to know one is
+    // coming while the player is still walking out to it). A separate
+    // `game-event` kind that phones never act on (useLobby.js drops kinds it
+    // doesn't route), so nothing on any phone can show the outcome early:
+    // the rule above still holds for every player's screen. Sent with the
+    // power-up held, since a wrong choice with a jetpack is a rescue, not a
+    // fall.
+    onGameEvent?.('choice-outcome', { forkIndex, correct: wasCorrect, powerupKind: rig.powerup?.kind ?? null });
     choiceSide = side; // track which path was chosen for camera angle during fall
     const branchPts = sec.branch[side];
     const queue = branchPts.slice();
@@ -8843,7 +8946,16 @@ export function mountSkyPath(container, options = {}) {
     // role that has no discrete refresh trigger of its own.
     updateWordSigns();
 
-    resistWave.render(scene, camera);
+    if (drawing && camLift > 0) {
+      const pos = camera.position.clone();
+      const quat = camera.quaternion.clone();
+      const e = camLift * camLift * (3 - 2 * camLift); // smoothstep
+      camera.position.y += e * CAM_LIFT_HEIGHT;
+      camera.rotateX(e * CAM_LIFT_PITCH);
+      resistWave.render(scene, camera);
+      camera.position.copy(pos);
+      camera.quaternion.copy(quat);
+    } else if (drawing) resistWave.render(scene, camera);
 
     rafId = requestAnimationFrame(tick);
   }
@@ -8859,7 +8971,15 @@ export function mountSkyPath(container, options = {}) {
       renderer.render(scene, camera);
       return renderer.domElement.toDataURL('image/png');
     };
-    window.__tick = tick;
+    // Steps one frame by hand. Cancels the pending animation frame first, as
+    // tick() books the next one itself: called repeatedly (src/dev/
+    // recordTracks.js pumps it on a timer when the window is covered and the
+    // browser has slowed animation frames to a crawl), it would otherwise
+    // start a new loop each time.
+    window.__tick = () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      tick();
+    };
     window.__state = () => ({
       forkIndex,
       finished,
@@ -8925,6 +9045,7 @@ export function mountSkyPath(container, options = {}) {
       sections.map((s) => ({
         correct: s.correct,
         forkZ: +s.fork.z.toFixed(2),
+        fork: { x: s.fork.x, z: s.fork.z, heading: s.fork.heading }, // the fork island's frame, for re-placing recorded movement (src/dev/recordTracks.js)
         leftPts: s.branch.left.length,
         rightPts: s.branch.right.length,
         hasApproach: !!s.approach,
@@ -8957,9 +9078,14 @@ export function mountSkyPath(container, options = {}) {
     // Testing convenience: holding the real #advance button requires a
     // genuine pointerdown/up from a real input device, awkward to automate
     // reliably. This just flips the same `holdingForward` flag tick() reads.
+    // Each call replaces the last one's release timer: a long-running driver
+    // (src/dev/recordTracks.js) holds repeatedly, and an earlier hold's timer
+    // going off mid-walk stopped the walker short.
+    let debugHoldTimer = null;
     window.__debugHold = (ms = 4000) => {
+      clearTimeout(debugHoldTimer);
       holdingForward = true;
-      setTimeout(() => {
+      debugHoldTimer = setTimeout(() => {
         holdingForward = false;
       }, ms);
     };
@@ -9157,6 +9283,68 @@ export function mountSkyPath(container, options = {}) {
     /** Turns this device from a player into a spectator, in place, once its own round has ended in a fall — see becomeSpectator's own header comment for why this replaces the old remount-into-role="watching" design. */
     becomeSpectator,
 
+    /**
+     * Sends this device's state again (the projector asks when it opens or
+     * reloads mid-round, see useLobby.js's `report-state`): a player's
+     * position as it stands. Nothing while moving, falling, rescued or
+     * abducted, since pings are already flowing; 'gone' once a fall has
+     * played out. Spectators (the guide, Watch mode) have no position.
+     */
+    reportState() {
+      if (isSpectatorRole(role)) return;
+      if (leg || falling || abduction || rescue) return;
+      notifyPlayerState(finished && !finishedSuccess ? 'gone' : 'resting');
+    },
+
+    /** Projector: follow this player (a roster token), or null to let the camera choose. */
+    watch(token) {
+      watchToken = token;
+      clearWatchAdvanceTimer();
+    },
+
+    /** DEV: run one frame now (as window.__tick does), for driving a world whose window gets no animation frames. */
+    step() {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      tick();
+    },
+
+    /** DEV: draw a frame now and return it as a PNG data URL (the projector's window.__projectorCapture). */
+    capture() {
+      renderer.render(scene, camera);
+      return renderer.domElement.toDataURL('image/png');
+    },
+
+    /** Projector: how far the camera has risen into the clouds for a wipe, 0-1 (see camLift). */
+    setLift(v) {
+      camLift = Math.max(0, Math.min(1, v));
+    },
+
+    /** Projector: draw frames (this team is on screen) or not (it isn't; it still updates). */
+    setActive(on) {
+      drawing = !!on;
+    },
+
+    /**
+     * Projector: who is followed, and each runner as this world has them:
+     * [{ token, displayName, forkIndex, phase, visible, falling, abducted }].
+     */
+    snapshot() {
+      return {
+        watching: watchToken,
+        loaded: !!sections.length,
+        players: [...teammates.entries()].map(([token, e]) => ({
+          token,
+          displayName: e.displayName,
+          forkIndex: e.forkIndex,
+          phase: e.phase,
+          visible: e.rig.group.visible,
+          airborne: !!e.livePos?.quat, // falling, rescued or carried off
+          firing: !!e.rig.powerup?.flame, // a jetpack rescue under way
+          abducted: !!e.abduction,
+        })),
+      };
+    },
+
     /** Current role, for a caller that wants to render its own role badge. */
     get role() {
       return role;
@@ -9192,8 +9380,23 @@ export function mountSkyPath(container, options = {}) {
       shadowCatcherMaterial.dispose();
       if (archTextures) for (const t of Object.values(archTextures)) t.dispose();
       resizeObserver.disconnect();
-      renderer.dispose();
-      renderer.forceContextLoss();
+      if (providedRenderer) {
+        // The caller's renderer lives on (see `renderer` above): free what
+        // this scene put on the GPU instead. A texture or geometry another
+        // mount still uses just uploads again the next time it's drawn.
+        scene.traverse((obj) => {
+          obj.geometry?.dispose();
+          for (const m of [obj.material].flat()) {
+            if (!m) continue;
+            for (const v of Object.values(m)) if (v?.isTexture) v.dispose();
+            m.dispose();
+          }
+        });
+        renderer.renderLists.dispose();
+      } else {
+        renderer.dispose();
+        renderer.forceContextLoss();
+      }
       container.innerHTML = '';
     },
   };

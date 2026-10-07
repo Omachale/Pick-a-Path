@@ -18,13 +18,21 @@
  * then turned the phone (Luke: "an ugly solution"). This panel is two
  * columns sized from the screen's HEIGHT, so it fits a phone held sideways.
  * Held upright, it stacks and asks the player to turn the phone.
+ *
+ * REJOINING. A phone that reloads or reconnects mid-game rejoins by itself
+ * with the same name and look (remembered per game code), so a dropped
+ * player is back in their team for the next round without choosing again
+ * (Luke, 2026-10-06: "let players reconnect later within a reasonable
+ * timeframe"). Their token is the same, so the teacher's series knows them.
  */
 import { useEffect, useState } from 'react';
 import { CHARACTERS, PALETTE, characterSrc } from '../skypath/characters.js';
 import { normalizePlayerName } from '../skypath/nameTag.js';
 import { clearToken } from './identity.js';
+import { joinedKey } from './useLobby.js';
 
 const BACKGROUND = 'textures/mode-skytemple.jpg';
+const gameCode = new URLSearchParams(location.search).get('join') ?? '';
 const css = (hex) => `#${hex.toString(16).padStart(6, '0')}`;
 const pick = (n) => Math.floor(Math.random() * n);
 
@@ -94,13 +102,36 @@ export default function PlayerJoin({ lobby }) {
   const characterKey = CHARACTERS[charIdx].key;
   const cleanName = normalizePlayerName(name);
   const join = () => {
-    if (cleanName) lobby.join(cleanName, { characterKey, colorHex });
+    if (!cleanName) return;
+    lobby.join(cleanName, { characterKey, colorHex });
+    try {
+      localStorage.setItem(joinedKey(gameCode), JSON.stringify({ name: cleanName, look: { characterKey, colorHex } }));
+    } catch {
+      // Private mode: rejoining just means choosing again.
+    }
   };
+  useEffect(() => {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(joinedKey(gameCode)) ?? 'null');
+    } catch {
+      // Unreadable: choose again.
+    }
+    if (saved?.name && !lobby.joined) lobby.join(saved.name, saved.look);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const step = (d) => setCharIdx((i) => (i + d + CHARACTERS.length) % CHARACTERS.length);
   const swatch = 'min(9vh, 42px)';
 
   let content;
-  if (lobby.full) {
+  if (lobby.removed) {
+    content = (
+      <div style={panel}>
+        <h2 style={heading}>Your teacher has removed you from this game</h2>
+        <p style={{ margin: 0 }}>Ask your teacher if you think this is a mistake.</p>
+      </div>
+    );
+  } else if (lobby.full) {
     content = (
       <div style={panel}>
         <h2 style={heading}>Sorry, this game is full</h2>
@@ -117,7 +148,7 @@ export default function PlayerJoin({ lobby }) {
             {lobby.participant?.displayName}
           </div>
           <p style={{ margin: '1.5vh 0 0', font: '600 min(5vh, 20px)/1.3 system-ui, sans-serif' }}>
-            You're in! Waiting for the game to start...
+            {lobby.sittingOut ? "You're in! Your team is playing a round: you'll join in from the next one." : "You're in! Waiting for the game to start..."}
           </p>
         </div>
       </div>
@@ -234,11 +265,12 @@ export default function PlayerJoin({ lobby }) {
         </div>
       )}
       <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', zIndex: 1 }}>{content}</div>
-      {/* DEV: a fresh identity, for testing several players in one browser. */}
-      {import.meta.env.DEV && !lobby.joined && (
+      {/* DEV: a fresh identity, for testing several players in one browser. Shown after joining too, since a reload now rejoins by itself. */}
+      {import.meta.env.DEV && (
         <button
           onClick={() => {
             clearToken();
+            localStorage.removeItem(joinedKey(gameCode));
             location.reload();
           }}
           style={{ position: 'absolute', left: 8, bottom: 8, zIndex: 2, fontSize: 11, opacity: 0.7 }}

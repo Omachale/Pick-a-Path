@@ -206,6 +206,15 @@ export const LOBBY_BOARD_DEFAULTS = {
     // Shuffle labels sat right under these buttons and read as theirs.)
     { id: 'create', place: { x: 380 + 40 + 82.5 / 2, y: 590 }, size: 82.5, label: ['Create'] },
     { id: 'start', place: { x: 380 + 40 + 82.5 + 40 + 82.5 / 2, y: 590 }, size: 82.5, label: ['Start'] },
+    // The teacher's controls for a series of rounds (Luke, 2026-10-06, agreed:
+    // "small cardboard buttons that ask for confirmation"). Smaller, with
+    // smaller labels, to fit the strip between the mode window and the rows
+    // below: End round and End series right of the mode dial (where the game
+    // code used to sit; it moved left of the dial), Remove at the far left.
+    // `labelCap` overrides labelCapHeight.
+    { id: 'endRound', place: { x: 452, y: 460 }, size: 58, label: ['End round'], labelCap: 16 },
+    { id: 'endSeries', place: { x: 578, y: 460 }, size: 58, label: ['End series'], labelCap: 16 },
+    { id: 'remove', place: { x: 72, y: 460 }, size: 58, label: ['Remove'], labelCap: 16 },
   ],
   buttonPressedDepth: 2, // design px below the board's face, while held
   // The player lobby: the right half of the board. Team boxes stacked
@@ -1118,10 +1127,78 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
         mat.visible = true;
         mat.needsUpdate = true;
         t.aspect = canvas.height / canvas.width;
+        t.badgeKey = undefined; // re-make any badge for the tag's real shape
+        placeBadge(id);
         renderRoster();
       });
     }
     return tags.get(id);
+  }
+
+  // Status badges: during a round, a small sticker on each series player's
+  // tag saying where they are (Luke, 2026-10-06, agreed: the teacher sees
+  // "running, finished (with score), dropped, or guiding" on the board
+  // itself, not a separate panel). Set by the page (LobbyBoard.jsx) through
+  // api.setStatuses; a child of the tag, so it moves and glides with it.
+  // The tag's own geometry is a unit plane scaled to the tag, so the badge's
+  // size is worked out in the tag's units (see placeBadge).
+  const BADGE_TONES = {
+    guide: { bg: '#e7b94a', fg: '#2a1e14' },
+    running: { bg: '#4d6b88', fg: '#f4f7fa' },
+    done: { bg: '#3f8550', fg: '#f4f7fa' },
+    dropped: { bg: '#9b4a3c', fg: '#f4f7fa' },
+    waiting: { bg: '#7b6f61', fg: '#f4f7fa' },
+  };
+  const BADGE_HEIGHT = 0.42; // as a share of the tag's height
+  const statuses = new Map(); // id -> { text, tone }
+  function badgeTexture({ text, tone }) {
+    const c = document.createElement('canvas');
+    const ctx = c.getContext('2d');
+    const font = '700 44px system-ui, sans-serif';
+    ctx.font = font;
+    c.width = Math.ceil(ctx.measureText(text).width + 40);
+    c.height = 64;
+    const t = BADGE_TONES[tone] ?? BADGE_TONES.waiting;
+    ctx.fillStyle = t.bg;
+    ctx.beginPath();
+    ctx.roundRect(2, 2, c.width - 4, c.height - 4, 18);
+    ctx.fill();
+    ctx.font = font;
+    ctx.fillStyle = t.fg;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, c.width / 2, c.height / 2 + 2);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    return { tex, ratio: c.width / c.height };
+  }
+  function placeBadge(id) {
+    const t = tags.get(id);
+    if (!t) return;
+    const status = statuses.get(id);
+    const key = status ? `${status.tone}|${status.text}` : null;
+    if (t.badgeKey === key) return;
+    if (t.badge) {
+      t.mesh.remove(t.badge);
+      t.badge.material.map.dispose();
+      t.badge.material.dispose();
+      t.badge = null;
+    }
+    t.badgeKey = key;
+    if (!status || !t.mesh.material.visible) return requestRender();
+    const { tex, ratio } = badgeTexture(status);
+    const badge = new THREE.Mesh(tagGeo, new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+    // In the tag's units: its height is 1, its width 1 (= aspect heights).
+    const h = BADGE_HEIGHT;
+    const w = h * ratio * t.aspect;
+    badge.scale.set(w, h, 1);
+    // Over the tag's top-right corner, overhanging a little, like a sticker.
+    badge.position.set(0.5 - w / 2 + 0.03, 0.5 - h * 0.15, 0.5);
+    badge.userData.playerId = id; // a click on the badge is a click on the tag (tagAt)
+    t.mesh.add(badge);
+    t.badge = badge;
+    requestRender();
   }
 
   // The best grid for n tag slots in a w x h area: the column count that
@@ -1332,8 +1409,9 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
         extrasGroup.add(plane);
         requestRender();
       });
-    // The code: right of the mode dial, in the same lettering as the labels.
-    if (gameCode) add(`Code ${gameCode}`, 520, 437, 22, 0.2);
+    // The code, in the same lettering as the labels: left of the mode dial
+    // (it was right of it until End round and End series took that space).
+    if (gameCode) add(`Code ${gameCode}`, 186, 440, 22, 0.2);
     // Coming soon: across the bottom of the mode window, in front of it.
     const mode = currentMode();
     if (mode && !PLAYABLE_MODES.has(mode)) add('Coming soon', 40 + 598 / 2, 40 + 337 - 40, 34, 1);
@@ -1363,12 +1441,19 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   // teacher reload (see importState) so returning players land back in place.
   let savedPlacement = new Map();
   const isDevPlayer = (id) => id.startsWith('dev_');
+  // While a series of rounds is on (LobbyBoard.jsx, series.js), its players
+  // are locked: they can't be dragged, and Shuffle and the dials do nothing
+  // (Luke, 2026-10-06: "Once a series has started, lock teams, except for a
+  // new player arriving"). A newcomer can still be placed, and joins that
+  // team at the next round. A locked player who drops out stays greyed in
+  // place rather than being removed, so they come back to their own team.
+  let locked = null; // Set of ids, or null when no series is on
 
   function setAway(id, away) {
     const t = tags.get(id);
     if (away) {
       if (awayTimers.has(id)) return;
-      awayTimers.set(id, setTimeout(() => dropPlayer(id), AWAY_SECONDS * 1000));
+      awayTimers.set(id, setTimeout(() => !locked?.has(id) && dropPlayer(id), AWAY_SECONDS * 1000));
       if (t) t.mesh.material.opacity = AWAY_OPACITY;
     } else {
       clearTimeout(awayTimers.get(id));
@@ -1382,8 +1467,13 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     awayTimers.delete(id);
     removePlayer(roster, id);
     playerColours.delete(id);
+    statuses.delete(id);
     const t = tags.get(id);
     if (t) {
+      if (t.badge) {
+        t.badge.material.map.dispose();
+        t.badge.material.dispose();
+      }
       rosterGroup.remove(t.mesh);
       t.mesh.material.map?.dispose();
       t.mesh.material.dispose();
@@ -1986,7 +2076,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
         const forContent = content;
         labelCanvas(bs.b.label).then(({ canvas, capPx }) => {
           if (content !== forContent) return;
-          const k = (P.labelCapHeight * s) / capPx;
+          const k = ((bs.b.labelCap ?? P.labelCapHeight) * s) / capPx;
           const tex = new THREE.CanvasTexture(canvas);
           tex.colorSpace = THREE.SRGBColorSpace;
           const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: 0.95, depthWrite: false });
@@ -2282,18 +2372,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     const button = buttonAt(ev);
     if (button) {
       pressButton(button, true);
-      if (button.id === 'qr') {
-        if (joinLink) {
-          moveQr(qr.target === 0);
-          hooks.onJoin?.();
-        } else hooks.onJoinWithoutGame?.();
-      }
-      if (button.id === 'shuffle') {
-        randomise(roster, settings);
-        rosterChanged();
-      }
-      if (button.id === 'create') hooks.onCreate?.();
-      if (button.id === 'start') hooks.onStart?.();
+      buttonAction(button.id);
       return;
     }
     // While the card is up, it covers what's under it.
@@ -2303,7 +2382,52 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       raycaster.setFromCamera(ndc, camera);
       if (raycaster.intersectObject(qr.mesh).length) return;
     }
+    tagOrDial(ev);
+  };
+  // What each push button does.
+  function buttonAction(id) {
+    {
+      const button = { id };
+      if (button.id === 'qr') {
+        if (joinLink) {
+          moveQr(qr.target === 0);
+          hooks.onJoin?.();
+        } else hooks.onJoinWithoutGame?.();
+      }
+      if (button.id === 'shuffle') {
+        if (locked) hooks.onLocked?.('shuffle');
+        else {
+          randomise(roster, settings);
+          rosterChanged();
+        }
+      }
+      if (button.id === 'create') hooks.onCreate?.();
+      if (button.id === 'endRound') hooks.onEndRound?.();
+      if (button.id === 'endSeries') hooks.onEndSeries?.();
+      // Remove: the next name tag clicked is the player to remove (the page
+      // asks to confirm). Pressing Remove again, or clicking anything else,
+      // cancels.
+      if (button.id === 'remove') setRemoving(!removing);
+      if (button.id === 'start') return hooks.onStart?.();
+    }
+  }
+  let removing = false;
+  function setRemoving(on) {
+    removing = on;
+    hooks.onRemoving?.(on);
+  }
+  // A press on the board itself: pick up a name tag, or turn a dial.
+  function tagOrDial(ev) {
     const tag = tagAt(ev);
+    if (removing) {
+      setRemoving(false);
+      if (tag) hooks.onRemove?.(tag.mesh.userData.playerId);
+      return;
+    }
+    if (tag && locked?.has(tag.mesh.userData.playerId)) {
+      hooks.onLocked?.('player');
+      return;
+    }
     if (tag) {
       const p = pointerOnBoard(ev);
       tag.glide = null;
@@ -2315,6 +2439,10 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     }
     const dial = dialAt(ev);
     if (!dial) return;
+    if (locked) {
+      hooks.onLocked?.('dial');
+      return;
+    }
     // Luke, 2026-10-04: "clicking on the right should do the standard action,
     // and the left should turn them the other way." The standard action
     // (what a plain click always did) is clockwise. Which half was clicked
@@ -2323,7 +2451,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     const c = dial.group.getWorldPosition(new THREE.Vector3()).project(camera);
     const centreX = r.left + ((c.x + 1) / 2) * r.width;
     turn(dial, ev.clientX >= centreX ? -1 : 1); // rotation.z is anticlockwise-positive
-  };
+  }
   const onContextMenu = (ev) => {
     if (dialAt(ev)) ev.preventDefault();
   };
@@ -2341,12 +2469,25 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
     }
     const onCard = overQrCard(ev);
     hoverQr(onCard);
-    renderer.domElement.style.cursor = onCard ? 'zoom-in' : tagAt(ev) ? 'grab' : dialAt(ev) || buttonAt(ev) ? 'pointer' : '';
+    renderer.domElement.style.cursor = onCard ? 'zoom-in' : tagAt(ev) ? (removing ? 'crosshair' : 'grab') : dialAt(ev) || buttonAt(ev) ? 'pointer' : '';
   };
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointerup', onPointerUp);
   // Debug only: hold a button down (true) or let it up (false).
   window.__lobbyButton = (id, down) => pressButton(buttons.find((b) => b.id === id), down);
+  // Debug only: what a press of button `id` does (create, start, qr, shuffle,
+  // endRound, endSeries, remove).
+  window.__lobbyPress = (id) => buttonAction(id);
+  // Debug only: where player `name`'s tag is on screen (client px), to send
+  // a real press there.
+  window.__lobbyTagAt = (name) => {
+    const id = [...roster.names].find(([, n]) => n === name)?.[0];
+    const tag = tags.get(id);
+    if (!tag) return null;
+    const p = tag.mesh.getWorldPosition(new THREE.Vector3()).project(camera);
+    const r = renderer.domElement.getBoundingClientRect();
+    return { x: r.left + ((p.x + 1) / 2) * r.width, y: r.top + ((1 - p.y) / 2) * r.height };
+  };
   // Debug only: the expanded pose (z 0 on the board, 1 expanded) and the
   // hover waves (at time t ms), without animating.
   window.__lobbyQrZoom = (z, waves = false, t = 0) => {
@@ -2445,6 +2586,32 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       renderExtras();
       requestRender();
     },
+    /** Takes a player off the board at once (the teacher's Remove), locked or not. */
+    removePlayer(id) {
+      if (roster.names.has(id)) dropPlayer(id);
+    },
+    /**
+     * Status badges on tags: a Map of id -> { text, tone } (tone: guide,
+     * running, done, dropped, waiting), replacing all current ones; null or
+     * an empty Map clears them.
+     */
+    setStatuses(map) {
+      const ids = new Set([...statuses.keys(), ...(map?.keys() ?? [])]);
+      statuses.clear();
+      for (const [id, st] of map ?? []) statuses.set(id, st);
+      for (const id of ids) placeBadge(id);
+    },
+    /** Locks these players in place (a series is on), or unlocks all (null). */
+    setLocked(ids) {
+      locked = ids ? new Set(ids) : null;
+      if (locked) return;
+      // Unlocked: anyone still away gets a fresh removal timer (a locked
+      // player's ran out without removing them).
+      for (const id of [...awayTimers.keys()]) {
+        setAway(id, false);
+        setAway(id, true);
+      }
+    },
     /** Teams as they stand, for Start: settings, teams (arrays of ids), unassigned, names. */
     getTeams() {
       return {
@@ -2481,6 +2648,8 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       window.removeEventListener('pointerup', onPointerUp);
       delete window.__lobbyButton;
       delete window.__lobbyQr;
+      delete window.__lobbyPress;
+      delete window.__lobbyTagAt;
       delete window.__lobbyQrZoom;
       delete window.__lobbyCapture;
       delete window.__lobbyRoster;

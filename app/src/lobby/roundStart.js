@@ -52,12 +52,21 @@ export function createRoundState() {
  * different from the words the players in their teams [see]". Every device
  * used to draw its own random pair and left/right layout; one draw per
  * group, sent to everyone in it, fixed that.
+ *
+ * `plan` (optional): groupId -> { guideToken, roster }, for the lobby
+ * board's series of rounds (series.js), which picks each team's guide and
+ * runners itself. Returns the rounds started.
  */
-export async function startRounds(send, groups, state) {
+export async function startRounds(send, groups, state, plan = null) {
   if (!state.wordPairs) state.wordPairs = await loadWordPairs();
-  const letters = 'LR';
+  const started = []; // returned, so the lobby board's series can follow each round
   for (const [groupId, tokens] of groups) {
     if (tokens.length === 0) continue;
+    const planned = plan?.get(groupId);
+    if (planned) {
+      started.push(sendRound(send, state, groupId, planned.guideToken, planned.roster));
+      continue;
+    }
     // Guide rotation: everyone in the group guides once before anyone repeats.
     if (!state.guideHistory.has(groupId)) state.guideHistory.set(groupId, new Set());
     const guided = state.guideHistory.get(groupId);
@@ -75,7 +84,15 @@ export async function startRounds(send, groups, state) {
     // seat-offset table from the SAME array by index (skyPath.js's
     // `seatOffsets`). The guide isn't in it: it has no seat.
     const roster = tokens.filter((t) => t !== guideToken);
+    started.push(sendRound(send, state, groupId, guideToken, roster));
+  }
+  return started;
+}
 
+/** Picks one group's forks, words and pickup, and broadcasts its round start. */
+function sendRound(send, state, groupId, guideToken, roster) {
+  const letters = 'LR';
+  {
     const forks = Array.from({ length: SKY_PATH_N_FORKS }, () => letters[Math.random() < 0.5 ? 0 : 1]).join('');
     const words = assignForkWords(state.wordPairs, SKY_PATH_N_FORKS);
     const roundId = randomRoundId();
@@ -84,5 +101,6 @@ export async function startRounds(send, groups, state) {
     // as `words`: every device in the group has to show the same item.
     const pickup = Math.random() < 0.5 ? 'jetpack' : 'abduction';
     send('game-started', { groupId, forks, words, guideToken, roundId, roster, pickup });
+    return { groupId, roundId, guideToken, roster };
   }
 }
