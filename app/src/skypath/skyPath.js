@@ -6716,7 +6716,7 @@ export function mountSkyPath(container, options = {}) {
 
   function avatarSrcFor(key) {
     const entry = ROSTER.find((c) => c.key === key) ?? ROSTER[0];
-    return `/textures/${entry.tex}.${entry.ext}`;
+    return `textures/${entry.tex}.${entry.ext}`;
   }
 
   /** Called from onArrivedAtFork(): the armed abduction fires now — freeze here, light up, ask the guide for help. */
@@ -7936,7 +7936,7 @@ export function mountSkyPath(container, options = {}) {
       window.__debugTriggerGuideView = () => {
         if (!abductGuideView) return;
         const rosterEntry = ROSTER.find((c) => c.key === characterKey) ?? ROSTER[0];
-        abductGuideView.open({ avatarSrc: `/textures/${rosterEntry.tex}.${rosterEntry.ext}` });
+        abductGuideView.open({ avatarSrc: `textures/${rosterEntry.tex}.${rosterEntry.ext}` });
       };
     }
     // Luke, 2026-09-13: "the guide should have no physical presence in the

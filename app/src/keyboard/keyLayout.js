@@ -52,5 +52,5 @@ export const KEY_LAYOUT_ASPECT = 2.201137;
 
 export function keyImageSrc(name) {
   const file = name.length === 1 ? name : name.toLowerCase();
-  return `/textures/keyboard/${file}.png`;
+  return `textures/keyboard/${file}.png`;
 }

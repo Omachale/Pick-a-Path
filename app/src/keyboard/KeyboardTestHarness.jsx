@@ -23,8 +23,8 @@ import { letterImageSrc } from './letterImage.js';
 // A separate file from cardboardPanel.js's own PANEL_SRC — that one is
 // shared with the real abduction-confirm screen, which doesn't have a
 // track on it, so the track art can't overwrite the shared asset.
-const TRACK_PANEL_SRC = '/textures/cardboard-panel-track.png';
-const SHIP_SRC = '/textures/abduct-ship-small.png';
+const TRACK_PANEL_SRC = 'textures/cardboard-panel-track.png';
+const SHIP_SRC = 'textures/abduct-ship-small.png';
 const SHIP_SIZE = { w: 307, h: 107 }; // abduct-ship-small.png's own pixel size
 // "Its centre of mass... always remains in the centre of the track line" —
 // picked as roughly the ship's visual middle; adjust if it should sit
@@ -36,7 +36,7 @@ const SHIP_WIDTH_FRACTION = 0.16; // width as a fraction of the panel
 // Luke, 2026-09-22. Reusing an existing target-selection avatar; swap for
 // real character art whenever that's ready, nothing else here depends on
 // which one it is.
-const AVATAR_SRC = '/textures/figure-robot.webp';
+const AVATAR_SRC = 'textures/figure-robot.webp';
 
 // "The movement of the ship will be a variable we can control" — a plain
 // constant for now; becomes a real teacher-facing setting once that

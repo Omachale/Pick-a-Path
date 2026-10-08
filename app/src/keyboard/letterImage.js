@@ -7,5 +7,5 @@
 export function letterImageSrc(ch, isFirst) {
   if (!/[a-zA-Z]/.test(ch)) return null; // no cardboard-cutout digits yet — see chat
   const cased = isFirst ? ch.toUpperCase() : ch.toLowerCase();
-  return `/textures/letters/${isFirst ? 'upper-v2' : 'lower'}/${cased}.png`;
+  return `textures/letters/${isFirst ? 'upper-v2' : 'lower'}/${cased}.png`;
 }
