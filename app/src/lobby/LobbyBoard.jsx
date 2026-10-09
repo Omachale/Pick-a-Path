@@ -499,7 +499,7 @@ export default function LobbyBoard() {
     botsRef.current.sets.push(set);
     setMessage(`${n} bot players joined. Put them in teams (Shuffle), join on your phone, then Start.`);
   };
-  // DEV, temporary: the projector in its own window, to drag onto the TV
+  // The projector in its own window, to drag onto the TV
   // (then F there for full screen).
   const openProjector = () => {
     const code = codeRef.current;
@@ -539,15 +539,17 @@ export default function LobbyBoard() {
       <button onClick={addPlayer} style={{ position: 'fixed', top: 8, right: 8, zIndex: 10 }}>
         + player (dev)
       </button>
+      {/* The projector button is live (not dev-only): the teacher needs it in
+          every real game. Placement is provisional, until Luke says where
+          it belongs on the board. The bots stay dev-only: they would join a
+          real class as fake players. */}
+      <button onClick={openProjector} style={{ position: 'fixed', top: 36, right: 8, zIndex: 10 }}>
+        Open projector
+      </button>
       {import.meta.env.DEV && (
-        <>
-          <button onClick={addBots} style={{ position: 'fixed', top: 36, right: 8, zIndex: 10 }}>
-            + 5 bots (dev)
-          </button>
-          <button onClick={openProjector} style={{ position: 'fixed', top: 64, right: 8, zIndex: 10 }}>
-            Open projector (dev)
-          </button>
-        </>
+        <button onClick={addBots} style={{ position: 'fixed', top: 64, right: 8, zIndex: 10 }}>
+          + 5 bots (dev)
+        </button>
       )}
       {victory && <VictoryTown teams={victory} onClose={closeVictory} />}
     </>

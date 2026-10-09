@@ -2332,3 +2332,5 @@ each player has had a chance to be a guide."
   window visible or their timers slow); "Open projector (dev)" opens ?projector=CODE in a
   pop-up window to drag onto the TV. Projector: F toggles full screen. Checked: bots join
   and play a round from the board page. Delete the two buttons once testing is done.
+
+- Added 2026-10-09: the "Open projector" button is no longer dev-only (LobbyBoard.jsx, top right, below "+ player (dev)"); placement provisional. Bots stay dev-only.
