@@ -123,7 +123,7 @@ controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_ROTATE };
 controls.update();
 
 const loader = new THREE.TextureLoader();
-function tex(name, { ext = 'png', repeatWrap = false, tile = false } = {}) {
+function tex(name, { ext = 'webp', repeatWrap = false, tile = false } = {}) {
   const t = loader.load(`textures/${name}.${ext}`);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());

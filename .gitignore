@@ -14,3 +14,6 @@ persistent-classes/config.js
 *.swp
 *.swo
 *~
+
+# Test monitor logs (app/src/lobby/monitor.js), written by the dev server
+app/recordings/monitor-*.json

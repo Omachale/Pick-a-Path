@@ -198,7 +198,7 @@ function rockDetail(r, depth, seed, style) {
 let cobbleTex = null;
 function getCobbleTex(loader) {
   if (!cobbleTex) {
-    cobbleTex = loader.load('textures/island-circle.png');
+    cobbleTex = loader.load('textures/island-circle.webp');
     cobbleTex.colorSpace = THREE.SRGBColorSpace;
     cobbleTex.anisotropy = 4;
   }

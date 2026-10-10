@@ -25,20 +25,29 @@
  * Lobby screen no longer has a teacher-only branch — group management and
  * starting rounds both live on the teacher's dashboard now).
  */
-import { useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useLobby } from './lobby/useLobby.js';
 import Lobby from './lobby/Lobby.jsx';
-import GameRoom from './lobby/GameRoom.jsx';
-import VictoryStage from './victory/VictoryStage.jsx';
-import SkyPath from './skypath/SkyPath.jsx';
-import LavaCavern from './cavern/LavaCavern.jsx';
-import TeacherDashboard from './lobby/TeacherDashboard.jsx';
-import KeyboardTestHarness from './keyboard/KeyboardTestHarness.jsx';
-import LobbyBoard from './lobby/LobbyBoard.jsx';
 import PlayerJoin from './lobby/PlayerJoin.jsx';
 import RoundOver from './lobby/RoundOver.jsx';
 import RunScore from './lobby/RunScore.jsx';
-import Projector from './lobby/Projector.jsx';
+
+// Each heavy screen is its own download, fetched only when it's shown
+// (2026-10-10, after 30 s+ loads on school Wi-Fi): a phone never needs the
+// teacher's lobby board, dashboard or projector, and the teacher's PC never
+// needs the game test modes. The small screens a phone sees first (join,
+// waiting, scores) stay in the main file so they appear at once. A phone
+// starts fetching the game itself as soon as it's on the join screen (see
+// prefetchGame below), so it's normally ready before the round starts.
+const loadGameRoom = () => import('./lobby/GameRoom.jsx');
+const GameRoom = lazy(loadGameRoom);
+const VictoryStage = lazy(() => import('./victory/VictoryStage.jsx'));
+const SkyPath = lazy(() => import('./skypath/SkyPath.jsx'));
+const LavaCavern = lazy(() => import('./cavern/LavaCavern.jsx'));
+const TeacherDashboard = lazy(() => import('./lobby/TeacherDashboard.jsx'));
+const KeyboardTestHarness = lazy(() => import('./keyboard/KeyboardTestHarness.jsx'));
+const LobbyBoard = lazy(() => import('./lobby/LobbyBoard.jsx'));
+const Projector = lazy(() => import('./lobby/Projector.jsx'));
 import { TEACHER_SIGN_IN } from './lobby/sessionConfig.js';
 
 const params = new URLSearchParams(location.search);
@@ -125,10 +134,34 @@ function SoloVictoryStage() {
   );
 }
 
+// Shown for the moment a screen's code is still arriving.
+function Loading() {
+  return (
+    <div style={{ position: 'fixed', inset: 0, display: 'grid', placeItems: 'center', background: '#05070a', color: '#cfd6df', font: '16px system-ui, sans-serif' }}>
+      Loading…
+    </div>
+  );
+}
+
 export default function App() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <AppRoutes />
+    </Suspense>
+  );
+}
+
+function AppRoutes() {
   const [sessionCode, setSessionCode] = useState(params.get('join') ?? null);
   const [teacherView, setTeacherView] = useState(false);
   const lobby = useLobby(sessionCode);
+  // Phones: start fetching the game (GameRoom -> Sky Path) while the player
+  // is still on the join and waiting screens, so it's ready by round start.
+  // Same condition as `playerRoute` below (read from the URL, so it never
+  // changes); here because hooks can't follow the early returns.
+  useEffect(() => {
+    if (params.has('join') || params.has('devJoin') || params.get('player') === '1') loadGameRoom().catch(() => {});
+  }, []);
 
   if (params.get('cavern') === '1') return <SoloLavaCavern />;
   if (params.get('victory') === '1') return <SoloVictoryStage />;

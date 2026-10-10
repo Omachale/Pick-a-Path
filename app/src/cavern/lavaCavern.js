@@ -455,7 +455,7 @@ export function mountLavaCavern(container, options = {}) {
   const skyBase = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), skyBaseMat);
   skyBase.rotation.x = -Math.PI / 2;
   scene.add(skyBase);
-  texLoader.load('textures/cavern-sky-base.jpg', (t) => {
+  texLoader.load('textures/cavern-sky-base.webp', (t) => {
     // ONE static, untiled copy stretched across the whole plane — see the
     // cloud layer's own comment below for why a repeated copy isn't used
     // here either. At this scale (viewed only through a distant, narrow
@@ -490,7 +490,7 @@ export function mountLavaCavern(container, options = {}) {
   // "Cavern Clouds.png", made to tile (content reaches the edges; sampled
   // border pixels are near-zero alpha all the way around, so even a
   // remaining mismatch stays invisible).
-  texLoader.load('textures/cavern-clouds.png', (t) => {
+  texLoader.load('textures/cavern-clouds.webp', (t) => {
     t.colorSpace = THREE.SRGBColorSpace;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.repeat.set(6, 6); // tiled, per Luke: "tile the clouds"

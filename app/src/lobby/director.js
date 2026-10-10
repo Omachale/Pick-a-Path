@@ -35,12 +35,12 @@
  * starts) x repetition (each showing of the same type in the last
  * REPEAT_WINDOW s takes off up to REPEAT_PENALTY) x fairness (a team not
  * shown lately gains up to FAIRNESS) x its own fixed random +-JITTER.
- * Cutting: at least MIN_SHOT_S on a shot (except that a fall, rescue or
+ * Cutting: at least minShotS on a shot (except that a fall, rescue or
  * abduction may cut into a mere crossing or filler at once — "a player
  * walking across a bridge can probably be interrupted" — since a fall
  * gives only a few seconds' warning); a challenger must beat the shot's
  * score by HYSTERESIS (TEAM_CHANGE_HYSTERESIS when it means changing team,
- * which costs a cloud wipe; the same margin keeps the camera with its team
+ * which costs a crossfade; the same margin keeps the camera with its team
  * when a story ends and it's free to choose); a rescue or abduction is never cut once its
  * payoff has begun; a fall may be once it has been clear for
  * FALL_CLEAR_S. A story that has ended frees the camera at once.
@@ -52,6 +52,27 @@
  * (they're short) or from its payoff if it's an abduction. It keeps its
  * half until its story is over; whichever half outlasts the other is then
  * the whole screen again (decide() simply picks it as the shot).
+ *
+ * CALMER (Luke, 2026-10-10, after the first look on the TV: "the view from
+ * the projector was too jumpy: it moved around too often and too quickly.
+ * And split screen was used a large proportion of the time"). The timings
+ * and switches below are DIRECTOR_TUNE, read live, so the projector's
+ * slider panel (T) can set them by eye; bake the settled values into
+ * DIRECTOR_TUNE's defaults and delete the panel. On top of the rules above:
+ * - Longer shots (minShotS) and longer on a team (minTeamS), and a finished
+ *   story is held for holdS more before the camera is free (not a deciding
+ *   shot: the same player's next story follows it).
+ * - Only a rescue or an abduction may take the camera to another team while
+ *   the current shot is still going — wrong answers are common in a real
+ *   class, so a plain fall elsewhere doesn't (fallsChangeTeam). Once the shot
+ *   is over, any team may be next, after minTeamS.
+ * - Within a team, the camera stays with its player: nobody else's crossing
+ *   or decision interrupts theirs (except that someone moving may take over
+ *   from a mere deciding shot), and when free it prefers their next story
+ *   (playerStick).
+ * - The split only when both halves are rescues or abductions (fallsSplit
+ *   lets falls in), opened at most
+ *   once per splitGapS, and kept for at least splitMinS once open.
  */
 
 const TYPES = {
@@ -67,12 +88,27 @@ const REPEAT_PENALTY = 0.15;
 const FAIRNESS = 0.2;
 const FAIRNESS_FULL_AFTER = 40; // s since the team was last on screen
 const JITTER = 0.08;
-const MIN_SHOT_S = 4;
-// After a cloud wipe, stay with the new team at least this long, unless a
-// BIG story calls elsewhere: seen live, short crossings ending one after
-// another on two teams wiped back and forth every few seconds.
-const MIN_TEAM_S = 10;
-const BIG = new Set(['abduction', 'rescue', 'fall']); // may cut into a SMALL shot before MIN_SHOT_S
+/**
+ * The director's timings and switches, read live (see CALMER in the header).
+ * TEMPORARY as a mutable object: the projector's slider panel writes into it.
+ * minTeamS: after changing team, stay with the new one at least this long
+ * unless a rescue or abduction calls elsewhere — seen live, short crossings
+ * ending one after another on two teams switched back and forth every few
+ * seconds. fadeS (the crossfade between teams) is the projector's, kept here
+ * so all the dials are together.
+ */
+export const DIRECTOR_TUNE_DEFAULTS = {
+  minShotS: 8,
+  minTeamS: 20,
+  holdS: 2.5,
+  playerStick: 1.5,
+  fallsChangeTeam: false,
+  fallsSplit: false,
+  splitMinS: 6,
+  splitGapS: 60,
+  fadeS: 0.5,
+};
+const BIG = new Set(['abduction', 'rescue', 'fall']); // may cut into a SMALL shot before minShotS
 const SMALL = new Set(['crossing', 'deciding']);
 const HYSTERESIS = 1.3;
 const TEAM_CHANGE_HYSTERESIS = 1.5;
@@ -80,7 +116,12 @@ const FALL_CLEAR_S = 2.5;
 const AFTERMATH_S = { abduction: 3, rescue: 1.5, fall: 1, temple: 1, crossing: 0.5, deciding: 0 }; // kept on after it ends
 const STALE_S = 40; // a story with no news for this long is dropped
 
-export function createDirector({ now = () => performance.now() / 1000, rand = Math.random } = {}) {
+export function createDirector({ now = () => performance.now() / 1000, rand = Math.random, tune = { ...DIRECTOR_TUNE_DEFAULTS } } = {}) {
+  // Which stories may pull the camera to another team mid-shot, and which
+  // may take the split's other half (see CALMER).
+  const crossTeam = (type) => type === 'rescue' || type === 'abduction' || (type === 'fall' && tune.fallsChangeTeam);
+  const splitWorthy = (type) => type === 'rescue' || type === 'abduction' || (type === 'fall' && tune.fallsSplit);
+  let lastSplitAt = -Infinity;
   const players = new Map(); // token -> { groupId, phase, forkIndex, airborne, firing, abducting, defending, out }
   const stories = new Map(); // id -> story
   const history = []; // { type, groupId, at } — shots taken
@@ -203,16 +244,19 @@ export function createDirector({ now = () => performance.now() / 1000, rand = Ma
   };
 
   function live(s, t) {
-    return s && (!s.ended || t - s.ended < AFTERMATH_S[s.type]);
+    return s && (!s.ended || t - s.ended < AFTERMATH_S[s.type] + (s.type === 'deciding' ? 0 : tune.holdS));
   }
   function decideSecond(primary) {
     const t = now();
-    if (second && live(second.story, t) && second.story.groupId !== primary.groupId && second.story.id !== primary.id) return asShot(second.story);
+    const keep = second && (live(second.story, t) || t - second.since < tune.splitMinS);
+    if (keep && second.story.groupId !== primary.groupId && second.story.id !== primary.id) return asShot(second.story);
     second = null;
-    if (!BIG.has(primary.type) || !live(primary, t)) return null;
-    const c = candidates(t).find((x) => BIG.has(x.story.type) && x.story.groupId !== primary.groupId && (x.story.payoffAt || x.story.type !== 'abduction'));
+    if (!splitWorthy(primary.type) || !live(primary, t)) return null; // both halves rescues/abductions (see CALMER)
+    if (t - lastSplitAt < tune.splitGapS) return null;
+    const c = candidates(t).find((x) => splitWorthy(x.story.type) && x.story.groupId !== primary.groupId && (x.story.payoffAt || x.story.type !== 'abduction'));
     if (!c) return null;
-    second = { story: c.story };
+    second = { story: c.story, since: t };
+    lastSplitAt = t;
     history.push({ type: c.story.type, groupId: c.story.groupId, at: t });
     teamShownAt.set(c.story.groupId, t);
     return asShot(c.story);
@@ -225,27 +269,45 @@ export function createDirector({ now = () => performance.now() / 1000, rand = Ma
       tidy(t);
       const cands = candidates(t);
       const cur = shot && stories.get(shot.story.id);
-      const curLive = cur && (!cur.ended || t - cur.ended < AFTERMATH_S[cur.type]);
-      // May the camera leave this team for `c`? (See MIN_TEAM_S.)
-      const mayLeave = (c) => !cur || c.story.groupId === cur.groupId || BIG.has(c.story.type) || t - teamSince >= MIN_TEAM_S;
+      const curLive = live(cur, t);
+      // May the camera leave this team for `c`? (See minTeamS.)
+      const mayLeave = (c) => !cur || c.story.groupId === cur.groupId || crossTeam(c.story.type) || t - teamSince >= tune.minTeamS;
       if (!curLive) {
         // The split's other half, still going, has the whole screen next.
         if (second && live(second.story, t)) return take({ story: second.story }, t);
-        // Free to choose, but a cloud wipe isn't free: stay with this team
-        // unless another has something clearly better (seen live: a wipe
+        // Free to choose, but changing team isn't free: stay with this team
+        // unless another has something clearly better (seen live: a switch
         // away for a filler shot, then straight back for a fall).
         const best = cands[0];
         const same = cur && cands.find((c) => c.story.groupId === cur.groupId);
         if (best && same && best.story.groupId !== cur.groupId && (best.score < same.score * TEAM_CHANGE_HYSTERESIS || !mayLeave(best))) return take(same, t);
-        if (best && !mayLeave(best)) return current(); // nothing here yet: stay on the last shot a little longer
+        // Nothing here yet: stay on the last shot a little longer — but not
+        // for the whole of minTeamS when this team has nothing left at all.
+        if (best && !mayLeave(best) && (!cur?.ended || now() - cur.ended < 3)) return current();
         return take(best, t);
       }
       if (!interruptible(cur, t)) return current();
       const curScore = score(cur, t, true);
-      const best = cands.find((c) => c.story.id !== cur.id && c.story.id !== second?.story.id); // (the other half is already on screen)
+      // Mid-shot, only a rescue or an abduction calls the camera to another
+      // team, and nobody else's small moment interrupts this player's: the
+      // best challenger among those allowed to interrupt at all.
+      // (A deciding shot is only filler, though — someone standing at a fork,
+      // often just waiting for their team: seen live, 29 s on one player
+      // waiting while their teammates crossed. Someone actually moving may
+      // take over from it, after minShotS like any cut.)
+      const mayInterrupt = (c) =>
+        c.story.groupId !== cur.groupId
+          ? crossTeam(c.story.type)
+          : c.story.token === cur.token || BIG.has(c.story.type) || (cur.type === 'deciding' && c.story.type !== 'deciding');
+      const eligible = cands.filter((c) => c.story.id !== cur.id && c.story.id !== second?.story.id && mayInterrupt(c)); // (the other half is already on screen)
+      let best = eligible[0];
       if (!best) return current();
-      if (t - shot.since < MIN_SHOT_S && !(BIG.has(best.story.type) && SMALL.has(cur.type))) return current();
-      const margin = best.story.groupId === cur.groupId ? HYSTERESIS : TEAM_CHANGE_HYSTERESIS;
+      // Changing team isn't free: a nearly-as-good challenger on this team wins.
+      const home = eligible.find((c) => c.story.groupId === cur.groupId);
+      if (home && best.story.groupId !== cur.groupId && home.score * TEAM_CHANGE_HYSTERESIS >= best.score) best = home;
+      const otherTeam = best.story.groupId !== cur.groupId;
+      if (t - shot.since < tune.minShotS && !(BIG.has(best.story.type) && SMALL.has(cur.type))) return current();
+      const margin = otherTeam ? TEAM_CHANGE_HYSTERESIS : HYSTERESIS;
       if (best.score > curScore * margin && mayLeave(best)) return take(best, t);
       return current();
     }
@@ -277,6 +339,7 @@ export function createDirector({ now = () => performance.now() / 1000, rand = Ma
   function score(s, t, isCurrent = false) {
     const ty = TYPES[s.type];
     let v = ty.base * (s.payoffAt ? 1 : ty.build) * s.jitter;
+    if (!isCurrent && shot && s.token === shot.story.token && s.id !== shot.story.id) v *= tune.playerStick;
     if (!isCurrent) {
       for (const h of history) {
         const age = t - h.at;

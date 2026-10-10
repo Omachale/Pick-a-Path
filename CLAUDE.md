@@ -53,7 +53,12 @@ When handing over anything to look at, include the full URL — e.g.
   there rather than at the call site.
 - `TODO.md` (repo root) — the long-form record of what was tried and why.
 - `Assets/` — Luke's source art. Copies for the app go in
-  `app/public/textures/` (lowercase-hyphen names).
+  `app/public/textures/` (lowercase-hyphen names), **as WebP, not PNG/JPG**
+  (2026-10-10: converting every texture cut Sky Path's download from 22 MB to
+  7.5 MB; slow school Wi-Fi made the old size take 30 s+). Keep the editable
+  originals in `Assets/`. Command used: `magick in.png -quality 82 -define
+  webp:alpha-quality=100 -define webp:method=6 out.webp` (alpha kept lossless,
+  so cut-out edges and transparency masks are exact).
 
 ## Conventions worth knowing
 

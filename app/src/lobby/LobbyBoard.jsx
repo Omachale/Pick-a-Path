@@ -40,6 +40,7 @@ import { joinUrl, DEFAULT_PLAYER_COLOUR } from './sessionConfig.js';
 import { createSeries, seriesMembers, addMembers, settleAbsent, planRound, roundInProgress, roundNumber, recordStarts, recordResult, seriesDone, victoryTeams, latestRounds, roundComplete, discardRound, closeRounds, endSeries, removeMember } from './series.js';
 import { totalScore, roundToNearestHalf } from './scoring.js';
 import VictoryTown from './VictoryTown.jsx';
+import { startMonitor } from './monitor.js';
 
 // This browser's current game, so a reload mid-lesson reconnects to it.
 const GAME_KEY = 'skypath.board.gameCode';
@@ -110,8 +111,14 @@ export default function LobbyBoard() {
   const removedRef = useRef(new Set()); // tokens removed by the teacher (see removedKey)
   const announcedRef = useRef(0); // the last round number whose end was announced
   const [message, setMessage] = useState(null);
+  const monRef = useRef(null); // TEMPORARY test monitor (monitor.js)
+  useEffect(() => {
+    if (message) monRef.current?.log('message', { text: message });
+  }, [message]);
   const [victory, setVictory] = useState(null); // the victory scene's teams, while it shows
+  const [victoryOnProjector, setVictoryOnProjector] = useState(false); // shown there instead (see showVictory)
   const victoryShownRef = useRef(false);
+  const lastWhoRef = useRef(''); // the monitor's last players line
   // DEV: bot players run from this page (src/dev/bots.js) — see addBots below.
   const botsRef = useRef({ next: 0, sets: [] });
   const stopBots = () => {
@@ -122,6 +129,7 @@ export default function LobbyBoard() {
   // No series any more: unlock the board, clear the badges, forget it.
   function resetSeries() {
     setVictory(null);
+    setVictoryOnProjector(false);
     seriesRef.current = null;
     victoryShownRef.current = false;
     boardRef.current?.setLocked(null);
@@ -130,13 +138,37 @@ export default function LobbyBoard() {
   }
 
   useEffect(() => {
+    // TEMPORARY test monitor (monitor.js). The one-second sample is the
+    // series as the board sees it; the realtime counts include any bots
+    // running in this window.
+    const mon = (monRef.current = startMonitor('board', {
+      code: codeRef.current,
+      sample: () => {
+        const series = seriesRef.current;
+        return {
+          code: codeRef.current,
+          present: presentRef.current?.size,
+          bots: botsRef.current.sets.reduce((n, set) => n + set.bots.length, 0),
+          away: awaySinceRef.current.size,
+          out: outSinceRef.current.size,
+          round: series ? roundNumber(series) : null,
+          teams: series ? series.teams.map((t) => ({ g: t.groupId, members: t.members.length, rounds: t.rounds.length, open: t.rounds.filter((r) => !r.result && !r.closed).length })) : null,
+          victory: victoryShownRef.current,
+        };
+      },
+    }));
     const saveSeries = () => {
       const code = codeRef.current;
       if (!code) return;
       if (seriesRef.current) localStorage.setItem(seriesKey(code), JSON.stringify(seriesRef.current));
       else localStorage.removeItem(seriesKey(code));
     };
-    const showVictory = () => setVictory(victoryTeams(seriesRef.current, peopleRef.current, DEFAULT_PLAYER_COLOUR));
+    // Only one screen plays the victory scene: the projector, if one is open
+    // (teacherSession.js projectorOpen), else this board.
+    const showVictory = () => {
+      if (sessionRef.current?.projectorOpen?.()) setVictoryOnProjector(true);
+      else setVictory(victoryTeams(seriesRef.current, peopleRef.current, DEFAULT_PLAYER_COLOUR));
+    };
     const lockSeries = () => boardRef.current.setLocked(seriesRef.current ? seriesMembers(seriesRef.current) : null);
     const nameOf = (tok) => peopleRef.current.get(tok)?.displayName ?? 'A player';
     const teamName = (groupId) => `Team ${TEAM_WORDS[groupId - 1] ?? groupId}`;
@@ -296,8 +328,12 @@ export default function LobbyBoard() {
       board.setGame(code, joinUrl(code));
       board.importState(readJson(stateKey(code)));
       lockSeries();
+      monRef.current?.setCode(code);
       sessionRef.current = openTeacherSession(code, {
         onPlayers(all) {
+          const who = all.map((p) => `${p.displayName ?? p.token}${p.roundId ? '@' + p.roundId.slice(0, 8) : ''}`).sort().join(', ');
+          if (who !== lastWhoRef.current) monRef.current?.log('players', { n: all.length, who });
+          lastWhoRef.current = who;
           // A removed player who comes back is kept off the board and told.
           const back = all.filter((p) => removedRef.current.has(p.token)).map((p) => p.token);
           if (back.length) sessionRef.current?.send('removed', { tokens: back });
@@ -313,6 +349,7 @@ export default function LobbyBoard() {
           checkProgress();
         },
         onRoundEnded({ token, roundId, result }) {
+          monRef.current?.log('in:round-ended', { token, round: roundId?.slice(0, 8), success: result?.success, fork: result?.forkIndex });
           const series = seriesRef.current;
           if (!series || !recordResult(series, token, roundId, result)) return;
           saveSeries();
@@ -324,6 +361,13 @@ export default function LobbyBoard() {
         seriesIsOver: () => victoryShownRef.current,
         victory: () => (victoryShownRef.current && seriesRef.current ? victoryTeams(seriesRef.current, peopleRef.current, DEFAULT_PLAYER_COLOUR) : null),
       });
+      // Everything the board sends, in brief.
+      const sendRaw = sessionRef.current.send;
+      sessionRef.current.send = (event, payload) => {
+        const brief = event === 'game-started' ? { g: payload.groupId, round: payload.roundId?.slice(0, 8), roster: payload.roster, guide: payload.guideToken, pickup: payload.pickup } : event === 'series-ended' ? { teams: payload.teams?.length } : payload;
+        monRef.current?.log(`out:${event}`, brief);
+        return sendRaw(event, payload);
+      };
     }
 
     const hooks = {
@@ -469,6 +513,8 @@ export default function LobbyBoard() {
     const saved = localStorage.getItem(GAME_KEY);
     if (saved) connect(saved);
     return () => {
+      mon.stop();
+      monRef.current = null;
       clearInterval(ticker);
       stopBots();
       sessionRef.current?.close();
@@ -479,6 +525,7 @@ export default function LobbyBoard() {
 
   // Back from the victory scene: the series is over; Start begins a new one.
   const closeVictory = () => {
+    setVictoryOnProjector(false);
     resetSeries();
     setMessage('Press Start to play another series of rounds.');
   };
@@ -487,14 +534,17 @@ export default function LobbyBoard() {
   // bunch of bot players, and I'll add myself, and press start"): five bots
   // that join this game and play its rounds for real (src/dev/bots.js), run
   // from this page, so a test needs only this window, the projector and a
-  // phone. They stop on Create and when the page closes. Keep this window
-  // visible: a minimised window's timers slow right down, and so do the bots.
+  // phone. They stop on Create and when the page closes. `unthrottled`: they
+  // keep their own time even when this window is minimised or covered (the
+  // test monitor showed Luke's board hidden and its timers down to once a
+  // minute — the bots, and so the projector, stood still). It keeps a CPU core
+  // busy while bots run; dev only.
   const addBots = async () => {
     const code = codeRef.current;
     if (!code) return setMessage('Press Create first, to make a game for the bots to join.');
     const n = 5;
     const { startBots } = await import('../dev/bots.js');
-    const set = await startBots(code, n, { offset: botsRef.current.next });
+    const set = await startBots(code, n, { offset: botsRef.current.next, unthrottled: true });
     botsRef.current.next += n;
     botsRef.current.sets.push(set);
     setMessage(`${n} bot players joined. Put them in teams (Shuffle), join on your phone, then Start.`);
@@ -552,6 +602,14 @@ export default function LobbyBoard() {
         </button>
       )}
       {victory && <VictoryTown teams={victory} onClose={closeVictory} />}
+      {victoryOnProjector && (
+        <div style={{ position: 'fixed', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', zIndex: 20, padding: '22px 28px', borderRadius: 12, background: 'rgba(20,16,10,0.88)', color: '#f4ecd8', font: '600 18px/1.4 system-ui, sans-serif', textAlign: 'center' }}>
+          <div>The victory scene is playing on the projector.</div>
+          <button onClick={closeVictory} style={{ marginTop: 14, padding: '8px 18px', font: 'inherit', borderRadius: 8, border: 0, cursor: 'pointer' }}>
+            Back to lobby
+          </button>
+        </div>
+      )}
     </>
   );
 }

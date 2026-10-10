@@ -72,7 +72,7 @@ import { buildNameTagCanvas } from './skypath/nameTag.js';
 // file's header on why it isn't imported; worth actually consolidating
 // into a shared module soon, this makes three places that must be kept in
 // sync by hand) ---
-const INTERFACE_SRC = 'textures/alien-interface-trimmed.jpg';
+const INTERFACE_SRC = 'textures/alien-interface-trimmed.webp';
 const INTERFACE_ASPECT = 992 / 487;
 const FINAL_WIDTH = 860;
 const FINAL_CENTRE = { x: 516, y: 312 };
@@ -89,7 +89,7 @@ function finalRect() {
 // characters picked from skyPath.js's real ROSTER art, `indy` first since
 // it's what Luke's own mockup happened to show.
 const ROSTER = [
-  { name: 'William', charKey: 'indy', ext: 'png' },
+  { name: 'William', charKey: 'indy', ext: 'webp' },
   { name: 'Serena', charKey: 'woman1', ext: 'webp' },
   { name: 'Louis', charKey: 'robot', ext: 'webp' },
   { name: 'Faraday', charKey: 'monkey', ext: 'webp' },
@@ -133,8 +133,8 @@ async function main() {
   const [panelImg, interfaceImg, arrowLeftImg, arrowRightImg] = await Promise.all([
     loadImage(PANEL_SRC),
     loadImage(INTERFACE_SRC),
-    loadImage('textures/alien-arrow-left.png'),
-    loadImage('textures/alien-arrow-right.png'),
+    loadImage('textures/alien-arrow-left.webp'),
+    loadImage('textures/alien-arrow-right.webp'),
   ]);
 
   // Every roster member's avatar + name tag built ONCE up front — cycling

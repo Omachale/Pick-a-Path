@@ -28,7 +28,7 @@
 import QRCode from 'qrcode';
 
 export const QR_CARD = {
-  backingSrc: 'textures/qr-backing.png',
+  backingSrc: 'textures/qr-backing.webp',
   // Where the code sits on the backing, in backing-image px (811x586). The
   // card spans x 274-789, y 65-567. The first version left 96/95/59/47 px of
   // card (left/top/right/bottom). Halved, that's 48/48/30/24, but the thumb

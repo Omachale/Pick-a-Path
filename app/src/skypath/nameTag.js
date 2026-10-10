@@ -10,7 +10,7 @@
  */
 
 const LETTER_BASE = 'textures/letters';
-const CARD_BG_SRC = 'textures/card-background.png';
+const CARD_BG_SRC = 'textures/card-background.webp';
 
 // -- the four constants agreed with Luke on 2026-08-29/30 via the live
 // slider prototype (app/descender-tuner.html) -- do not re-tune these
@@ -99,7 +99,7 @@ function loadImage(src) {
 }
 
 function letterSrc(ch) {
-  return /[A-Z]/.test(ch) ? `${LETTER_BASE}/upper-v2/${ch}.png` : `${LETTER_BASE}/lower/${ch}.png`;
+  return /[A-Z]/.test(ch) ? `${LETTER_BASE}/upper-v2/${ch}.webp` : `${LETTER_BASE}/lower/${ch}.webp`;
 }
 
 // Gamma/contrast/saturation, added 2026-08-30 as the alternative to chasing

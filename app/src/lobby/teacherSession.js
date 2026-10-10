@@ -21,7 +21,17 @@ export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {},
     const list = [...latest.values()].map((r) => ({ ...r, over: !!roundIsOver?.(r.roundId) }));
     ch.send({ type: 'broadcast', event: 'rounds-now', payload: { rounds: list, seriesEnded: !!seriesIsOver?.(), victory: victory?.() ?? null } });
   };
-  ch.on('broadcast', { event: 'projector-hello' }, sendRoundsNow);
+  ch.on('broadcast', { event: 'projector-hello' }, () => {
+    projectorSeenAt = Date.now();
+    sendRoundsNow();
+  });
+  // Whether a projector is open: it says so on opening and every
+  // PROJECTOR_HERE_MS after (Projector.jsx). The board shows the victory
+  // scene itself only when none is — Luke, 2026-10-10: "If the projector is
+  // on its own screen and showing the victory, we don't need it to be shown
+  // on any other screens" (two copies on one PC halved both frame rates).
+  let projectorSeenAt = 0;
+  ch.on('broadcast', { event: 'projector-here' }, () => (projectorSeenAt = Date.now()));
   ch.on('presence', { event: 'sync' }, () => {
     // Newest meta per key, then de-dup by token: a reconnecting player can
     // transiently double up in presence state before the old entry times
@@ -52,6 +62,10 @@ export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {},
     },
     close() {
       supabase.removeChannel(ch);
+    },
+    /** True while a projector has been heard from lately (see projectorSeenAt). */
+    projectorOpen() {
+      return Date.now() - projectorSeenAt < 25000;
     },
   };
 }

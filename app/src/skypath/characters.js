@@ -9,7 +9,7 @@
 // `tex`/`ext` name the card art in public/textures/.
 export const CHARACTERS = [
   { key: 'woman2', tex: 'figure-woman2', ext: 'webp' },
-  { key: 'indy', tex: 'figure-indy', ext: 'png' },
+  { key: 'indy', tex: 'figure-indy', ext: 'webp' },
   { key: 'woman1', tex: 'figure-woman1', ext: 'webp' },
   { key: 'alien', tex: 'figure-alien', ext: 'webp' },
   { key: 'bat', tex: 'figure-bat', ext: 'webp' },

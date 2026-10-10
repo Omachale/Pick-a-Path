@@ -175,7 +175,7 @@ new GLTFLoader().load(
     // the deck/bridge junction much harder to read than it will be in play,
     // which is one of the things this page exists to judge.
     const deckMat = deckMesh.material.clone();
-    deckMat.map = new THREE.TextureLoader().load('textures/island-circle.png', (t) => {
+    deckMat.map = new THREE.TextureLoader().load('textures/island-circle.webp', (t) => {
       t.colorSpace = THREE.SRGBColorSpace;
     });
     deckMat.vertexColors = false;
@@ -200,7 +200,7 @@ const walker = new THREE.Mesh(
   new THREE.PlaneGeometry(FIGURE_H * FIGURE_ASPECT, FIGURE_H),
   new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
 );
-new THREE.TextureLoader().load('textures/figure-indy.png', (t) => {
+new THREE.TextureLoader().load('textures/figure-indy.webp', (t) => {
   t.colorSpace = THREE.SRGBColorSpace;
   walker.material.map = t;
   walker.material.needsUpdate = true;

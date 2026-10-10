@@ -10,7 +10,7 @@
   #stage-wrap { overflow: auto; padding-bottom: 10px; }
   #stage {
     position: relative;
-    background-image: url('textures/card-background.png');
+    background-image: url('textures/card-background.webp');
     background-size: cover;
     background-position: center;
     border-radius: 6px;
@@ -117,7 +117,7 @@
   for (const c of "abcdefghijklmnopqrstuvwxyz") letterScale[c] = 1.0;
 
   function letterSrc(ch) {
-    return /[A-Z]/.test(ch) ? `textures/letters/upper-v2/${ch}.png` : `textures/letters/lower/${ch}.png`;
+    return /[A-Z]/.test(ch) ? `textures/letters/upper-v2/${ch}.webp` : `textures/letters/lower/${ch}.webp`;
   }
 
   // Preload every unique glyph used in the sentence before laying out, since

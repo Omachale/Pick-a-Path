@@ -14,7 +14,7 @@
  */
 import { scoreBreakdown } from './scoring.js';
 
-const BACKGROUND = 'textures/mode-skytemple.jpg';
+const BACKGROUND = 'textures/mode-skytemple.webp';
 
 export function ScoreCard({ result }) {
   const b = scoreBreakdown(result);

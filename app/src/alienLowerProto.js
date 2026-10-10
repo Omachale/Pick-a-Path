@@ -59,7 +59,7 @@
 
 import { PANEL_SRC, PANEL_SIZE, PANEL_HOLES, loadImage, drawPanel } from './cardboardPanel.js';
 
-const STRING_SRC = 'textures/hanging-string.png';
+const STRING_SRC = 'textures/hanging-string.webp';
 const STRING_TILE_SIZE = { w: 67, h: 526 };
 // The rope's own opaque pixels sit centred around local x=35 in that 67px
 // canvas (measured off the source art), not x=33.5 — used so the string's
@@ -74,7 +74,7 @@ const STRING_OPAQUE_CENTER_X = 35;
 const STRING_LEN = 2400;
 
 // --- duplicated from alienInterfaceProto.js — see this file's header ---
-const INTERFACE_SRC = 'textures/alien-interface-trimmed.jpg';
+const INTERFACE_SRC = 'textures/alien-interface-trimmed.webp';
 const INTERFACE_ASPECT = 992 / 487;
 const REVEAL_CROSSFADE = 0.18;
 const FINAL_WIDTH = 860;

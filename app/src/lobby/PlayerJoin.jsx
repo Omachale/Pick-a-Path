@@ -31,7 +31,7 @@ import { normalizePlayerName } from '../skypath/nameTag.js';
 import { clearToken } from './identity.js';
 import { joinedKey } from './useLobby.js';
 
-const BACKGROUND = 'textures/mode-skytemple.jpg';
+const BACKGROUND = 'textures/mode-skytemple.webp';
 const gameCode = new URLSearchParams(location.search).get('join') ?? '';
 const css = (hex) => `#${hex.toString(16).padStart(6, '0')}`;
 const pick = (n) => Math.floor(Math.random() * n);

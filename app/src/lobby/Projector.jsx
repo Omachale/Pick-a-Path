@@ -19,24 +19,29 @@
  * Who and which team to show is the director's choice (director.js), on by
  * default. Choosing by hand turns it off; A turns it back on.
  *
- * Changing team is a cloud wipe: the old team's camera rises and tilts up
- * (skyPath.js setLift) as a bank of cloud sweeps down over the screen;
- * under full cover the view cuts to the new team, whose camera starts high
- * and settles back down as the clouds clear upward (clouds moving down as
- * the camera rises, and up as it descends, as flying through them would
- * look). A request made mid-wipe waits its turn.
+ * Changing team is a short crossfade (TUNE.fadeS). It was a cloud wipe —
+ * the camera rising into a bank of cloud and the new team's coming down out
+ * of it — until Luke, 2026-10-10: "They are awful, and look like a glitch."
+ * A request made mid-fade waits its turn. At a round's start nothing is put
+ * on screen just because its world loaded first: the "get ready" screen
+ * stays up until the director's chosen team's world is ready, then it cuts
+ * straight there (the first team to load used to be shown, then wiped away
+ * from a moment later).
  *
  * Split screen (Luke: "Split screen is good"): when the director has two
  * big events on two teams at once, the second team's world slides in from
  * the right and takes half the screen; when one ends, the other widens back
- * to the whole screen. No wipe for either.
+ * to the whole screen. No crossfade for either.
  *
  * On each world on screen (a "panel"): the team and the followed player,
  * top left; the word pair while they stand deciding, one above the other in
  * a random order per fork, never tied to a bridge or anyone's choice
  * (Luke); a caption for what's happening ("Zara (Team Three) sent the
- * aliens after Milo!"); during an abduction defence, the word being typed
- * and the ship's countdown (Luke: show "the typing progress"). No scores:
+ * aliens after Milo!"); during an abduction defence, the letters typed so
+ * far and the ship's countdown (Luke: show "the typing progress"). Only the
+ * letters typed, never the word itself or blanks for the rest (Luke,
+ * 2026-10-10: showing the untyped letters "gives anyone watching the correct
+ * answer"; blanks would still give its length). No scores:
  * Luke wants them kept secret until the end.
  *
  * Between rounds and before the game: the join QR code (the board's own
@@ -45,27 +50,33 @@
  *
  * Keys: 1-4 team, left/right player, A the director, H hide the controls,
  * D the frames/messages readout and the director's candidates, F full
- * screen.
+ * screen, T the director's dials (TEMPORARY — see TunePanel).
  */
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../supabase.js';
 import * as THREE from 'three';
 import { mountSkyPath } from '../skypath/skyPath.js';
-import { createDirector } from './director.js';
+import { createDirector, DIRECTOR_TUNE_DEFAULTS } from './director.js';
 import { buildQrCard } from './qrCard.js';
 import { joinUrl } from './sessionConfig.js';
 import VictoryTown from './VictoryTown.jsx';
+import { startMonitor } from './monitor.js';
 
 const MAX_TEAMS = 4;
-// The cloud wipe, ms: covering (camera rising), held fully covered (the cut
-// happens here), uncovering (camera settling).
-const WIPE = { cover: 800, hold: 150, uncover: 950 };
+const PROJECTOR_HERE_MS = 10000; // see teacherSession.js projectorOpen
+// TEMPORARY (director.js, CALMER): the director's dials, set live from the T
+// panel and remembered in this browser across reloads, until Luke settles
+// them and they're baked into DIRECTOR_TUNE_DEFAULTS.
+const TUNE_KEY = 'skypath.projector.tune';
+const TUNE = { ...DIRECTOR_TUNE_DEFAULTS };
+try {
+  Object.assign(TUNE, JSON.parse(localStorage.getItem(TUNE_KEY) || '{}'));
+} catch {
+  /* private window etc.: the defaults */
+}
 const SPLIT_MS = 600; // the split screen's slide
-const CLOUD = 'textures/cloud-dense.webp';
-const CLOUD_FILL = '#e9ecf1'; // cloud-deck.png's own colour, behind the bank so it covers fully
 const TEAM_WORDS = ['One', 'Two', 'Three', 'Four'];
-const BACKGROUND = 'textures/mode-skytemple.jpg';
-const DEFENCE_WORD = 'RESIST'; // abductDefense.js's TARGET_WORD
+const BACKGROUND = 'textures/mode-skytemple.webp';
 const teamName = (g) => `Team ${TEAM_WORDS[g - 1] ?? g}`;
 
 // The same random order every time for a given round and fork, so the two
@@ -83,16 +94,17 @@ export default function Projector({ code }) {
   const [activeGroup, setActiveGroup] = useState(null); // the main panel's team
   const activeRef = useRef(null);
   const layoutRef = useRef({ primary: null, secondary: null });
+  const monRef = useRef(null); // TEMPORARY test monitor (monitor.js)
+  const mlog = (kind, data) => monRef.current?.log(kind, data);
   const [layout, setLayout] = useState({ primary: null, secondary: null });
   const [view, setView] = useState(null); // what the overlays show, refreshed a few times a second
   const [showControls, setShowControls] = useState(true);
   const [showStats, setShowStats] = useState(true);
+  const [showTune, setShowTune] = useState(false); // the T panel (TEMPORARY)
   const [seriesEnded, setSeriesEnded] = useState(false);
   const [victory, setVictory] = useState(null); // the victory scene's teams, once the series ends
   const [qrSrc, setQrSrc] = useState(null);
   const statsRef = useRef({ msgs: 0, frames: 0, mps: 0, fps: 0 });
-  const wipeRef = useRef(null); // the cloud bank
-  const wipeFrontRef = useRef(null); // a nearer layer of cloud, moving faster
   const transRef = useRef({ busy: false, pending: null });
   const [auto, setAuto] = useState(true); // the director chooses (see the header)
   const autoRef = useRef(true);
@@ -108,6 +120,7 @@ export default function Projector({ code }) {
   function applyLayout(next) {
     const prev = layoutRef.current;
     layoutRef.current = next;
+    if (prev.primary !== next.primary || prev.secondary !== next.secondary) mlog('layout', { from: prev, to: next });
     activeRef.current = next.primary;
     setLayout(next);
     setActiveGroup(next.primary);
@@ -150,79 +163,60 @@ export default function Projector({ code }) {
     }
   }
 
-  // Coverage 0 (clear) to 1 (screen covered): the bank's place, and the
-  // nearer layer's, which travels further for a little depth.
-  const placeClouds = (c) => {
-    if (wipeRef.current) wipeRef.current.style.transform = `translateY(${-220 + c * 160}vh)`;
-    if (wipeFrontRef.current) wipeFrontRef.current.style.transform = `translateY(${-70 + c * 140}vh)`;
-  };
-  // Switch the whole screen to team g's world, by cloud wipe (see the header).
+  // Switch the whole screen to team g's world, by a short crossfade (see the
+  // header): the new world fades in over the old, then takes the screen.
+  // Finished by a timer, not by animation frames, so a slow or stalled
+  // frame can never leave it half done (the cloud wipe's cut was once
+  // skipped that way, leaving the old team on screen).
   const goTo = (g) => {
     const tr = transRef.current;
-    if (!worldsRef.current.has(g)) return;
+    const toW = worldsRef.current.get(g);
+    if (!toW) return;
     if (tr.busy) {
+      if (tr.pending !== g) mlog('fade-queued', { to: g });
       tr.pending = g;
       return;
     }
     const from = layoutRef.current.primary;
     if (g === from) return;
     if (from == null || !worldsRef.current.has(from)) {
+      mlog('cut', { to: g });
       applyLayout({ primary: g, secondary: null });
       return;
     }
     if (layoutRef.current.secondary != null) applyLayout({ primary: from, secondary: null });
     tr.busy = true;
-    const t0 = performance.now();
-    let cut = false;
-    const easeIn = (x) => x * x;
-    const easeOut = (x) => 1 - (1 - x) * (1 - x);
-    for (const el of [wipeRef.current, wipeFrontRef.current]) if (el) el.style.display = 'block';
-    const step = () => {
-      const t = performance.now() - t0;
-      const fromW = worldsRef.current.get(from);
-      const toW = worldsRef.current.get(g);
-      if (t < WIPE.cover) {
-        const x = t / WIPE.cover;
-        placeClouds(easeIn(x));
-        fromW?.handle.setLift(x);
-      } else if (t < WIPE.cover + WIPE.hold) {
-        placeClouds(1);
-        if (!cut) {
-          cut = true;
-          fromW?.handle.setLift(0);
-          toW?.handle.setLift(1);
-          applyLayout({ primary: g, secondary: null });
-        }
-      } else if (t < WIPE.cover + WIPE.hold + WIPE.uncover) {
-        const x = (t - WIPE.cover - WIPE.hold) / WIPE.uncover;
-        placeClouds(1 - easeOut(x));
-        toW?.handle.setLift(1 - x);
-      } else {
-        placeClouds(0);
-        toW?.handle.setLift(0);
-        for (const el of [wipeRef.current, wipeFrontRef.current]) if (el) el.style.display = 'none';
-        tr.busy = false;
-        const next = tr.pending;
-        tr.pending = null;
-        if (next != null && next !== g) goTo(next);
-        return;
-      }
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
+    const ms = Math.round(TUNE.fadeS * 1000);
+    mlog('fade-start', { from, to: g, ms });
+    const el = toW.el;
+    const base = el.style.transition; // the split's slide (see startWorld)
+    el.style.transition = 'none';
+    el.style.left = '0';
+    el.style.width = '100%';
+    el.style.opacity = '0';
+    el.style.zIndex = '1';
+    el.style.visibility = 'visible';
+    toW.handle.setActive(true);
+    void el.offsetWidth;
+    el.style.transition = `${base}, opacity ${ms}ms ease`;
+    el.style.opacity = '1';
+    setTimeout(() => {
+      el.style.transition = base;
+      el.style.opacity = '';
+      el.style.zIndex = '';
+      if (worldsRef.current.get(g) === toW) applyLayout({ primary: g, secondary: null });
+      tr.busy = false;
+      mlog('fade-end', { to: g });
+      const next = tr.pending;
+      tr.pending = null;
+      if (next != null && next !== g) goToRef.current(next);
+    }, ms);
   };
   const goToRef = useRef(goTo);
   goToRef.current = goTo;
   const applyLayoutRef = useRef(applyLayout);
   applyLayoutRef.current = applyLayout;
-  // DEV: hold the wipe at coverage c (0-1) with the team on screen lifted
-  // by `lift`, for looking at a moment of it; __wipeAt(null) puts it away.
   if (import.meta.env.DEV) {
-    window.__wipeAt = (c, lift = c) => {
-      for (const el of [wipeRef.current, wipeFrontRef.current]) if (el) el.style.display = c == null ? 'none' : 'block';
-      placeClouds(c ?? 0);
-      worldsRef.current.get(layoutRef.current.primary)?.handle.setLift(c == null ? 0 : lift);
-    };
     window.__split = (g) => applyLayoutRef.current({ primary: layoutRef.current.primary, secondary: g ?? null });
   }
 
@@ -239,7 +233,27 @@ export default function Projector({ code }) {
 
   useEffect(() => {
     const worlds = worldsRef.current;
-    const director = createDirector();
+    const director = createDirector({ tune: TUNE });
+    // TEMPORARY test monitor (monitor.js): the one-second sample is the
+    // layout, the director's shot, and every world's camera, frames and GPU
+    // memory; events below log what arrives and what the projector does.
+    const mon = (monRef.current = startMonitor('projector', {
+      code: CODE,
+      sample: () => {
+        const dbg = director.debug();
+        return {
+          layout: layoutRef.current,
+          auto: autoRef.current,
+          fadeBusy: transRef.current.busy,
+          fadePending: transRef.current.pending,
+          shot: dbg.shot ? `${dbg.shot.type} T${dbg.shot.groupId} ${dbg.shot.token} ${dbg.shot.since.toFixed(1)}s` : null,
+          second: dbg.second ? `${dbg.second.type} T${dbg.second.groupId} ${dbg.second.token}` : null,
+          msgsPerS: stats.mps,
+          worlds: [...worlds].map(([g, w]) => ({ g, ready: w.ready, over: w.over, round: w.round.roundId?.slice(0, 8), visible: w.el.style.visibility, ...(w.ready ? w.handle.monitorInfo() : {}) })),
+        };
+      },
+    }));
+    mon.log('tune', { ...TUNE });
     const names = new Map(); // token -> displayName (presence)
     const groupOf = new Map(); // token -> groupId (from round starts)
     const lastSeq = new Map(); // token -> highest seq seen (see useLobby.js)
@@ -266,10 +280,12 @@ export default function Projector({ code }) {
     const send = (event, payload) => main.send({ type: 'broadcast', event, payload });
 
     const onPlayerState = (payload) => {
+      // Only a stale 'moving' ping is dropped; a discrete report never is
+      // (see useLobby.js's lastSeqRef for why).
       if (payload.seq != null) {
         const last = lastSeq.get(payload.token);
-        if (last != null && payload.seq <= last) return;
-        lastSeq.set(payload.token, payload.seq);
+        if (payload.phase === 'moving' && last != null && payload.seq <= last) return;
+        if (last == null || payload.seq > last) lastSeq.set(payload.token, payload.seq);
       }
       director.playerState(payload.token, payload);
       const w = worlds.get(groupOf.get(payload.token));
@@ -314,28 +330,50 @@ export default function Projector({ code }) {
         if (!el.querySelector('#loader.done')) return;
         clearInterval(poll);
         w.ready = true;
+        mon.log('world-ready', { g: round.groupId, round: round.roundId?.slice(0, 8) });
         send('report-state', {});
       }, 300);
       timers.push(poll);
       setSeriesEnded(false);
       setVictory(null);
-      // The first team to start is shown; after that, whoever's choosing.
+      // Nothing goes on screen for loading first (see the header): if this
+      // replaced a world on screen, the screen is cleared, and the director
+      // cuts to its choice once that world is ready (goTo, from nothing).
       const L = layoutRef.current;
-      if (L.primary == null || !worlds.has(L.primary)) applyLayoutRef.current({ primary: round.groupId, secondary: null });
-      else applyLayoutRef.current(L);
+      if (L.primary === round.groupId || L.secondary === round.groupId) applyLayoutRef.current({ primary: null, secondary: null });
     };
 
     // Rounds already under way when this page opened (or reloaded): the
     // teacher's board answers `projector-hello` with them (teacherSession.js).
+    // The series is over: the team worlds are finished with for good, so they
+    // go — disposed, not just hidden. Left drawing under the victory scene,
+    // one cost a full world's rendering every frame, and all four kept
+    // updating (seen in the monitor log, 2026-10-10: the victory at 9-10 fps).
+    // A new series' rounds make new ones. The renderers stay (see
+    // rendererFor): making WebGL contexts afresh is what Chrome blocks.
+    const discardWorlds = () => {
+      for (const w of worlds.values()) {
+        w.handle.dispose();
+        w.el.remove();
+      }
+      worlds.clear();
+      applyLayoutRef.current({ primary: null, secondary: null });
+      mon.log('worlds-discarded');
+    };
+
     const onRoundsNow = ({ rounds, seriesEnded: ended, victory: teams }) => {
+      if (ended) {
+        discardWorlds();
+        setSeriesEnded(true);
+        if (teams?.length) setVictory(teams);
+        return;
+      }
       for (const r of rounds ?? []) {
         const w = worlds.get(r.groupId);
         if (w?.round.roundId === r.roundId) continue; // already showing it
         startWorld(r);
         if (r.over) worlds.get(r.groupId).over = true;
       }
-      if (ended) setSeriesEnded(true); // (after startWorld, which clears it for a live round start)
-      if (teams?.length) setVictory(teams);
     };
 
     main.on('presence', { event: 'sync' }, () => {
@@ -346,6 +384,10 @@ export default function Projector({ code }) {
     });
     main.on('broadcast', { event: '*' }, ({ event, payload }) => {
       stats.msgs++;
+      if (event !== 'player-state' && !(event === 'game-event' && payload?.kind === 'defence-progress' && !payload.countdownMs)) {
+        const brief = event === 'rounds-now' ? { rounds: (payload.rounds ?? []).map((r) => ({ g: r.groupId, round: r.roundId?.slice(0, 8), over: !!r.over })), seriesEnded: payload.seriesEnded } : event === 'game-started' ? { g: payload.groupId, round: payload.roundId?.slice(0, 8), roster: payload.roster, guide: payload.guideToken, pickup: payload.pickup } : payload;
+        mon.log(`in:${event}${event === 'game-event' ? ':' + payload?.kind : ''}`, brief);
+      } else if (event === 'player-state' && payload?.phase !== 'moving') mon.log('in:player-state', { token: payload.token, phase: payload.phase, fork: payload.forkIndex, abducting: payload.abducting || undefined, defending: payload.defending || undefined });
       if (event === 'player-state') onPlayerState(payload);
       else if (event === 'game-started') startWorld(payload);
       else if (event === 'rounds-now') onRoundsNow(payload);
@@ -375,11 +417,17 @@ export default function Projector({ code }) {
       } else if (event === 'round-over') {
         for (const w of worlds.values()) if (w.round.roundId === payload.roundId) w.over = true;
       } else if (event === 'series-ended') {
+        discardWorlds();
         setSeriesEnded(true);
         if (payload.teams?.length) setVictory(payload.teams);
       }
     });
-    main.subscribe((st) => st === 'SUBSCRIBED' && send('projector-hello', {}));
+    main.subscribe((st) => {
+      mon.log('channel', { status: st });
+      if (st === 'SUBSCRIBED') send('projector-hello', {});
+    });
+    // Telling the board a projector is open (teacherSession.js projectorOpen).
+    timers.push(setInterval(() => send('projector-here', {}), PROJECTOR_HERE_MS));
     for (let g = 1; g <= MAX_TEAMS; g++) {
       const ch = supabase.channel(`lobby-${CODE}-team-${g}`);
       ch.on('broadcast', { event: 'player-state' }, ({ payload }) => {
@@ -412,11 +460,25 @@ export default function Projector({ code }) {
 
     // The director, when it's in charge: the player(s) it wants, then the
     // layout — the other half of a split, a half taking over the whole
-    // screen, or a cloud wipe to another team. A world is pointed at its
+    // screen, or a crossfade to another team. A world is pointed at its
     // player before it comes on screen, so the camera is on them already.
+    let lastDecision = '';
+    let lastCam = '';
     const direct = setInterval(() => {
+      const pw = worlds.get(layoutRef.current.primary);
+      if (pw?.ready) {
+        const m = pw.handle.monitorInfo();
+        const key = `${m.cam} ${m.pitchDeg}`;
+        if (key !== lastCam) mon.log('cam', { g: layoutRef.current.primary, cam: m.cam, pitchDeg: m.pitchDeg, watching: m.watching, watched: m.watched });
+        lastCam = key;
+      }
       if (!autoRef.current) return;
       const d = director.decide();
+      const key = d ? `${d.story.type} T${d.groupId} ${d.token}${d.second ? ` + ${d.second.story.type} T${d.second.groupId} ${d.second.token}` : ''}` : '-';
+      if (key !== lastDecision) {
+        mon.log('director', { decision: key, candidates: director.debug().candidates.slice(0, 5).map((c) => `${c.score} ${c.type} T${c.groupId} ${c.token} ${c.stage}`) });
+        lastDecision = key;
+      }
       if (!d) return;
       const w = worlds.get(d.groupId);
       if (!w?.ready) return;
@@ -493,6 +555,8 @@ export default function Projector({ code }) {
     timers.push(perSecond, refresh);
 
     return () => {
+      mon.stop();
+      monRef.current = null;
       cancelAnimationFrame(raf);
       for (const t of timers) clearInterval(t);
       for (const w of worlds.values()) {
@@ -509,15 +573,17 @@ export default function Projector({ code }) {
     };
   }, [CODE]);
 
-  // Keys: 1-4 team, arrows player, A director, H controls, D readout.
+  // Keys: 1-4 team, arrows player, A director, H controls, D readout, T dials.
   useEffect(() => {
     const onKey = (e) => {
+      mlog('key', { key: e.key });
       const n = Number(e.key);
       if (n >= 1 && n <= MAX_TEAMS && worldsRef.current.has(n)) {
         setAutoBoth(false); // by hand from here on, until A
         goToRef.current(n);
       } else if (e.key === 'h' || e.key === 'H') setShowControls((v) => !v);
       else if (e.key === 'd' || e.key === 'D') setShowStats((v) => !v);
+      else if (e.key === 't' || e.key === 'T') setShowTune((v) => !v);
       else if (e.key === 'a' || e.key === 'A') setAutoBoth(!autoRef.current);
       else if (e.key === 'f' || e.key === 'F') {
         if (document.fullscreenElement) document.exitFullscreen?.();
@@ -546,7 +612,8 @@ export default function Projector({ code }) {
   };
   const mainPanel = view?.panels?.[0] ?? null;
   const split = layout.secondary != null;
-  const waiting = !view || !view.anyRunning || seriesEnded;
+  // (`!mainPanel`: the chosen world isn't on screen and ready yet — see the header.)
+  const waiting = !view || !view.anyRunning || seriesEnded || !mainPanel;
   const beforeGame = !view?.teams.length;
 
   return (
@@ -582,18 +649,6 @@ export default function Projector({ code }) {
       {/* The end of the series: the victory scene, as on the board. */}
       {victory && <VictoryTown teams={victory} />}
 
-      {/* The cloud wipe between teams: a bank of cloud on a solid core, so it
-          covers the screen completely at its middle, and a nearer, faster
-          layer in front. Parked out of sight above the screen. */}
-      <div ref={wipeRef} style={{ position: 'absolute', left: '-10vw', width: '120vw', top: 0, height: '220vh', display: 'none', pointerEvents: 'none', transform: 'translateY(-220vh)' }}>
-        {/* The core reaches well under both edges (the cloud art has a clear
-            margin round it), fading in so its own edge never shows. */}
-        <div style={{ position: 'absolute', left: 0, right: 0, top: '30vh', height: '160vh', background: `linear-gradient(transparent, ${CLOUD_FILL} 22vh, ${CLOUD_FILL} calc(100% - 22vh), transparent)` }} />
-        <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: '55vh', background: `url(${CLOUD}) center bottom / 100% auto no-repeat` }} />
-        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '55vh', background: `url(${CLOUD}) center bottom / 100% auto no-repeat`, transform: 'scaleY(-1)' }} />
-      </div>
-      <div ref={wipeFrontRef} style={{ position: 'absolute', left: '-30vw', width: '160vw', top: 0, height: '70vh', display: 'none', pointerEvents: 'none', transform: 'translateY(-70vh)', background: `url(${CLOUD}) center / 100% 100% no-repeat`, opacity: 0.9 }} />
-
       {/* Choosing by hand. */}
       {showControls && !victory && view?.teams.length > 0 && (
         <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '10px 14px', background: 'rgba(0,0,0,0.55)', color: '#fff', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', font: '600 14px system-ui, sans-serif', zIndex: 30 }}>
@@ -619,9 +674,11 @@ export default function Projector({ code }) {
               {p.displayName ?? '?'} · {p.phase === 'gone' ? 'out' : p.abducted ? 'abducted!' : p.airborne ? 'falling!' : `island ${p.forkIndex}`}
             </button>
           ))}
-          <span style={{ marginLeft: 'auto', opacity: 0.7 }}>1-4 team · arrows player · A director · H hide · D stats · F full screen</span>
+          <span style={{ marginLeft: 'auto', opacity: 0.7 }}>1-4 team · arrows player · A director · H hide · D stats · F full screen · T dials</span>
         </div>
       )}
+      {showTune && <TunePanel onClose={() => setShowTune(false)} />}
+
       {showStats && (
         <div style={{ position: 'absolute', right: 10, top: 8, zIndex: 31, color: '#9f9', font: '12px ui-monospace, monospace', background: 'rgba(0,0,0,0.5)', padding: '3px 6px', borderRadius: 4 }}>
           {view?.stats.fps ?? 0} fps · {view?.stats.mps ?? 0} msg/s
@@ -645,6 +702,73 @@ export default function Projector({ code }) {
 }
 
 /** One world's overlays: team and player, the words, the event caption, the defence. */
+// TEMPORARY: the director's dials (director.js, CALMER), so Luke can set them
+// by eye on the big screen. Each change applies at once and is remembered in
+// this browser; "Copy" puts the values on the clipboard to send to Claude,
+// who bakes them into DIRECTOR_TUNE_DEFAULTS — then this panel goes.
+const TUNE_DIALS = [
+  { key: 'minShotS', label: 'Shortest shot', min: 2, max: 20, step: 0.5, unit: 's', note: 'before the camera may cut to something else' },
+  { key: 'minTeamS', label: 'Shortest stay on a team', min: 5, max: 60, step: 1, unit: 's', note: 'before changing to another team (a rescue or abduction may still call it away)' },
+  { key: 'holdS', label: 'Hold after an event', min: 0, max: 6, step: 0.5, unit: 's', note: 'extra time on a finished event before moving on' },
+  { key: 'playerStick', label: 'Stay with the same player', min: 1, max: 3, step: 0.1, unit: '×', note: 'preference for their next moment, when free to choose' },
+  { key: 'splitMinS', label: 'Shortest split screen', min: 0, max: 15, step: 0.5, unit: 's', note: 'once it opens' },
+  { key: 'splitGapS', label: 'Time between split screens', min: 0, max: 180, step: 5, unit: 's', note: 'at least this long from one opening to the next' },
+  { key: 'fadeS', label: 'Crossfade length', min: 0.1, max: 2, step: 0.1, unit: 's', note: 'between teams' },
+  { key: 'fallsChangeTeam', label: 'A fall may call the camera to another team', bool: true },
+  { key: 'fallsSplit', label: 'A fall may open a split screen', bool: true },
+];
+function TunePanel({ onClose }) {
+  const [, redraw] = useState(0);
+  const set = (k, v) => {
+    TUNE[k] = v;
+    try {
+      localStorage.setItem(TUNE_KEY, JSON.stringify(TUNE));
+    } catch {
+      /* not remembered, still applied */
+    }
+    redraw((n) => n + 1);
+  };
+  const values = JSON.stringify(TUNE);
+  return (
+    <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 40, width: 360, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto', padding: '12px 14px', borderRadius: 10, background: 'rgba(10,14,20,0.88)', color: '#f4ecd8', font: '13px/1.35 system-ui, sans-serif' }}>
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+        <b style={{ fontSize: 14 }}>Director dials</b>
+        <span style={{ marginLeft: 8, opacity: 0.6 }}>temporary · T to hide</span>
+        <button onClick={onClose} style={{ ...chip(false), marginLeft: 'auto' }}>×</button>
+      </div>
+      {TUNE_DIALS.map((d) =>
+        d.bool ? (
+          <label key={d.key} style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
+            <input type="checkbox" checked={!!TUNE[d.key]} onChange={(e) => set(d.key, e.target.checked)} />
+            {d.label}
+          </label>
+        ) : (
+          <div key={d.key} style={{ margin: '8px 0' }}>
+            <div style={{ display: 'flex' }}>
+              <span>{d.label}</span>
+              <b style={{ marginLeft: 'auto' }}>
+                {TUNE[d.key]}
+                {d.unit}
+              </b>
+            </div>
+            <input type="range" min={d.min} max={d.max} step={d.step} value={TUNE[d.key]} onChange={(e) => set(d.key, Number(e.target.value))} style={{ width: '100%' }} />
+            <div style={{ opacity: 0.55, fontSize: 11 }}>{d.note}</div>
+          </div>
+        ),
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <button onClick={() => navigator.clipboard?.writeText(values)} style={chip(false)}>
+          Copy values
+        </button>
+        <button onClick={() => Object.entries(DIRECTOR_TUNE_DEFAULTS).forEach(([k, v]) => set(k, v))} style={chip(false)}>
+          Reset
+        </button>
+      </div>
+      <div style={{ marginTop: 8, opacity: 0.6, fontSize: 11, wordBreak: 'break-all' }}>{values}</div>
+    </div>
+  );
+}
+
 function Panel({ p, left, width, split, controls }) {
   const s = split ? 0.72 : 1; // everything a little smaller in a half
   return (
@@ -673,18 +797,17 @@ function Panel({ p, left, width, split, controls }) {
         </div>
       )}
 
-      {/* The abduction defence: the word being typed, and the ship's countdown. */}
+      {/* The abduction defence: the letters typed so far (only those — see the
+          header), a blinking caret, and the ship's countdown. */}
       {p.defence && (
         <div style={{ ...PLAQUE, bottom: controls ? '22vh' : '18vh', top: 'auto', padding: `${1.4 * s}vh ${2 * s}vw` }}>
-          <div style={{ display: 'flex', gap: `${0.6 * s}vw`, justifyContent: 'center' }}>
-            {[...DEFENCE_WORD].map((ch, i) => {
-              const done = i < p.defence.typed.length;
-              return (
-                <span key={i} style={{ width: `${4.2 * s}vh`, textAlign: 'center', borderBottom: '3px solid rgba(242,205,115,0.7)', font: `700 ${5 * s}vh/1.2 ${SERIF}`, color: done ? '#f2cd73' : 'rgba(244,236,216,0.18)' }}>
-                  {done ? p.defence.typed[i] : ch}
-                </span>
-              );
-            })}
+          <div style={{ display: 'flex', gap: `${0.6 * s}vw`, justifyContent: 'center', alignItems: 'center', minWidth: `${24 * s}vh`, height: `${6 * s}vh` }}>
+            {[...p.defence.typed].map((ch, i) => (
+              <span key={i} style={{ width: `${4.2 * s}vh`, textAlign: 'center', font: `700 ${5 * s}vh/1.2 ${SERIF}`, color: '#f2cd73' }}>
+                {ch}
+              </span>
+            ))}
+            <span style={{ width: 3, height: `${4.6 * s}vh`, background: '#f2cd73', animation: 'projCaret 1s steps(1) infinite' }} />
           </div>
           <div style={{ marginTop: '1.2vh', height: `${0.9 * s}vh`, borderRadius: 4, background: 'rgba(255,255,255,0.12)', overflow: 'hidden' }}>
             <div style={{ height: '100%', width: `${p.defence.left * 100}%`, background: 'linear-gradient(90deg, #7ef0a0, #3fc46a)', transition: 'width 250ms linear' }} />
@@ -732,6 +855,9 @@ const PROJECTOR_CSS = `
 @keyframes projCaptionIn {
   from { opacity: 0; transform: translate(-50%, 3vh); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes projCaret {
+  50% { opacity: 0; }
 }`;
 
 const chip = (on) => ({

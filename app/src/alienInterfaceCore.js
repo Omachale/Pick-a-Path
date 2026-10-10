@@ -21,7 +21,7 @@
  * pass (start height 5, widen 0.6s, hold 0.05s, open 0.6s).
  */
 
-export const INTERFACE_SRC = 'textures/alien-interface-trimmed.jpg';
+export const INTERFACE_SRC = 'textures/alien-interface-trimmed.webp';
 
 // Trimmed art's own aspect (992x487 = 2.037) differs from the untrimmed
 // version (1024x522 = 1.962) FINAL_WIDTH/FINAL_CENTRE were originally tuned

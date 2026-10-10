@@ -23,8 +23,8 @@ import { letterImageSrc } from './letterImage.js';
 // A separate file from cardboardPanel.js's own PANEL_SRC — that one is
 // shared with the real abduction-confirm screen, which doesn't have a
 // track on it, so the track art can't overwrite the shared asset.
-const TRACK_PANEL_SRC = 'textures/cardboard-panel-track.png';
-const SHIP_SRC = 'textures/abduct-ship-small.png';
+const TRACK_PANEL_SRC = 'textures/cardboard-panel-track.webp';
+const SHIP_SRC = 'textures/abduct-ship-small.webp';
 const SHIP_SIZE = { w: 307, h: 107 }; // abduct-ship-small.png's own pixel size
 // "Its centre of mass... always remains in the centre of the track line" —
 // picked as roughly the ship's visual middle; adjust if it should sit

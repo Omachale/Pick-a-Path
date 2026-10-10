@@ -228,7 +228,16 @@ export function useLobby(sessionCode) {
   // targeting's island table). Each report carries `seq`, rising per
   // sender (seeded from the clock, so it keeps rising across a reload): two
   // channels can deliver out of order, and a late 'moving' ping landing
-  // after a 'resting' would pull the rig back off its seat.
+  // after a 'resting' would pull the rig back off its seat. So only a
+  // 'moving' ping is ever dropped as stale. The discrete reports all travel
+  // on the main channel, in order, and must never be dropped: a 'departing'
+  // overtaken by the first 'moving' ping of the same departure (seq one
+  // higher, on the faster team channel) was being thrown away, so the
+  // viewer never saw them leave — their 'moving' pings were then ignored
+  // too, and an abduction never started (the green light stayed on, then
+  // the repel played instead). Found in the projector's monitor log,
+  // 2026-10-10 (Luke: "the green light stayed on the player, and that was
+  // it, nothing ever changed").
   const teamChannelRef = useRef(null); // { ch, groupId, ready }
   const playerStateListenerRef = useRef(null); // the shared handler, set in join()
   const lastSeqRef = useRef(new Map()); // sender token -> highest seq seen
@@ -505,8 +514,8 @@ export function useLobby(sessionCode) {
       const onPlayerState = (payload) => {
         if (payload.seq != null) {
           const last = lastSeqRef.current.get(payload.token);
-          if (last != null && payload.seq <= last) return; // overtaken by a later report
-          lastSeqRef.current.set(payload.token, payload.seq);
+          if (payload.phase === 'moving' && last != null && payload.seq <= last) return; // overtaken by a later report (see lastSeqRef)
+          if (last == null || payload.seq > last) lastSeqRef.current.set(payload.token, payload.seq);
         }
         // Session-wide island table for abduction targeting — see islandsRef.
         // Only a 'resting' report moves someone; 'departing'/'moving' leave

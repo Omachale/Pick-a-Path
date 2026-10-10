@@ -115,7 +115,7 @@ export const SKY_PATH_CHROME = `
      hand-held paper graphic, text written on it in Sue Ellen Francisco,
      lowered from the top of the screen and raised again. Driven by
      showPaperMessage()/hidePaperMessage() in skyPath.js. -->
-<div id="paperMessage"><img src="textures/paper-message.png" alt="" draggable="false" /><div id="paperMessageText"></div></div>
+<div id="paperMessage"><img src="textures/paper-message.webp" alt="" draggable="false" /><div id="paperMessageText"></div></div>
 <!-- #roleNote: who's guiding, at the start of a round (2026-10-07) — a
      hand-cut piece of the same photographed cardboard as the keyboard panel,
      written on in Sue Ellen Francisco like #paperMessage. Slides in from the
@@ -224,7 +224,7 @@ export const SKY_PATH_CSS = `
   padding: 0;
   border: 0;
   background-color: transparent;
-  background-image: url('textures/cardboard-panel.png');
+  background-image: url('textures/cardboard-panel.webp');
   background-size: 420% 420%;
   cursor: pointer;
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
@@ -468,7 +468,7 @@ export const SKY_PATH_CSS = `
 .skypath-surface #roleNoteCard {
   position: relative;
   aspect-ratio: 2.1 / 1;
-  background-image: url('textures/cardboard-panel.png');
+  background-image: url('textures/cardboard-panel.webp');
   background-size: 150% auto;
   background-position: 40% 75%;
   clip-path: polygon(0.6% 2.4%, 22% 0.8%, 49% 2%, 77% 0.4%, 99.4% 1.6%, 98.6% 34%, 99.6% 68%, 98.8% 98.4%, 71% 99.4%, 44% 98%, 18% 99.6%, 0.4% 98.2%, 1.4% 63%, 0.2% 31%);
@@ -560,8 +560,8 @@ export const SKY_PATH_CSS = `
   padding: 0;
   cursor: pointer;
 }
-.skypath-surface #abductTeamLeft { background-image: url('textures/alien-arrow-left.png'); }
-.skypath-surface #abductTeamRight { background-image: url('textures/alien-arrow-right.png'); }
+.skypath-surface #abductTeamLeft { background-image: url('textures/alien-arrow-left.webp'); }
+.skypath-surface #abductTeamRight { background-image: url('textures/alien-arrow-right.webp'); }
 .skypath-surface #abductCancel {
   position: absolute;
   top: calc(env(safe-area-inset-top, 0px) + 10px);

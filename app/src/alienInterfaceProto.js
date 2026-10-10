@@ -79,7 +79,7 @@ import {
 // the untrimmed one is still in Assets/ for comparison, and a new name also
 // sidesteps the browser image cache, which has already cost time on this
 // project once when a texture was replaced in place.
-const INTERFACE_SRC = 'textures/alien-interface-trimmed.jpg';
+const INTERFACE_SRC = 'textures/alien-interface-trimmed.webp';
 
 /**
  * The art's own aspect. Trimming changed it (992x487 = 2.037, where the

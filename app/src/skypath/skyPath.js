@@ -31,7 +31,6 @@
 
 import * as THREE from 'three';
 import { CHARACTERS, PALETTE as CHARACTER_PALETTE } from './characters.js';
-import RAPIER from '@dimforge/rapier3d-compat';
 import { SKY_PATH_CHROME, SKY_PATH_CSS } from './chrome.js';
 import { attachCrowdHarness } from './crowdHarness.js';
 import { buildAbduction, buildWaitingGlow, buildRepelledShip, REPEL_SHIP_DEFAULTS } from './alienAbduction.js';
@@ -60,9 +59,30 @@ import {
   drawInterfaceGrowth,
 } from '../alienInterfaceCore.js';
 
-// Rapier ships as WASM and needs an async init before any RAPIER.* class can
-// be used. Module-scope so it happens once per page load, not once per mount.
-await RAPIER.init();
+// Rapier (physics, shipped as WASM) is loaded on demand, not with the page.
+// It's ~1 MB of the ~1.5 MB compressed download and only ever used for a
+// fall, so every player was waiting for it before the game could start
+// (2026-10-10, after 30 s+ loads on school Wi-Fi). Each mount starts the
+// download once its own loading screen clears (see manager.onLoad), so it
+// arrives in the background while the player is on island 1; a fall that
+// beats it simply waits for it (see `pendingFall`). Module-scope so it loads
+// and initialises once per page, not once per mount. A failed download
+// clears `rapierLoading`, so the next call tries again.
+let RAPIER = null;
+let rapierLoading = null;
+function loadRapier() {
+  rapierLoading ??= import('@dimforge/rapier3d-compat')
+    .then(async (m) => {
+      await m.default.init();
+      RAPIER = m.default;
+      return RAPIER;
+    })
+    .catch((err) => {
+      rapierLoading = null;
+      throw err;
+    });
+  return rapierLoading;
+}
 
 /**
  * @param {HTMLElement} container  sized by its own CSS; the canvas fills it
@@ -205,13 +225,6 @@ export function mountSkyPath(container, options = {}) {
   let disposed = false;
   let rafId = null;
   let drawing = true; // false while a projector world is off screen (see `projector` above)
-  // The projector's cloud wipe between teams (handle.setLift): 0 = the
-  // ordinary shot, 1 = risen CAM_LIFT_HEIGHT and tilted CAM_LIFT_PITCH up,
-  // into the clouds. Applied around the render only, so it never feeds back
-  // into the camera's own easing.
-  let camLift = 0;
-  const CAM_LIFT_HEIGHT = 9;
-  const CAM_LIFT_PITCH = 0.55; // radians
 
   // ---------------------------------------------------------------- journey shape
   //
@@ -273,8 +286,8 @@ export function mountSkyPath(container, options = {}) {
   // abduction landings, and every one of those stays untouched this way. What
   // moves with the island instead: the island itself, its arch, both ends of
   // each bridge (the far end only between fork islands — the last bridge
-  // still lands on the temple island's own edge), the fog curtain, and the
-  // stone-suppression zone.
+  // still lands on the temple island's own edge), and the stone-suppression
+  // zone. (And the fog curtain, while there was one: archive/fog/.)
   const ISLAND_AHEAD = ISLAND_RADIUS * 0.2;
   /** Where the island under a fork point actually sits. */
   const islandCentre = (cursor) => localToWorld(cursor, 0, ISLAND_AHEAD);
@@ -475,20 +488,6 @@ export function mountSkyPath(container, options = {}) {
 
   const scene = new THREE.Scene();
 
-  // One mild atmospheric fog for both roles — purely for depth. Hiding the
-  // path ahead is no longer this fog's job: that's the curtain props standing
-  // at each junction (see makeCurtain), which is why there is no longer a
-  // per-role near/far swap here.
-  //
-  // Temporarily disabled, per Luke, 2026-09-24: "let's disable the fog for
-  // now." Still a real THREE.Fog object, not null — the day/night colour
-  // cycle below (fogScratch) and a debug hook both read scene.fog.color/
-  // near/far unconditionally — just pushed out past the camera's own
-  // 5000-unit far plane (see its own comment below) so nothing ever renders
-  // far enough to actually fog. Flip FOG_ENABLED back on to restore the real
-  // near/far.
-  const FOG_ENABLED = false;
-  scene.fog = new THREE.Fog(0xbcd8ea, FOG_ENABLED ? 24 : 100000, FOG_ENABLED ? 260 : 100001);
 
   // The far plane has to clear the whole backdrop rig with room to spare. It
   // clips at constant *view-space* depth, so an axis-aligned backdrop panel
@@ -568,29 +567,22 @@ export function mountSkyPath(container, options = {}) {
   // they stay flat poster colour — which means the key light above never
   // touches them. Without this, moving/recolouring the light only shows up on
   // the small strip of lit ground, which reads as no change at all. So the
-  // atmosphere itself — backdrop tint, fog colour, background colour — is
+  // atmosphere itself — backdrop tint and background colour — is
   // driven from sunP too. Cut-outs (figure, pillars, markers) are deliberately
   // left out of this so they keep their flat "puppet" colour throughout.
   const atmosphereMaterials = [];
   const TINT_DAWN = new THREE.Color(0xecd0bf);
   const TINT_NOON = new THREE.Color(0xffffff);
   const TINT_DUSK = new THREE.Color(0xe7c9bd);
-  const FOG_DAWN = new THREE.Color(0xe7a37c);
-  const FOG_NOON = new THREE.Color(0xbcd8ea);
-  const FOG_DUSK = new THREE.Color(0xcf8266);
   const CLEAR_DAWN = new THREE.Color(0x6b4a5a);
   const CLEAR_NOON = new THREE.Color(0x1d3f66);
   const CLEAR_DUSK = new THREE.Color(0x5a3a52);
   const tintScratch = new THREE.Color();
-  const fogScratch = new THREE.Color();
   const clearScratch = new THREE.Color();
 
   function applyAtmosphere(p) {
     threeStopLerp(tintScratch, TINT_DAWN, TINT_NOON, TINT_DUSK, p);
     for (const mat of atmosphereMaterials) mat.color.copy(tintScratch);
-
-    threeStopLerp(fogScratch, FOG_DAWN, FOG_NOON, FOG_DUSK, p);
-    scene.fog.color.copy(fogScratch);
 
     threeStopLerp(clearScratch, CLEAR_DAWN, CLEAR_NOON, CLEAR_DUSK, p);
     renderer.setClearColor(clearScratch, 1);
@@ -619,7 +611,7 @@ export function mountSkyPath(container, options = {}) {
     bar.style.width = `${Math.round((loaded / total) * 100)}%`;
   };
 
-  const tex = (name, { repeatWrap = false, ext = 'png', linear = false, tile = false } = {}) => {
+  const tex = (name, { repeatWrap = false, ext = 'webp', linear = false, tile = false } = {}) => {
     const t = loader.load(`textures/${name}.${ext}`);
     // `linear` is for data textures (noise fields the shader does maths on)
     // rather than pictures — sRGB decoding would bend the value distribution
@@ -634,8 +626,8 @@ export function mountSkyPath(container, options = {}) {
   const TEX = {
     // Real art test (Option B): one wide dawn→noon→dusk strip, panned via UV
     // offset instead of tinted, since it already carries its own colour grading.
-    skyStrip: tex('skybig', { ext: 'jpg' }),
-    landSea: tex('landsea', { ext: 'jpg' }),
+    skyStrip: tex('skybig', { ext: 'webp' }),
+    landSea: tex('landsea', { ext: 'webp' }),
     cloudReal: tex('cloud-real'),
     cloud2: tex('cloud-2'),
     cloud3: tex('cloud-3'),
@@ -650,13 +642,12 @@ export function mountSkyPath(container, options = {}) {
     stoneC: tex('stone-c'),
     stoneD: tex('stone-d'),
     pillar: tex('pillar'),
-    fogNoise: tex('fog-noise', { linear: true, tile: true }),
-    fogPuff: tex('fog-puff'),
+    fogPuff: tex('fog-puff'), // the engine smoke's puff (it was the fog curtains' too)
     temple: tex('temple', { ext: 'webp' }),
     // The temple doors: laid over the temple photo's own baked-in doors as
     // separate overlay art (Luke, 2026-09-10) rather than patching the
     // temple texture itself — see doorTune below.
-    doorFrame: tex('door-frame', { ext: 'jpg' }),
+    doorFrame: tex('door-frame', { ext: 'webp' }),
     doorLeft: tex('door-left'),
     doorRight: tex('door-right'),
     gull1: tex('gull-1', { ext: 'webp' }),
@@ -957,8 +948,10 @@ export function mountSkyPath(container, options = {}) {
   const FLOOR_Y = -40; // how far the world floor sits below the path
   const HORIZON_Z = -360; // the deck's far edge — where the sea stops
 
-  // The art is square (4000x4000). One tile is kept square so it never
-  // stretches; the deck then repeats sideways to run far wider than the frame,
+  // The art is square: 2048x2048, downsized from the 4000x4000 original
+  // (2026-10-10) to cut download size; side by side in game there was no
+  // visible difference at the distances it's seen from. One tile is kept
+  // square so it never stretches; the deck then repeats sideways to run far wider than the frame,
   // with MirroredRepeatWrapping so the copies meet as reflections and leave no
   // seam. Four tiles across puts the left and right edges ~1100 units off
   // centre at the horizon, which no amount of panning brings into shot.
@@ -1017,8 +1010,7 @@ export function mountSkyPath(container, options = {}) {
   //   deckHigh     on    sheets, and gives the drop past the path edge a floor.
   //   cloudRows    off — the four recycling billboard rows; they occupied the
   //                      same band the wind sheets now own, and doubled up.
-  //
-  // The fork curtains are not part of this: those are gameplay, not weather.
+
   const LEGACY_HORIZON_BANK = false;
   const LEGACY_FAR_DECKS = true;
   const LEGACY_CLOUD_ROWS = false;
@@ -2146,324 +2138,23 @@ export function mountSkyPath(container, options = {}) {
     pillars.push(cutout(TEX.pillar, { w: 0.85, h: 2.2, x: pL.x, z: pL.z }));
   }
 
-  // ---------------------------------------------------------------- fog curtains
+  // ---------------------------------------------------------------- fog
   //
-  // A curtain is the prop standing just past each fork that hides everything
-  // beyond it. Because a closed curtain blocks the view, the path beyond can
-  // already be standing there fully built without the player ever seeing it
-  // get built — which is the whole point.
-  //
-  // It's built as a hybrid of two parts, because the two jobs pull against
-  // each other: hiding the path *reliably*, and looking like mist.
-  //
-  //   1. One dense sheet does the hiding. Its alpha is computed in a shader
-  //      from scrolling tileable noise, and is saturated to a solid 1 across
-  //      the core while closed — so occlusion is guaranteed by construction,
-  //      not by hoping enough sprites overlap.
-  //   2. A ring of soft puff sprites in front of it does the looking. These
-  //      are free to be loose and gappy precisely because the sheet behind
-  //      them is already doing the occluding.
-  //
-  // Opening is a dissolve, not a curtain-parting: a threshold rises through
-  // the noise field so holes open and widen and tendrils thin out, while the
-  // puffs drift outward, shrink and fade. Nothing slides aside as a rigid
-  // rectangle.
-  //
-  // Cost note: on a mid-range phone the budget here is overdraw, not CPU. The
-  // sheet is ~1x fullscreen at its closest (the old three-layer stack was 3x),
-  // which leaves room for the puffs — ~28 sprites at roughly 9% of frame each.
-  // Only the nearest un-dissolved curtain is ever visible, since a closed one
-  // hides every curtain behind it, so this cost is paid once at a time.
-  // The sheet's *physical* quad is much bigger than the fog anyone will ever
-  // see. Visibility is governed entirely by CORE_R*/FADE_R* below — the quad
-  // just needs to be large enough that its edge sits well past FADE_R (plus
-  // the domain warp's own reach), so that edge is provably always at alpha 0,
-  // never something the geometry itself has to draw a line at.
-  const FOG_W = 16;
-  const FOG_H = 11.04; // scaled up with the visible radii to maintain margin past FADE_RY
-  const FOG_Y = 1.6; // centre height — unrelated to FOG_H now; see CORE_RY/FADE_RY for what's actually visible
-  const FOG_RISE = 0.9; // the bank lifts a little as it burns off
-  const FOG_EXPAND = 0.14; // ...and swells slightly, as thinning fog does
-
-  // The guaranteed-solid zone, in world units from the sheet's centre — must
-  // cover the path corridor (±1.3) with a little margin. Nothing here ever
-  // gets warped or faded; see the warp gate in FOG_FRAG for why that's exact,
-  // not approximate. Scaled 30% larger to block more of downstream geometry.
-  const FOG_CORE_RX = 2.106;
-  const FOG_CORE_RY = 1.482;
-  // Where alpha reaches 0. The gap between CORE and FADE is deliberately much
-  // wider in X than Y — "wider is fine" for how gradually it dissipates
-  // sideways, but a matching vertical expansion would undo the earlier fix
-  // for the fog sitting too high. Scaled 30% to match the core.
-  const FOG_FADE_RX = 8.58;
-  const FOG_FADE_RY = 3.588;
-  // Domain warp: bends the whole silhouette in flowing curves instead of a
-  // smooth-but-still-rectangular product of two 1D falloffs, which is what
-  // still read as a soft-edged box even after the noisy-border pass. Sized
-  // well under (FADE - CORE) on each axis so the quad-size margin above still
-  // holds even at the warp's full reach.
-  const FOG_WARP_X = 1.0;
-  const FOG_WARP_Y = 0.4;
-
-  const PUFF_COUNT = 28;
-  const PUFF_ALPHA = 0.5;
-  const PUFF_SPREAD_X = 7.02; // scaled 20% more with the fog radii
-  const PUFF_SPREAD_Y = 4.1184; // scaled 20% more with the fog radii
-  const PUFF_SIZE = [1.1, 2.5];
-  const PUFF_DEPTH = [0.05, 1.6]; // all in front of the sheet — see renderOrder note below
-  const PUFF_PUSH = 2.6; // outward drift once dissolving
-  const PUFF_LIFT = 1.5;
-
-  // Was `BRANCH_LEN * 0.4` — a fraction of *path* length, with no reference to
-  // the island's own size. At the old, smaller island (radius 3.5) that
-  // happened to land past the deck edge; at the current radius (6) it lands
-  // at ~4.2, well *inside* the deck — the curtain would stand on top of solid
-  // paving rather than out past its edge. Tied directly to ISLAND_RADIUS
-  // instead: this needs to track the island's actual size, not a fraction of
-  // an unrelated path-length constant. (The wrong branch's own fall point used
-  // to be tied to this the same way, as a fraction of the branch's own curve;
-  // it's now wherever BRIDGE_WRONG_GAP_T puts the breakable planks — see
-  // buildFork.)
-  const CURTAIN_DIST = ISLAND_AHEAD + ISLAND_RADIUS + 1.5; // how far past the fork the curtain stands — must clear the deck's edge (the island sits ISLAND_AHEAD forward of the fork)
-  const CURTAIN_OPEN_LEAD = 1.6; // starts dissolving this far before the avatar reaches it
-  const CURTAIN_OPEN_TIME = 1.0; // seconds to fully dissolve
-  const CURTAIN_GUIDE_OPACITY = 0.28; // guide sees through it — the cheap version of "the guide can see ahead"
-
-  const curtains = [];
-  // Hidden 2026-09-13 while the real-movement tracking rebuild was being
-  // tested end to end (Luke: "go ahead and disable the fog altogether...
-  // that way we can test that everyone else can see everything they
-  // should"). Re-enabled 2026-09-14 once that rebuild was confirmed working
-  // through every movement type and the guide's camera-follow behaviour —
-  // see TODO.md's step-by-step entry. The curtains occlude real movement
-  // now, same as any other piece of scenery, rather than replacing it with
-  // a stand-in the way the old fog system used to.
-  const FOG_CURTAINS_VISIBLE = true;
-
-  const FOG_VERT = /* glsl */ `
-    varying vec2 vUv;
-    varying vec2 vPos; // local xy in world units — see FOG_FRAG for why this replaced vUv there
-    void main() {
-      vUv = uv;
-      vPos = position.xy;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `;
-
-  // Three samples of one tiling noise texture at different scales, drifting in
-  // different directions, stand in for fbm — enough churn to read as moving
-  // fog. Extra texture samples cost ALU/bandwidth but no extra *blended*
-  // pixels, which is the cheap direction to spend on mobile.
-  //
-  // Sampled from vPos (world units) rather than vUv: the quad is much bigger
-  // than the visible fog (see FOG_W/H above), so UV-based frequencies would
-  // have stretched — and blurred — the noise pattern across that extra empty
-  // margin. World-space frequencies stay a fixed apparent size regardless of
-  // how big the quad's own dead space is.
-  //
-  // uOpen drives a threshold sweeping through that noise field: at 0 the
-  // smoothstep saturates to 1 everywhere in the core (guaranteed occlusion),
-  // and by 1 it has passed above the field's maximum so nothing is left.
-  const FOG_FRAG = /* glsl */ `
-    uniform sampler2D uNoise;
-    uniform float uTime;
-    uniform float uOpen;
-    uniform float uAlpha;
-    uniform vec3 uColor;
-    varying vec2 vUv;
-    varying vec2 vPos;
-
-    void main() {
-      float n =
-        0.50 * texture2D(uNoise, vPos * 0.14 + vec2( 0.013,  0.007) * uTime).r +
-        0.30 * texture2D(uNoise, vPos * 0.29 + vec2(-0.021,  0.011) * uTime).r +
-        0.20 * texture2D(uNoise, vPos * 0.60 + vec2( 0.008, -0.017) * uTime).r;
-
-      // Denser low, wispier up top: reads as fog sitting on the path, and
-      // means it burns off from above first as it dissolves.
-      float vert = mix(1.0, 0.72, smoothstep(-2.0, 2.5, vPos.y));
-      float base = (0.58 + 0.42 * n) * vert;
-
-      float thr = mix(-0.30, 1.10, uOpen);
-      float a = smoothstep(thr, thr + 0.38, base);
-
-      // The silhouette: two independent per-axis falloffs (CORE_R* stays
-      // solid, fades out to 0 by FADE_R*), rather than one shared distance —
-      // that's deliberate, not a simplification, because it's what lets the
-      // fade reach much further sideways (FOG_CORE_RX..FOG_FADE_RX is a wide
-      // gap) without also pulling the vertical extent back up to where the
-      // fog used to sit too high (FOG_CORE_RY..FOG_FADE_RY stays tight).
-      //
-      // A plain product of two such falloffs is still, structurally, a
-      // rounded rectangle — soft-edged, but a rectangle. What breaks that up
-      // is domain-warping the position before measuring it: bending the
-      // sampled point along flowing noise, rather than jittering the boundary
-      // in place, turns the contour into an organic blob instead of a box.
-      // The warp is gated to exactly zero inside the guaranteed core (see
-      // warpGate below), so it can never be the thing that lets something
-      // through that was supposed to stay hidden.
-      vec2 warpUv = vPos * 0.10 + vec2(0.037, 0.021) * uTime;
-      vec2 warpN = vec2(
-        texture2D(uNoise, warpUv).r - 0.5,
-        texture2D(uNoise, warpUv * 1.3 + 3.7).r - 0.5
-      );
-      float gx = smoothstep(${FOG_CORE_RX}, ${FOG_CORE_RX + 0.8}, abs(vPos.x));
-      float gy = smoothstep(${FOG_CORE_RY}, ${FOG_CORE_RY + 0.8}, abs(vPos.y));
-      float warpGate = max(gx, gy);
-      vec2 wp = vPos + warpN * vec2(${FOG_WARP_X}, ${FOG_WARP_Y}) * warpGate;
-
-      float ex = 1.0 - smoothstep(${FOG_CORE_RX}, ${FOG_FADE_RX}, abs(wp.x));
-      float ey = 1.0 - smoothstep(${FOG_CORE_RY}, ${FOG_FADE_RY}, abs(wp.y));
-      a *= ex * ey;
-
-      gl_FragColor = vec4(uColor, a * uAlpha);
-
-      // THREE.Color holds values in the linear working space, and a raw
-      // ShaderMaterial gets none of the output conversion the built-in
-      // materials do for free — without this the fog draws markedly darker
-      // than its own tint colour.
-      #include <colorspace_fragment>
-    }
-  `;
-
-  function makeCurtain(pos, heading) {
-    const group = new THREE.Group();
-    group.position.set(pos.x, FOG_Y, pos.z);
-    group.rotation.y = heading; // plane's own normal is +Z, i.e. back toward the approaching avatar
-
-    const sheet = new THREE.Mesh(
-      new THREE.PlaneGeometry(FOG_W, FOG_H),
-      new THREE.ShaderMaterial({
-        uniforms: {
-          uNoise: { value: TEX.fogNoise },
-          uTime: { value: 0 },
-          uOpen: { value: 0 },
-          uAlpha: { value: 1 },
-          uColor: { value: new THREE.Color(0xffffff) },
-        },
-        vertexShader: FOG_VERT,
-        fragmentShader: FOG_FRAG,
-        transparent: true,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      })
-    );
-    sheet.renderOrder = 8; // after the stones and the temple
-    group.add(sheet);
-
-    // Puffs are one InstancedMesh — a single draw call however many there are.
-    // They all sit *in front* of the sheet (PUFF_DEPTH is positive, and +Z
-    // local faces the approaching avatar) because an InstancedMesh sorts as one
-    // object: instances can't individually sort against the sheet, so keeping
-    // them all on the near side makes "draw after the sheet" always correct.
-    const puffs = new THREE.InstancedMesh(
-      new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshBasicMaterial({
-        map: TEX.fogPuff,
-        transparent: true,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        fog: false,
-        opacity: PUFF_ALPHA,
-      }),
-      PUFF_COUNT
-    );
-    puffs.renderOrder = 9;
-    puffs.frustumCulled = false; // instances move via per-instance matrices; see the stone meshes for the same reasoning
-    group.add(puffs);
-
-    const seeds = [];
-    for (let i = 0; i < PUFF_COUNT; i++) {
-      seeds.push({
-        bx: (Math.random() * 2 - 1) * PUFF_SPREAD_X,
-        // biased low so the bank is thickest around path level
-        by: -FOG_H / 2 + Math.pow(Math.random(), 0.7) * PUFF_SPREAD_Y,
-        bz: PUFF_DEPTH[0] + Math.random() * (PUFF_DEPTH[1] - PUFF_DEPTH[0]),
-        size: PUFF_SIZE[0] + Math.random() * (PUFF_SIZE[1] - PUFF_SIZE[0]),
-        rot: Math.random() * Math.PI * 2,
-        rotSpeed: (Math.random() - 0.5) * 0.25,
-        p1: Math.random() * Math.PI * 2,
-        p2: Math.random() * Math.PI * 2,
-        p3: Math.random() * Math.PI * 2,
-        delay: Math.random() * 0.4, // staggers which puffs wink out first
-      });
-    }
-
-    // Luke, 2026-09-13: "go ahead and disable the fog altogether. Don't
-    // delete it, just hide it. That way we can test that everyone else can
-    // see everything they should." Everything else about a curtain still
-    // builds and animates as before — flip this back on to restore it.
-    group.visible = FOG_CURTAINS_VISIBLE;
-    scene.add(group);
-    const curtain = { group, sheet, puffs, seeds, pos, heading, open: 0, opening: false, done: false };
-    curtains.push(curtain);
-    return curtain;
-  }
+  // There is no fog. Luke, 2026-10-10: "let's just remove the fog from the
+  // game completely. Don't delete it; keep the files and the code archived
+  // and referenced somewhere so we can reinstate it later if needed. But it
+  // shouldn't be part of the download for players anymore." The fork
+  // curtains (the fog banks past each fork that hid the path ahead, and that
+  // the guide saw through) and the scene-wide THREE.Fog are archived, with
+  // how to put them back, in app/archive/fog/ — outside src/ and public/, so
+  // none of it is built or downloaded. Without them, the paths and islands
+  // ahead are in plain view, to players and guide alike.
 
   /** Smoothstep, matching the GLSL one so JS and shader easing agree. */
   const smoothstep = (edge0, edge1, x) => {
     const t = THREE.MathUtils.clamp((x - edge0) / (edge1 - edge0), 0, 1);
     return t * t * (3 - 2 * t);
   };
-
-  const puffDummy = new THREE.Object3D();
-
-  /**
-   * Dissolves any curtain the avatar has walked up to, and keeps every
-   * curtain's colour/opacity current. Colour comes from tintScratch, which
-   * applyAtmosphere has already set for this frame — that way a curtain takes
-   * the dawn/dusk grading like the rest of the sky without having to live in
-   * atmosphereMaterials (whose entries are never removed, so putting
-   * per-journey props in it would leak across resets).
-   */
-  function updateCurtains(dt, t) {
-    const roleScale = role === 'guide' ? CURTAIN_GUIDE_OPACITY : 1;
-    for (const c of curtains) {
-      if (c.done) continue;
-      if (!c.opening) {
-        const f = forward(c.heading, 1);
-        const ahead = (walker.x - c.pos.x) * f.x + (walker.z - c.pos.z) * f.z;
-        if (ahead > -CURTAIN_OPEN_LEAD) c.opening = true;
-      }
-      if (c.opening) c.open = Math.min(1, c.open + dt / CURTAIN_OPEN_TIME);
-
-      const u = c.sheet.material.uniforms;
-      u.uTime.value = t;
-      u.uOpen.value = c.open;
-      u.uAlpha.value = roleScale;
-      u.uColor.value.copy(tintScratch);
-      c.sheet.position.y = FOG_RISE * c.open;
-      c.sheet.scale.set(1 + FOG_EXPAND * c.open, 1 + FOG_EXPAND * 0.6 * c.open, 1);
-
-      c.puffs.material.color.copy(tintScratch);
-      c.puffs.material.opacity = PUFF_ALPHA * roleScale * (1 - smoothstep(0.55, 1.0, c.open));
-
-      for (let i = 0; i < c.seeds.length; i++) {
-        const s = c.seeds[i];
-        // Sine fields rather than a real simulation: cheaper, and easier to
-        // keep looking like a slow churn rather than drifting particles.
-        const churnX = Math.sin(t * 0.32 + s.p1) * 0.28;
-        const churnY = Math.sin(t * 0.24 + s.p2) * 0.2;
-        const churnZ = Math.sin(t * 0.29 + s.p3) * 0.16;
-        const spent = THREE.MathUtils.clamp((c.open - s.delay) / (1 - s.delay), 0, 1);
-        const shrink = 1 - smoothstep(0, 1, spent);
-        const push = Math.sign(s.bx || 1) * PUFF_PUSH * c.open;
-
-        puffDummy.position.set(s.bx + churnX + push, s.by + churnY + PUFF_LIFT * c.open, s.bz + churnZ);
-        puffDummy.rotation.set(0, 0, s.rot + t * s.rotSpeed);
-        const sc = s.size * shrink;
-        puffDummy.scale.set(sc, sc, 1);
-        puffDummy.updateMatrix();
-        c.puffs.setMatrixAt(i, puffDummy.matrix);
-      }
-      c.puffs.instanceMatrix.needsUpdate = true;
-
-      if (c.open >= 1) {
-        c.group.visible = false;
-        c.done = true;
-      }
-    }
-  }
 
   // ---------------------------------------------------------------- birds
   //
@@ -2517,6 +2208,22 @@ export function mountSkyPath(container, options = {}) {
   const BIRD_BOB_HEIGHT = 0.36;
   const BIRD_BOB_LATERAL = 0.48;
   const BIRD_GAP = [1, 3]; // DEV: tightened for testing — restore to something like [16, 34] for real play
+  // A spectator's camera — the projector's, a guide's, a fallen player's Watch
+  // mode — isn't trailing a walker of its own: it follows teammates, island to
+  // island, and on the projector jumps between players and teams. Placed
+  // relative to `walker` (which for these roles never leaves the start), a
+  // bird ended up beside or behind that camera and filled the screen (Luke,
+  // 2026-10-10, of the projector: "do something about the birds covering the
+  // camera... it's more important that we see what's happening"). So for
+  // these roles a bird rides at a fixed distance in front of the camera
+  // itself, its path kept in screen terms (see `screenLocked` in
+  // updateBirds) — it can't come any nearer or grow, whatever the camera
+  // does. The same distance as a player's own bird at its spawn (35 ahead of
+  // the player, CAM_BACK behind whom the camera trails), so it looks the
+  // same size. And none while the shot is on something happening (see
+  // spectatorShotBusy), and far less often.
+  const BIRD_SPECTATOR_DEPTH = BIRD_DEPTH_OFFSET + CAM_BACK;
+  const BIRD_SPECTATOR_GAP = [16, 34];
 
   /** Direction from the hover point outward on `side`, tilted by a random angle within BIRD_ENTRY_TILT. Always points away from centre. */
   function randomBirdDir(side) {
@@ -2568,14 +2275,18 @@ export function mountSkyPath(container, options = {}) {
     // a gull drifting casually past while a flying saucer lifts the player
     // away undercuts the one moment the scene is asking to be looked at.
     if (bird || finished || falling || abduction) return;
+    const spectating = isSpectatorRole(role);
+    if (spectating && spectatorShotBusy()) return;
     birdTimer -= dt;
     if (birdTimer > 0) return;
-    birdTimer = THREE.MathUtils.lerp(BIRD_GAP[0], BIRD_GAP[1], Math.random());
+    const gap = spectating ? BIRD_SPECTATOR_GAP : BIRD_GAP;
+    birdTimer = THREE.MathUtils.lerp(gap[0], gap[1], Math.random());
 
     camera.updateMatrixWorld();
     // A fixed distance ahead of the player, clamped so a bird spawned very late in
     // the walk still lands short of the temple rather than at/behind its facade.
-    const z = Math.max(walker.z - BIRD_DEPTH_OFFSET, -TEMPLE_DISTANCE + 10);
+    // A spectator's: a fixed distance ahead of the camera (see BIRD_SPECTATOR_DEPTH).
+    const z = spectating ? camera.position.z - BIRD_SPECTATOR_DEPTH : Math.max(walker.z - BIRD_DEPTH_OFFSET, -TEMPLE_DISTANCE + 10);
     const side = Math.random() < 0.5 ? -1 : 1;
     const hoverNdcX = side * BIRD_NDC_X;
 
@@ -2583,7 +2294,9 @@ export function mountSkyPath(container, options = {}) {
     // head height projects to on screen right now, then reusing that same
     // screen fraction — not the avatar's world Y — for the bird's hover point,
     // since the bird sits at a very different depth.
-    const eyeNdc = new THREE.Vector3(walker.x, FIGURE_H, walker.z).project(camera);
+    const eyeNdc = spectating
+      ? new THREE.Vector3(camera.position.x, FIGURE_H, camera.position.z - CAM_BACK).project(camera) // where a player in shot stands
+      : new THREE.Vector3(walker.x, FIGURE_H, walker.z).project(camera);
 
     // Entry point: a random tilt away from the hover point, always outward on
     // `side` (see randomBirdDir) so the bird approaches from off-screen without
@@ -2616,7 +2329,18 @@ export function mountSkyPath(container, options = {}) {
       hoverNdcX, hoverNdcY: eyeNdc.y,
       exitDirX, exitDirY,
       fading: false, fadeT: 0,
+      screenLocked: spectating, // see BIRD_SPECTATOR_DEPTH
+      entryNdcX, entryNdcY,
     };
+  }
+
+  /** True while a spectator's shot is on something happening — the watched
+   * player falling, being rescued or carried off: no bird then (see
+   * BIRD_SPECTATOR_DEPTH). */
+  function spectatorShotBusy() {
+    if (role !== 'watching') return false;
+    const e = watchToken ? teammates.get(watchToken) : null;
+    return !!(e && (e.livePos?.quat || e.abductCam || e.abduction));
   }
 
   const BIRD_FALL_FADE = 0.3; // seconds — how fast any on-screen bird fades out once a fall starts
@@ -2646,6 +2370,22 @@ export function mountSkyPath(container, options = {}) {
         bird = null;
       }
       return; // held in place while fading — no flight-path repositioning
+    }
+
+    if (bird.screenLocked) {
+      // Something started happening in shot: fade out, as for a player's fall.
+      if (spectatorShotBusy()) return cancelBirdsForFall();
+      // Rides along at its fixed distance in front of the camera: the plane
+      // moves with the camera, and the entry and hover points are re-found on
+      // it from their screen positions (the exit already works that way).
+      camera.updateMatrixWorld();
+      bird.z = camera.position.z - BIRD_SPECTATOR_DEPTH;
+      const e = ndcToWorldAtZ(bird.entryNdcX, bird.entryNdcY, bird.z);
+      const h = ndcToWorldAtZ(bird.hoverNdcX, bird.hoverNdcY, bird.z);
+      bird.entryX = e.x;
+      bird.entryY = e.y;
+      bird.hoverX = h.x;
+      bird.hoverY = h.y;
     }
 
     bird.t += dt;
@@ -2724,9 +2464,10 @@ export function mountSkyPath(container, options = {}) {
   // The lazy build just never got revisited once that stopped being true.
   // Nothing here hides which bridge is correct: both are visibly identical
   // rope bridges, one with a breakable plank invisible until walked onto (see
-  // BRIDGE_WRONG_GAP_T) — the fog/curtains hide *distance*, not the answer.
+  // BRIDGE_WRONG_GAP_T). (The fog curtains that once hid the distance ahead
+  // are gone — see the "fog" note further down.)
 
-  const sections = []; // one per fork: { fork, correct, branch:{left,right}, words:{left,right}, approach, curtain, nextCursor, endPhase }
+  const sections = []; // one per fork: { fork, correct, branch:{left,right}, words:{left,right}, approach, nextCursor, endPhase }
 
   // The validated word-pairs.json data (see wordPairs.js) — set once, in
   // manager.onLoad, before startJourney() can possibly need it. `roundWords`
@@ -2776,15 +2517,6 @@ export function mountSkyPath(container, options = {}) {
       p.material.dispose();
     }
     pillars.length = 0;
-    for (const c of curtains) {
-      scene.remove(c.group);
-      for (const part of [c.sheet, c.puffs]) {
-        part.geometry.dispose();
-        part.material.dispose();
-      }
-      c.puffs.dispose(); // InstancedMesh also owns its instance buffers
-    }
-    curtains.length = 0;
     for (const b of bridges) {
       scene.remove(b);
       disposeBridge(b);
@@ -2883,8 +2615,8 @@ export function mountSkyPath(container, options = {}) {
   const LAST_FORK_SAG_MULTIPLIER = 1.3;
 
   /**
-   * Plants fork `k` at the current journeyCursor: its island, both bridges,
-   * and its curtain. Records the shared destination (nextCursor) so
+   * Plants fork `k` at the current journeyCursor: its island and both
+   * bridges. Records the shared destination (nextCursor) so
    * buildJourney()'s own loop knows where to plant fork k+1 from.
    *
    * The destination is fixed *before* either branch is drawn, and both
@@ -3002,7 +2734,6 @@ export function mountSkyPath(container, options = {}) {
       nextCursor,
       endPhase,
     };
-    sec.curtain = makeCurtain(advance(sec.fork, sec.fork.heading, CURTAIN_DIST), sec.fork.heading);
     sections.push(sec);
     return sec;
   }
@@ -3799,9 +3530,8 @@ export function mountSkyPath(container, options = {}) {
   // the mid-point of the bridge, which triggers the fall." So: one code
   // path for every viewer, driven purely by what the sender explicitly
   // reports, and nothing synthetic left that could show an event that
-  // hasn't happened. The fog curtains themselves still exist as scenery
-  // (hidden for now — see FOG_CURTAINS_VISIBLE) and, when shown, occlude
-  // this real movement naturally, as real meshes do.
+  // hasn't happened. (The fog curtains that used to occlude this movement
+  // further on are archived — see the "fog" note above.)
   const teammates = new Map(); // token -> { rig, characterKey, forkIndex, displayName, colorHex, phase, livePos, pingCount, lastPingAt, seatOffsetX, seatTagSide, seatTagYStagger }
 
   function teammateWorldPos(forkIdx) {
@@ -3881,7 +3611,13 @@ export function mountSkyPath(container, options = {}) {
     // that's where the rig gets positioned). A 'departing'+abducting report
     // hands it over to the real sequence instead (the 'departing' branch),
     // so it's only released here when the defence ended in a resist.
-    if (!defending && entry.waitGlow && !(tPhase === 'departing' && abducting)) {
+    // `abducting` on ANY report, not just the 'departing' one: the first
+    // 'moving' ping of the abduction can overtake that 'departing' (two
+    // channels — see useLobby.js's lastSeqRef), and it isn't `defending`
+    // either, so it used to play the repel for a player being carried off
+    // (Luke, 2026-10-10: the caption "said they were abducted, but the
+    // visualisation showed the animation of the aliens being repelled").
+    if (!defending && entry.waitGlow && !abducting) {
       entry.waitGlow.release();
       // They repelled the aliens. The guide fires this itself once its own
       // defence panel has lifted (see finishGuideDefence) — here it would
@@ -3933,6 +3669,20 @@ export function mountSkyPath(container, options = {}) {
       // describes. Doesn't touch `phase` — purely the latest real transform
       // for updateTeammates() to smooth toward.
       if (entry.phase === 'departing' && entry.forkIndex === tForkIndex && livePos) {
+        if (livePos.quat && !entry.quatSince) {
+          // The first tumbling transform of this departure: the moment their
+          // fall (or rescue, or abduction) started, give or take the network.
+          // A rescue is a fall with the jetpack on — the rescued player's own
+          // first second looks exactly like a fall, on purpose — so whether
+          // it'll be one is known now, before the engine fires.
+          entry.quatSince = {
+            at: performance.now(),
+            pos: new THREE.Vector3(livePos.x, livePos.y, livePos.z),
+            jetpack: entry.rig.powerup?.kind === 'jetpack',
+            landing: null, // teammateRescueLanding, on first use
+          };
+          if (!abducting && !entry.abduction) breakBridgeUnder(tForkIndex);
+        }
         entry.livePos = livePos;
       }
       return;
@@ -3942,6 +3692,8 @@ export function mountSkyPath(container, options = {}) {
       entry.forkIndex = tForkIndex; // the fork being LEFT
       entry.livePos = null; // clear any stale ping from a PREVIOUS departure — the rig holds where it is until a real one arrives
       entry.fallCamAnchor = null; // this departure hasn't necessarily fallen yet — see updateWatchingCamera, which (re)computes it lazily the moment a quat'd livePos actually arrives
+      entry.quatSince = null;
+      entry.abductCam = null;
       entry.rig.group.visible = true;
       // Keyed by the fork being LEFT, not a single shared variable — see the
       // "guide camera" section's own comment on guideLastDepartedTokenByFork
@@ -3963,6 +3715,15 @@ export function mountSkyPath(container, options = {}) {
           scene,
           textures: { ship: TEX.spaceship, beams: TEX.spaceshipBeams, string: TEX.string },
         });
+        // The projector's camera for this, as the abducted player's own:
+        // the trailing shot from where they stood (see updateWatchingCamera).
+        entry.abductCam = {
+          x: entry.rig.group.position.x,
+          z: entry.rig.group.position.z,
+          heading: entry.rig.group.rotation.y,
+          pull: 1,
+          pitch: 0,
+        };
         entry.abduction.start({
           at: { x: entry.rig.group.position.x, y: 0, z: entry.rig.group.position.z },
           targetCard: entry.rig.group,
@@ -3975,6 +3736,7 @@ export function mountSkyPath(container, options = {}) {
       entry.phase = 'gone';
       entry.livePos = null;
       entry.fallCamAnchor = null;
+      entry.quatSince = null;
       entry.rig.group.visible = false;
       entry.abduction?.dispose(); // defensive — the per-frame check in updateTeammates normally disposes it first, once its own local playback finishes
       entry.abduction = null;
@@ -3985,6 +3747,8 @@ export function mountSkyPath(container, options = {}) {
       entry.forkIndex = tForkIndex;
       entry.livePos = null;
       entry.fallCamAnchor = null;
+      entry.quatSince = null;
+      entry.abductCam = null;
       entry.rig.group.visible = true;
       entry.abduction?.dispose(); // defensive — shouldn't still exist by the time a 'resting' report arrives, but a new round's fresh 'resting' must never inherit a stray saucer
       entry.abduction = null;
@@ -4024,8 +3788,7 @@ export function mountSkyPath(container, options = {}) {
   const ISLAND_TAG_STAGGER_Y = FIGURE_H * 0.15;
   // How far from an island's centre a seat's lateral walk tapers to/from
   // zero at the start/end of a leg (see currentSeatLateral()) — tied to
-  // ISLAND_RADIUS, the same "how big is this deck" constant CURTAIN_DIST
-  // already keys off, so the taper always finishes comfortably before the
+  // ISLAND_RADIUS, the "how big is this deck" constant, so the taper always finishes comfortably before the
   // branch/bridge geometry (built far longer than one island's radius).
   const SEAT_TAPER_DIST = ISLAND_RADIUS;
 
@@ -4199,6 +3962,10 @@ export function mountSkyPath(container, options = {}) {
       if (entry.abduction) {
         entry.abduction.update(dt);
         entry.abduction.facePoint(camera.position);
+        if (entry.abductCam) {
+          entry.abductCam.pull = entry.abduction.state.cameraPull;
+          entry.abductCam.pitch = entry.abduction.state.cameraPitch;
+        }
         if (!entry.abduction.state.playing) {
           entry.abduction.dispose();
           entry.abduction = null;
@@ -4230,7 +3997,7 @@ export function mountSkyPath(container, options = {}) {
   // animation updateTeammates() is already driving for everyone else (see
   // that section's own design note for why the guide seeing the REAL
   // branch/outcome is a deliberately separate, later piece, not folded in
-  // here) — until they vanish at the curtain, then hops on to the next fork
+  // here) — until they're gone from this island, then hops on to the next fork
   // to do it again.
   //
   // "The last player still resting there" is derived purely from the
@@ -4369,7 +4136,7 @@ export function mountSkyPath(container, options = {}) {
     } else {
       const entry = teammates.get(guideFollowToken);
       if (!entry || entry.phase !== 'departing' || !entry.rig.group.visible) {
-        // Reached the curtain and vanished (or something removed them) —
+        // Gone from this island (or something removed them) —
         // this island's business is done; move the guide's own reference
         // point on. The teacher's own dashboard is the source of truth for
         // whether the WHOLE group has finished — this only ever advances
@@ -4503,7 +4270,19 @@ export function mountSkyPath(container, options = {}) {
     }
     const token = watchToken;
     const entry = token ? teammates.get(token) : null;
-    if (entry && entry.rig.group.visible && entry.livePos?.quat) {
+    if (entry?.abductCam) {
+      // Being abducted: exactly the abducted player's own camera — the
+      // trailing shot from where they stood, pulled back and tilted up by
+      // the saucer's own cameraPull/cameraPitch (this device's replica of
+      // it, see updateTeammate) — and held on the empty sky after, as
+      // theirs is. Luke, 2026-10-10, of the projector: the old fall-style
+      // shot turned "at such an angle, and zooming in in such a way, that we
+      // can see the character card side on... and also largely hides the
+      // alien ship on its approach". Checked before the rig's visibility:
+      // the shot outlasts the card.
+      const a = entry.abductCam;
+      placeTrailingShot(a.x, a.z, a.heading, { pull: a.pull, pitch: a.pitch, bob: Math.sin(t * 0.6) * 0.05 });
+    } else if (entry && entry.rig.group.visible && entry.livePos?.quat) {
       // Falling, or a jetpack rescue — a physics-driven, TUMBLING transform,
       // not a walk. Luke, 2026-09-24: "The camera should follow the player
       // as they fall, just as it does in that player's own view." The
@@ -4526,8 +4305,20 @@ export function mountSkyPath(container, options = {}) {
         const ahead = forward(watchFacing, FALL_CAM_FORWARD);
         entry.fallCamAnchor = new THREE.Vector3(p.x + side.x + ahead.x, FALL_CAM_HEIGHT, p.z + side.z + ahead.z);
       }
-      camera.position.lerp(entry.fallCamAnchor, Math.min(1, dt * FALL_CAM_EASE));
-      camera.lookAt(p.x, p.y, p.z);
+      // A jetpack rescue: the rescued player's own scripted shot, on this
+      // device's clock from when their fall started (rescueCamAt) — the
+      // plain fall-style tracking below tilted up after the flying figure
+      // until "we can see there is no sky above" (Luke, 2026-10-10).
+      const q = entry.quatSince;
+      if (q?.jetpack && !q.landing) q.landing = teammateRescueLanding(entry);
+      if (q?.jetpack && q.landing) {
+        const shot = rescueCamAt((performance.now() - q.at) / 1000, entry.fallCamAnchor, p, q.pos, q.landing);
+        camera.position.copy(shot.pos);
+        camera.lookAt(shot.lookAt);
+      } else {
+        camera.position.lerp(entry.fallCamAnchor, Math.min(1, dt * FALL_CAM_EASE));
+        camera.lookAt(p.x, p.y, p.z);
+      }
     } else if (entry && entry.rig.group.visible) {
       // The SAME shot the active player's own camera uses (trailingCamPos/
       // trailingCamLookAt, a direct position `.set()`, no lerp) — Luke,
@@ -4796,9 +4587,18 @@ export function mountSkyPath(container, options = {}) {
   // instead of a field simulation. See blow-trial.js for the fuller multi-puff
   // version of this idea if a later pass wants more chaos than one rotating
   // force gives.
-  const fallWorld = new RAPIER.World({ x: 0, y: -9.82, z: 0 });
+  // Created on the first fall rather than at mount: Rapier arrives after the
+  // game has started (see loadRapier() at the top of this file). Every use of
+  // fallWorld sits behind a fall that has already been started, so it always
+  // exists by then.
+  let fallWorld = null;
   const FALL_FIXED_DT = 1 / 60;
-  fallWorld.timestep = FALL_FIXED_DT;
+  function ensureFallWorld() {
+    if (!fallWorld) {
+      fallWorld = new RAPIER.World({ x: 0, y: -9.82, z: 0 });
+      fallWorld.timestep = FALL_FIXED_DT;
+    }
+  }
 
   const CARD_THICK = 0.05 * FIGURE_SCALE; // scales with the figure — it's the card's own depth, not a scene-relative distance
   // The "you fell" message/Again button and the card actually stopping are two
@@ -4819,6 +4619,9 @@ export function mountSkyPath(container, options = {}) {
 
   let fallBody = null;
   let falling = false;
+  // Non-null while a fall is waiting for Rapier to finish loading (see the
+  // fall site in tick()); a fresh object per wait, so a restart can cancel it.
+  let pendingFall = null;
   let fallAccumulator = 0;
   let fallElapsed = 0;
   let fallGoneSent = false; // the one 'gone' report per fall — see tick()'s falling block
@@ -4837,6 +4640,7 @@ export function mountSkyPath(container, options = {}) {
   const FALL_CAM_EASE = 3.2; // per-second ease rate toward the anchor
 
   function startFall() {
+    ensureFallWorld();
     figure.visible = true; // in case a previous fall hid it and something skipped the reset handler's restore
     if (fallBody) fallWorld.removeRigidBody(fallBody);
 
@@ -4918,7 +4722,7 @@ export function mountSkyPath(container, options = {}) {
     for (const { mesh, body } of brokenPieces) {
       scene.remove(mesh);
       mesh.geometry.dispose();
-      fallWorld.removeRigidBody(body);
+      fallWorld?.removeRigidBody(body);
     }
     brokenPieces = [];
   }
@@ -4932,11 +4736,42 @@ export function mountSkyPath(container, options = {}) {
    * first, once, before breaking every plank in the new set.
    */
   function triggerPlankBreak(breakablePlanks) {
+    // Already broken — by a teammate's fall, seen on this screen (see
+    // breakBridgeUnder): there's nothing left to break, and clearing would
+    // only make that fall's pieces vanish mid-air.
+    if (breakablePlanks.every((p) => p.broken)) return;
+    ensureFallWorld();
     clearBrokenPieces();
     for (const breakablePlank of breakablePlanks) breakOnePlank(breakablePlank);
   }
 
+  /**
+   * A teammate's fall (or rescue) seen on this screen: the bridge breaks
+   * under them here too. It used to break only on the faller's own phone,
+   * so everyone else — the guide, teammates, the projector — saw them drop
+   * through a whole bridge (Luke, 2026-10-10, of the projector: "Felix seemed
+   * to fall through a complete, intact bridge"). Which bridge they took
+   * isn't sent, but it needn't be: only the wrong bridge of a fork has
+   * breakable planks. The pieces fall on watchBreak's own physics clock
+   * (see tick), since this device has no fall of its own running.
+   */
+  let watchBreak = null; // { at, acc } while a teammate's broken planks are falling
+  function breakBridgeUnder(fork) {
+    const sec = sections[fork - 1];
+    const planks = sec && [...(sec.branch?.left ?? []), ...(sec.branch?.right ?? [])].find((p) => p.breakablePlanks?.length)?.breakablePlanks;
+    if (!planks || planks.every((p) => p.broken)) return;
+    const go = () => {
+      if (disposed || falling) return; // (this device's own fall owns the pieces now)
+      triggerPlankBreak(planks);
+      watchBreak = { at: performance.now(), acc: 0 };
+    };
+    if (RAPIER) go();
+    else loadRapier().then(go, () => {});
+  }
+
   function breakOnePlank(breakablePlank) {
+    if (breakablePlank.broken) return;
+    breakablePlank.broken = true;
     // breakPlank() returns the two pieces in a fixed [-1, +1] order (its own
     // sideSign, along the plank's local "across the deck" axis) — used here
     // rather than re-deriving a side from world position, since that axis is
@@ -5092,6 +4927,79 @@ export function mountSkyPath(container, options = {}) {
   function trailingCamLookAt(x, z, heading) {
     const ahead = forward(heading, 4.6);
     return new THREE.Vector3(x + ahead.x, CAM_LOOK_Y, z + ahead.z);
+  }
+
+  /**
+   * The trailing shot, placed on the camera: behind the player at (x, z),
+   * facing `heading`. `pull` dollies it back (and up a little), `pitch` tilts
+   * the gaze up like a tripod head without moving the camera — both 1/0
+   * except during an abduction (alienAbduction's cameraPull/cameraPitch).
+   * Shared by the player's own camera and the projector's view of them
+   * (updateWatchingCamera), so an abduction looks the same on both. Luke,
+   * 2026-10-10, of the projector: "can we please just replicate what the
+   * player themselves would be seeing during the event?"
+   */
+  function placeTrailingShot(x, z, heading, { pull = 1, pitch = 0, bob = 0, lookX = 0, lookY = 0 } = {}) {
+    const behind = forward(heading, CAM_BACK * pull);
+    const ahead = forward(heading, 4.6);
+    camera.position.set(x - behind.x + lookX, CAM_HEIGHT * (1 + (pull - 1) * 0.45) + lookY + bob, z - behind.z);
+    if (pitch > 0) {
+      const reach = CAM_BACK * pull + 4.6;
+      camera.lookAt(x + ahead.x, CAM_LOOK_Y + Math.sin(pitch) * reach, z + ahead.z * Math.cos(pitch));
+    } else {
+      camera.lookAt(x + ahead.x, CAM_LOOK_Y, z + ahead.z);
+    }
+  }
+
+  /**
+   * The jetpack rescue's camera at time t into the rescue: held at the fall
+   * anchor (tracking the figure, exactly like a real fall) until the fall is
+   * done — Luke: "the camera will wait for the falling character to leave
+   * the screen" — then a pan to a pulled-back shot of the landing spot, then
+   * an ease in to the normal trailing framing as the player descends (Luke:
+   * "arrive at the island pulled back... slowly zooming in"). A pure
+   * function of t, so the projector (updateWatchingCamera) can play the
+   * rescued player's own shot from its own clock, with nothing extra sent
+   * over the network. `figurePos` is where the figure is now (watched in
+   * the first phase), `startPos` where the rescue began.
+   */
+  function rescueCamAt(t, anchor, figurePos, startPos, landing) {
+    const R = RESCUE_TUNE;
+    const t1 = R.fallDuration;
+    const t2 = t1 + R.flyDuration;
+    const camTravelEnd = t1 + R.cameraTravelDuration;
+    const camZoomEnd = t2 + R.cameraZoomDuration;
+    const widePos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK + R.cameraPullback);
+    const normalPos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK);
+    const lookAtTarget = trailingCamLookAt(landing.x, landing.z, landing.heading);
+    // Fixed reference point for the travel pan's look-at, matching where the
+    // fall ends / the flight begins — the flight itself no longer has a
+    // separate "sideways burst" endpoint to aim at instead.
+    const flightStart = new THREE.Vector3(startPos.x, startPos.y - 0.5 * RESCUE_GRAVITY * t1 * t1, startPos.z);
+
+    if (t < t1) return { pos: anchor.clone(), lookAt: figurePos.clone() };
+    if (t < camTravelEnd) {
+      const u = smoothstep(t1, camTravelEnd, t);
+      return { pos: anchor.clone().lerp(widePos, u), lookAt: flightStart.clone().lerp(lookAtTarget, u) };
+    }
+    if (t < t2) return { pos: widePos, lookAt: lookAtTarget };
+    if (t < camZoomEnd) {
+      const u = smoothstep(t2, camZoomEnd, t);
+      return { pos: widePos.clone().lerp(normalPos, u), lookAt: lookAtTarget };
+    }
+    return { pos: normalPos, lookAt: lookAtTarget };
+  }
+
+  /**
+   * Where a teammate's jetpack rescue lands them — the same spot startRescue
+   * works out for the rescued player: the next island's centre plus their
+   * own seat there, or the temple's edge (no seats) after the last fork.
+   */
+  function teammateRescueLanding(entry) {
+    const sec = sections[entry.forkIndex - 1];
+    if (!sec) return null;
+    const seat = entry.forkIndex === N_FORKS ? { x: 0, z: 0 } : forward(sec.nextCursor.heading + Math.PI / 2, entry.seatOffsetX ?? 0);
+    return { x: sec.nextCursor.x + seat.x, z: sec.nextCursor.z + seat.z, heading: sec.nextCursor.heading };
   }
 
   /**
@@ -5347,40 +5255,9 @@ export function mountSkyPath(container, options = {}) {
     // slowly zooming in"). All computed here as an exact function of t (see
     // this function's own header); the camera section in tick() just
     // applies rescue.camPos/camLookAt directly.
-    const camTravelStart = t1;
-    const camTravelEnd = t1 + R.cameraTravelDuration;
-    const camZoomStart = t2;
-    const camZoomEnd = t2 + R.cameraZoomDuration;
-    const widePos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK + R.cameraPullback);
-    const normalPos = trailingCamPos(landing.x, landing.z, landing.heading, CAM_BACK);
-    const lookAtTarget = trailingCamLookAt(landing.x, landing.z, landing.heading);
-    // Fixed reference point for the travel pan's look-at, matching where the
-    // fall ends / the flight begins — the flight itself no longer has a
-    // separate "sideways burst" endpoint to aim at instead.
-    const flightStart = new THREE.Vector3(
-      rescue.startPos.x,
-      rescue.startPos.y - 0.5 * RESCUE_GRAVITY * t1 * t1,
-      rescue.startPos.z
-    );
-
-    if (t < camTravelStart) {
-      rescue.camPos = fallCamAnchor.clone();
-      rescue.camLookAt = pos.clone();
-    } else if (t < camTravelEnd) {
-      const u = smoothstep(camTravelStart, camTravelEnd, t);
-      rescue.camPos = fallCamAnchor.clone().lerp(widePos, u);
-      rescue.camLookAt = flightStart.clone().lerp(lookAtTarget, u);
-    } else if (t < camZoomStart) {
-      rescue.camPos = widePos;
-      rescue.camLookAt = lookAtTarget;
-    } else if (t < camZoomEnd) {
-      const u = smoothstep(camZoomStart, camZoomEnd, t);
-      rescue.camPos = widePos.clone().lerp(normalPos, u);
-      rescue.camLookAt = lookAtTarget;
-    } else {
-      rescue.camPos = normalPos;
-      rescue.camLookAt = lookAtTarget;
-    }
+    const shot = rescueCamAt(t, fallCamAnchor, pos, rescue.startPos, landing);
+    rescue.camPos = shot.pos;
+    rescue.camLookAt = shot.lookAt;
 
     if (t >= t5) resolveRescue();
   }
@@ -5805,13 +5682,13 @@ export function mountSkyPath(container, options = {}) {
   // animation is complete, interrupt and move to the next player" — so
   // there is deliberately no "ignore while animating" guard here, unlike
   // the dial's own turn.
-  const ABDUCT_STRING_SRC = 'textures/hanging-string.png';
+  const ABDUCT_STRING_SRC = 'textures/hanging-string.webp';
   const ABDUCT_STRING_TILE = { w: 67, h: 526 };
   const ABDUCT_STRING_CENTER_X = 35; // the rope's own opaque centre within that 67px-wide tile — see alienLowerProto.js
   const ABDUCT_STRING_LEN = 2400; // canvas-space px; see this section's header
-  const ABDUCT_ARROW_LEFT_SRC = 'textures/alien-arrow-left.png';
-  const ABDUCT_ARROW_RIGHT_SRC = 'textures/alien-arrow-right.png';
-  const ABDUCT_EARTH_SRC = 'textures/earth.png';
+  const ABDUCT_ARROW_LEFT_SRC = 'textures/alien-arrow-left.webp';
+  const ABDUCT_ARROW_RIGHT_SRC = 'textures/alien-arrow-right.webp';
+  const ABDUCT_EARTH_SRC = 'textures/earth.webp';
   const ABDUCT_TAG_GLOW = '#ffe9b8'; // fallback glow, for a target with no colorHex yet — see this section's header
 
   const ABDUCT_AVATAR = { height: 224, centerY: 343 };
@@ -5889,7 +5766,7 @@ export function mountSkyPath(container, options = {}) {
   // Luke asked for the first time round. The ship art itself was also
   // swapped for a version with the cardboard backing stripped out (same
   // filename, replaced on disk — re-copied over the old one).
-  const ABDUCT_SHIP_SRC = 'textures/abduct-ship-small.png';
+  const ABDUCT_SHIP_SRC = 'textures/abduct-ship-small.webp';
   // Five fixed stops along the "curved path," baked from the numbers Luke
   // logged against the live tuner (position/gap duration, and an offset+
   // scale nudge applied uniformly to all five — see ABDUCT_SHIP_PATH_ADJUST
@@ -5959,7 +5836,7 @@ export function mountSkyPath(container, options = {}) {
   // `?abductTune=1` panel's logged values (now removed) — a negative `gap`
   // means the bracket's inner edge overlaps INTO the avatar's own edge by
   // that many px, not a gap outward.
-  const ABDUCT_SELECT_SRC = 'textures/abduct-select-left.png';
+  const ABDUCT_SELECT_SRC = 'textures/abduct-select-left.webp';
   const ABDUCT_SELECT_BRACKET = { height: 230, gap: -40 };
 
   // The rune circle — Luke, 2026-09-20: "Time for the confirm button.
@@ -5968,7 +5845,7 @@ export function mountSkyPath(container, options = {}) {
   // white) of the circle; put the runes onto the background without adding
   // anything behind them." Position/size baked from the `?abductTune=1`
   // panel's logged values (now removed).
-  const ABDUCT_RUNES_SRC = 'textures/abduct-runes.png';
+  const ABDUCT_RUNES_SRC = 'textures/abduct-runes.webp';
   const ABDUCT_RUNES = { centerX: 558, centerY: 274, size: 118 };
   // "Add a thin green ring around them with two gaps in it, with those gaps
   // at 135 degrees and 315 degrees, and short lines perpendicular to
@@ -6919,7 +6796,7 @@ export function mountSkyPath(container, options = {}) {
 
   // figure.position/rotation are the *visual* transform, redrawn from these
   // every frame (see the step-bob block in tick()) — walker is the actual
-  // logical path position everything else (movement, camera, fork/curtain
+  // logical path position everything else (movement, camera, fork
   // checks, key light) reads and writes. Splitting them is what lets the walk
   // bob nudge the mesh sideways and tilt it without that offset silently
   // feeding back into "how far has the avatar actually walked".
@@ -8110,7 +7987,7 @@ export function mountSkyPath(container, options = {}) {
    * that reintroduces divergence — see TODO.md.
    */
   function requestChoice(side) {
-    if (leg || finished || falling || !canAct || abductPromptOpen) return; // frozen from the moment they're targeted, through any wait for the guide, until the defence ends — see the "defence queue" section
+    if (leg || finished || falling || pendingFall || !canAct || abductPromptOpen) return; // frozen from the moment they're targeted, through any wait for the guide, until the defence ends — see the "defence queue" section
     if (onForkChoice) onForkChoice(forkIndex, side);
     else applyChoice(side); // no owner listening: solo play, decide it here
   }
@@ -8132,6 +8009,7 @@ export function mountSkyPath(container, options = {}) {
     finished = false;
     finishedSuccess = false;
     falling = false;
+    pendingFall = null;
     correctCount = 0;
     itemsCollected = 0;
     resistCount = 0;
@@ -8294,7 +8172,7 @@ export function mountSkyPath(container, options = {}) {
     els.role.dataset.role = role;
     els.role.textContent = role === 'guide' ? 'Guide view' : 'Player view';
     figure.visible = role !== 'guide';
-    refreshUI(); // curtain opacity follows `role` in updateCurtains each frame
+    refreshUI();
   });
 
   // Drag to look. This is the clearest demonstration of the multiplane effect on
@@ -8392,6 +8270,9 @@ export function mountSkyPath(container, options = {}) {
     // of what manager.onLoad means.
     startJourney();
     $('loader').classList.add('done');
+    // Physics, now that the game itself is ready — see loadRapier(). Errors
+    // are dealt with if a fall actually needs it.
+    loadRapier().catch(() => {});
     if (presetLook && role !== 'watching') {
       // Chosen on the join screen already (see presetLook above): same end
       // state as pressing Start, without the screen. The guide included, so
@@ -8447,8 +8328,10 @@ export function mountSkyPath(container, options = {}) {
   const WALK_BOB_TILT = THREE.MathUtils.degToRad(9); // an angle, not a length — no scaling needed
   let walkPhase = 0;
 
+  let tickCount = 0; // for the projector's monitor (handle.monitorInfo)
   function tick() {
     if (disposed) return; // unmounted mid-frame: stop the loop rather than render into a dead canvas
+    tickCount++;
     timer.update();
     const dt = Math.min(timer.getDelta(), 0.05);
     const t = timer.getElapsed();
@@ -8565,12 +8448,44 @@ export function mountSkyPath(container, options = {}) {
           // this same moment into a rescue instead — see startRescue's own
           // header for why that's a separate, non-physics path rather than
           // a branch inside startFall().
-          if (leg.lastPoint.breakablePlanks?.length) triggerPlankBreak(leg.lastPoint.breakablePlanks);
           // Only a JETPACK turns a fall into a rescue — holding the
           // abduction device (the same `rig.powerup` slot, see
           // equipPowerUp's own header) is not a "spare life."
-          if (rig.powerup?.kind === 'jetpack') startRescue();
-          else startFall();
+          //
+          // Both the plank break and the fall need Rapier, which loads after
+          // the game starts (see loadRapier()). In the rare case it hasn't
+          // arrived yet (a wrong answer in the first seconds on a slow
+          // connection), the walker just stands at the edge until it has,
+          // then everything plays exactly as normal. A jetpack rescue is
+          // scripted, not physics, so it never waits.
+          const planks = leg.lastPoint.breakablePlanks;
+          const fall = () => {
+            if (planks?.length) triggerPlankBreak(planks);
+            startFall();
+          };
+          if (rig.powerup?.kind === 'jetpack') {
+            if (planks?.length && RAPIER) triggerPlankBreak(planks);
+            startRescue();
+          } else if (RAPIER) {
+            fall();
+          } else {
+            const token = (pendingFall = {});
+            const waitThenFall = () =>
+              loadRapier()
+                .then(() => {
+                  if (disposed || pendingFall !== token) return; // restarted/unmounted meanwhile
+                  pendingFall = null;
+                  fall();
+                  refreshUI();
+                })
+                .catch((err) => {
+                  // A dropped connection mid-download: keep trying rather
+                  // than leave the player stuck at the edge.
+                  console.error('[skyPath] physics failed to load; retrying', err);
+                  if (!disposed && pendingFall === token) setTimeout(waitThenFall, 2000);
+                });
+            waitThenFall();
+          }
         }
         leg = null;
         refreshUI();
@@ -8606,6 +8521,27 @@ export function mountSkyPath(container, options = {}) {
     // (frozen exactly where the fall left it — the bob code would otherwise
     // snap it back to standing the very next frame); or the normal walking/
     // idle/reached-the-temple case (bob code, as before).
+    // A teammate's broken planks (see breakBridgeUnder): their own physics
+    // steps, until they vanish when a fall's own pieces would.
+    if (watchBreak && !falling) {
+      watchBreak.acc += dt;
+      let steps = 0;
+      while (watchBreak.acc >= FALL_FIXED_DT && steps < 5) {
+        fallWorld.step();
+        watchBreak.acc -= FALL_FIXED_DT;
+        steps++;
+      }
+      for (const { mesh, body } of brokenPieces) {
+        const pt = body.translation();
+        const pr = body.rotation();
+        mesh.position.set(pt.x, pt.y, pt.z);
+        mesh.quaternion.set(pr.x, pr.y, pr.z, pr.w);
+      }
+      if ((performance.now() - watchBreak.at) / 1000 >= FALL_DISAPPEAR) {
+        for (const { mesh } of brokenPieces) mesh.visible = false;
+        watchBreak = null;
+      }
+    }
     if (rescue) {
       updateRescue(dt);
     } else if (falling) {
@@ -8751,8 +8687,7 @@ export function mountSkyPath(container, options = {}) {
     updatePickup(t);
 
     applySun(sunP);
-    applyAtmosphere(sunP); // leaves the current tint in tintScratch for updateCurtains
-    updateCurtains(dt, t);
+    applyAtmosphere(sunP);
     sky.material.map.offset.x = THREE.MathUtils.lerp(0, 2 / 3, sunP);
 
     // clouds drift, at speeds scaled by distance
@@ -8888,29 +8823,19 @@ export function mountSkyPath(container, options = {}) {
       // already set (the crowd harness owns the base value) — multiplied, not
       // assigned, so the two compose instead of one clobbering the other.
       const pull = camPull * (abduction ? abduction.state.cameraPull : 1);
-      const behind = forward(facing, CAM_BACK * pull);
-      const ahead = forward(facing, 4.6);
-      camera.position.set(
-        walker.x + seatLateral.x - behind.x + look.x,
-        CAM_HEIGHT * (1 + (pull - 1) * 0.45) + look.y + Math.sin(t * 0.6) * 0.05,
-        walker.z + seatLateral.z - behind.z
-      );
       // During an abduction the camera tilts up to follow the saucer away.
       // Done as a rotation of the LOOK-AT point about the camera, not a move
       // of the camera itself — that's what a tripod head does, and it keeps
-      // the trailing position above as the one thing placing the view. The
-      // event only supplies the angle; it never touches the camera.
+      // the trailing position as the one thing placing the view. The event
+      // only supplies the angle; it never touches the camera.
       const pitch = abduction ? abduction.state.cameraPitch : 0;
-      if (pitch > 0) {
-        const reach = CAM_BACK * pull + 4.6;
-        camera.lookAt(
-          walker.x + seatLateral.x + ahead.x,
-          CAM_LOOK_Y + Math.sin(pitch) * reach,
-          walker.z + seatLateral.z + ahead.z * Math.cos(pitch)
-        );
-      } else {
-        camera.lookAt(walker.x + seatLateral.x + ahead.x, CAM_LOOK_Y, walker.z + seatLateral.z + ahead.z);
-      }
+      placeTrailingShot(walker.x + seatLateral.x, walker.z + seatLateral.z, facing, {
+        pull,
+        pitch,
+        bob: Math.sin(t * 0.6) * 0.05,
+        lookX: look.x,
+        lookY: look.y,
+      });
     }
     // else: the round ended badly — camera stays exactly where the fall (or
     // the departing saucer) left it, frozen, until "Again" resets everything
@@ -8946,16 +8871,7 @@ export function mountSkyPath(container, options = {}) {
     // role that has no discrete refresh trigger of its own.
     updateWordSigns();
 
-    if (drawing && camLift > 0) {
-      const pos = camera.position.clone();
-      const quat = camera.quaternion.clone();
-      const e = camLift * camLift * (3 - 2 * camLift); // smoothstep
-      camera.position.y += e * CAM_LIFT_HEIGHT;
-      camera.rotateX(e * CAM_LIFT_PITCH);
-      resistWave.render(scene, camera);
-      camera.position.copy(pos);
-      camera.quaternion.copy(quat);
-    } else if (drawing) resistWave.render(scene, camera);
+    if (drawing) resistWave.render(scene, camera);
 
     rafId = requestAnimationFrame(tick);
   }
@@ -9004,20 +8920,6 @@ export function mountSkyPath(container, options = {}) {
           }
         : null,
     });
-    window.__curtains = () =>
-      curtains.map((c) => ({
-        z: +c.pos.z.toFixed(2),
-        open: +c.open.toFixed(2),
-        done: c.done,
-        visible: c.group.visible,
-        sheet: {
-          uOpen: +c.sheet.material.uniforms.uOpen.value.toFixed(3),
-          uAlpha: +c.sheet.material.uniforms.uAlpha.value.toFixed(3),
-          y: +c.sheet.position.y.toFixed(3),
-        },
-        puffOpacity: +c.puffs.material.opacity.toFixed(3),
-      }));
-    window.__curtainObjs = () => curtains;
     window.__spawnBird = () => {
       birdTimer = 0;
       bird = null;
@@ -9224,8 +9126,6 @@ export function mountSkyPath(container, options = {}) {
     window.__atmos = () => ({
       skyTint: atmosphereMaterials[0].color.getHexString(),
       clear: renderer.getClearColor(new THREE.Color()).getHexString(),
-      fog: scene.fog.color.getHexString(),
-      fogNearFar: [scene.fog.near, scene.fog.far],
       keyColor: key.color.getHexString(),
       keyIntensity: key.intensity,
       keyPos: key.position.toArray(),
@@ -9296,6 +9196,29 @@ export function mountSkyPath(container, options = {}) {
       notifyPlayerState(finished && !finishedSuccess ? 'gone' : 'resting');
     },
 
+    /**
+     * TEMPORARY, for the projector's monitor (lobby/monitor.js): this world's
+     * camera, who it follows and what they're doing, frames run, and the
+     * renderer's GPU memory — what's needed to read a freeze or an odd camera
+     * move afterwards.
+     */
+    monitorInfo() {
+      const e = watchToken ? teammates.get(watchToken) : null;
+      const r = (v) => Math.round(v * 100) / 100;
+      const dir = camera.getWorldDirection(new THREE.Vector3());
+      return {
+        ticks: tickCount,
+        drawing,
+        cam: [r(camera.position.x), r(camera.position.y), r(camera.position.z)],
+        pitchDeg: Math.round((Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1)) * 180) / Math.PI),
+        watching: watchToken,
+        watched: e
+          ? { phase: e.phase, fork: e.forkIndex, visible: e.rig.group.visible, airborne: !!e.livePos?.quat, abduct: !!e.abductCam, rescue: !!e.quatSince?.jetpack }
+          : null,
+        gpu: { geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures, calls: renderer.info.render.calls },
+      };
+    },
+
     /** Projector: follow this player (a roster token), or null to let the camera choose. */
     watch(token) {
       watchToken = token;
@@ -9312,11 +9235,6 @@ export function mountSkyPath(container, options = {}) {
     capture() {
       renderer.render(scene, camera);
       return renderer.domElement.toDataURL('image/png');
-    },
-
-    /** Projector: how far the camera has risen into the clouds for a wipe, 0-1 (see camLift). */
-    setLift(v) {
-      camLift = Math.max(0, Math.min(1, v));
     },
 
     /** Projector: draw frames (this team is on screen) or not (it isn't; it still updates). */

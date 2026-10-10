@@ -94,8 +94,10 @@ export default {
   // autoPort), so a second chat can run its own server beside another one;
   // plain `npm run dev` still gets 5181.
   server: { host: true, port: Number(process.env.PORT) || 5181 },
-  // es2022, not the prototype's es2020: skyPath.js keeps the prototype's
-  // module-scope `await RAPIER.init()` (Rapier is WASM and needs it before any
-  // RAPIER.* class exists), and top-level await isn't valid below es2022.
+  // es2022, not the prototype's es2020. Originally for skyPath.js's
+  // module-scope `await RAPIER.init()`; Rapier now loads on demand
+  // (2026-10-10, see loadRapier() there), but the test pages' copies
+  // (src/temple3d/) still use top-level await, which isn't valid below
+  // es2022, and every browser the game targets supports it anyway.
   build: { target: 'es2022' },
 };

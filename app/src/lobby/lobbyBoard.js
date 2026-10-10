@@ -144,8 +144,8 @@ export const LOBBY_BOARD_DEFAULTS = {
       slots: [
         // Slot 0 shows at rest, so it's the default. Luke: Sky Temple is
         // "the default/starting option".
-        { src: 'textures/mode-skytemple.jpg', mode: 'skypath' },
-        { src: 'textures/mode-volcano.jpg', mode: 'cavern' },
+        { src: 'textures/mode-skytemple.webp', mode: 'skypath' },
+        { src: 'textures/mode-volcano.webp', mode: 'cavern' },
       ],
       // Spacing only: sets how far out the pictures sit. Segments are drawn
       // edge to edge with no visible gap; Luke asked for the gap line to go.
@@ -289,7 +289,7 @@ const FLUTES_PER_TILE = 16; // makeCorrugatedEdgeCanvas() draws this many
 // `style: 'original'`, a housing gets dial.png cropped to its disc, as the
 // top of a column, plus a flat black window. Nothing is cut into the board.
 const ORIGINAL = {
-  dialSrc: 'textures/dial.png',
+  dialSrc: 'textures/dial.webp',
   dialSize: { w: 183, h: 184 },
   dialDiameter: 172,
 };
@@ -630,7 +630,7 @@ const LABEL = {
 };
 const labelGlyphs = new Map();
 function labelGlyph(ch) {
-  const src = /[A-Z]/.test(ch) ? `textures/letters/upper-v2/${ch}.png` : `textures/letters/lower/${ch}.png`;
+  const src = /[A-Z]/.test(ch) ? `textures/letters/upper-v2/${ch}.webp` : `textures/letters/lower/${ch}.webp`;
   if (!labelGlyphs.has(src)) {
     labelGlyphs.set(
       src,

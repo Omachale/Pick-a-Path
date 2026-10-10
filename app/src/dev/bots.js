@@ -99,7 +99,7 @@ export async function startBots(
   for (let i = offset; i < offset + count; i++) {
     const name = NAMES[i % NAMES.length];
     const token = `bot_${name.toLowerCase()}_${i}`;
-    const client = createClient(url, key);
+    const client = createClient(url, key, { realtime: { worker: true } }); // keep-alive that survives a hidden window (see supabase.js)
     const ch = client.channel(`lobby-${CODE}`, { config: { presence: { key: token } } });
     const meta = {
       token,

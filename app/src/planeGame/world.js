@@ -262,11 +262,11 @@ export function buildWorld({ scene, renderer, manager }) {
     manager.itemEnd('sky-ring');
   };
   skyImg.onerror = () => manager.itemError('sky-ring');
-  skyImg.src = 'textures/skybig.jpg';
+  skyImg.src = 'textures/skybig.webp';
 
   // --- the land and sea far below (Sky Path's land/sea deck, tiled all round)
   const LANDSEA_D = 562;
-  deck(tex('textures/landsea.jpg'), {
+  deck(tex('textures/landsea.webp'), {
     w: LANDSEA_D * 5,
     d: LANDSEA_D * 5,
     y: FLOOR_Y,
@@ -279,13 +279,13 @@ export function buildWorld({ scene, renderer, manager }) {
   });
 
   // --- distant cloud decks (Sky Path's deckDeep / deckHigh)
-  const cloudDeckTex = tex('textures/cloud-deck.png', { repeatWrap: true });
+  const cloudDeckTex = tex('textures/cloud-deck.webp', { repeatWrap: true });
   deck(cloudDeckTex, { w: 1800, d: 1200, y: -95, z: -800, repeat: [18, 12], order: 3, opacity: 0.55, parent: rig });
   deck(cloudDeckTex, { w: 900, d: 620, y: -40, z: -390, repeat: [11, 8], order: 4, opacity: 0.75, parent: rig });
 
   // --- the two wind sheets just below, Sky Path's tuned values
   const cloudDenseTex = tex('textures/cloud-dense.webp', { tile: true });
-  const cloudLightTex = tex('textures/cloud-light.png', { tile: true });
+  const cloudLightTex = tex('textures/cloud-light.webp', { tile: true });
   const cloudDense = windLayer(cloudDenseTex, cloudLightTex, { y: -16.9, order: 5, opacity: 1, parent: rig });
   const cloudLight = windLayer(cloudLightTex, cloudDenseTex, { y: -20.6, order: 5.2, opacity: 0.9, parent: rig });
   cloudDense.gaps = 4;

@@ -108,7 +108,7 @@ new GLTFLoader().load(
       deckRadius = Math.max(deckRadius, Math.hypot(v.x, v.z));
     }
     const deckMat = deckMesh.material.clone();
-    deckMat.map = new THREE.TextureLoader().load('textures/island-circle.png', (t) => {
+    deckMat.map = new THREE.TextureLoader().load('textures/island-circle.webp', (t) => {
       t.colorSpace = THREE.SRGBColorSpace;
     });
     deckMat.vertexColors = false;
@@ -138,7 +138,7 @@ const card = new THREE.Mesh(
   new THREE.PlaneGeometry(FIGURE_H * FIGURE_ASPECT, FIGURE_H),
   new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.45, side: THREE.DoubleSide })
 );
-new THREE.TextureLoader().load('textures/figure-indy.png', (t) => {
+new THREE.TextureLoader().load('textures/figure-indy.webp', (t) => {
   t.colorSpace = THREE.SRGBColorSpace;
   card.material.map = t;
   card.material.needsUpdate = true;
@@ -151,7 +151,7 @@ const CARD_HOME = card.position.clone();
 // ---------------------------------------------------------------- abduction rig
 const texLoader = new THREE.TextureLoader();
 const loadTex = (name) => {
-  const t = texLoader.load(`textures/${name}.png`);
+  const t = texLoader.load(`textures/${name}.webp`);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
   return t;

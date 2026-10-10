@@ -23,7 +23,7 @@
  * done unasked.
  */
 
-export const PANEL_SRC = 'textures/cardboard-panel.png';
+export const PANEL_SRC = 'textures/cardboard-panel.webp';
 
 /** The panel art's own pixel size — every layout coordinate in the cardboard UI is in this space. */
 export const PANEL_SIZE = { w: 1024, h: 546 };

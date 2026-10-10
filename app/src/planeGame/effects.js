@@ -244,7 +244,7 @@ export function makeLocator(scene) {
  * forward for a moment.
  */
 export function makeThrower(scene, loader, figure = 'woman1') {
-  const ext = figure === 'indy' ? 'png' : 'webp';
+  const ext = 'webp';
   const tex = loader.load(`textures/figure-${figure}.${ext}`);
   tex.colorSpace = THREE.SRGBColorSpace;
   const H = 2.2 * 0.8 * 0.72; // Sky Path's FIGURE_H

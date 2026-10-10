@@ -53,7 +53,7 @@ import { PANEL_SRC, PANEL_SIZE, loadImage, drawPanel } from './cardboardPanel.js
 // --- duplicated from alienInterfaceProto.js (a FOURTH copy now — see that
 // file's header; this project really does want a shared module for these
 // four numbers at this point) ---
-const INTERFACE_SRC = 'textures/alien-interface-trimmed.jpg';
+const INTERFACE_SRC = 'textures/alien-interface-trimmed.webp';
 const INTERFACE_ASPECT = 992 / 487;
 const FINAL_WIDTH = 860;
 const FINAL_CENTRE = { x: 516, y: 312 };
@@ -68,7 +68,7 @@ function finalRect() {
 // is at true in-context scale.
 const AVATAR_HEIGHT = 224;
 const AVATAR_CENTER_Y = 343;
-const AVATAR_SRC = 'textures/figure-indy.png';
+const AVATAR_SRC = 'textures/figure-indy.webp';
 
 const GREEN = { r: 120, g: 255, b: 160 };
 function greenRgba(a, boost = 0) {

@@ -104,8 +104,8 @@ export function createSkyBackdrop(scene, renderer, loadTex) {
   }
 
   const tex = {
-    sky: loadTex('skybig', { ext: 'jpg' }),
-    landSea: loadTex('landsea', { ext: 'jpg' }),
+    sky: loadTex('skybig', { ext: 'webp' }),
+    landSea: loadTex('landsea', { ext: 'webp' }),
     cloudDense: loadTex('cloud-dense', { ext: 'webp', tile: true }),
     cloudLight: loadTex('cloud-light', { tile: true }),
     cloudDeck: loadTex('cloud-deck', { repeatWrap: true }),

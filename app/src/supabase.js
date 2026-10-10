@@ -19,4 +19,9 @@ if (!url || !anonKey) {
   );
 }
 
-export const supabase = createClient(url, anonKey);
+// `worker`: the realtime connection's keep-alive runs in a Web Worker (an
+// inline one, realtime-js's own), so it carries on in a hidden window. Seen in
+// the test monitor, 2026-10-10: the teacher's board, minimised or covered on
+// the PC, had its timers cut to once a minute after five minutes — too
+// seldom for the keep-alive, and the connection would be dropped.
+export const supabase = createClient(url, anonKey, { realtime: { worker: true } });

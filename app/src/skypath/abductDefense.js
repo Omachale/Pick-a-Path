@@ -29,8 +29,8 @@ import { TRACK_PATH, AVATAR_CARD, pointOnTrack } from '../keyboard/shipTrack.js'
 import { letterImageSrc } from '../keyboard/letterImage.js';
 import { drawPencilBorder } from '../pencilBorder.js';
 
-const TRACK_PANEL_SRC = 'textures/cardboard-panel-track.png';
-const SHIP_SRC = 'textures/abduct-ship-small.png';
+const TRACK_PANEL_SRC = 'textures/cardboard-panel-track.webp';
+const SHIP_SRC = 'textures/abduct-ship-small.webp';
 const SHIP_SIZE = { w: 307, h: 107 };
 const SHIP_ANCHOR = { x: 0.5, y: 0.55 };
 const SHIP_WIDTH_FRACTION = 0.16;
@@ -89,8 +89,8 @@ const PRESS_OFFSET_PX = 2; // "move very slightly down and to the right when pre
 // capsule's light outline ring and so keeps the dark "off" interiors.
 // The "on" strip is laid over the "off" one once per light, each copy
 // clipped to one light's own band, so lights switch individually.
-const LIGHTS_OFF_SRC = 'textures/abduct-lights-off.png';
-const LIGHTS_ON_SRC = 'textures/abduct-lights-on.png';
+const LIGHTS_OFF_SRC = 'textures/abduct-lights-off.webp';
+const LIGHTS_ON_SRC = 'textures/abduct-lights-on.webp';
 const LIGHTS_NATIVE_H = 307;
 // Placed from Luke's two mockups by matching the track's ink bounding box
 // in each crop to the track's on the panel (both crops agreed: 60px left of

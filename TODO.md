@@ -2334,3 +2334,192 @@ each player has had a chance to be a guide."
   and play a round from the board page. Delete the two buttons once testing is done.
 
 - Added 2026-10-09: the "Open projector" button is no longer dev-only (LobbyBoard.jsx, top right, below "+ player (dev)"); placement provisional. Bots stay dev-only.
+
+### 4 teams × 4 bot dry run (2026-10-10, Claude, dev server, preview pane)
+16 bots (startBots unthrottled), board + projector, a full series (4 rounds each),
+game RMFAW. Every Realtime frame in the board tab (board + 16 bots) counted by
+wrapping WebSocket send/onmessage.
+- Worked: joins, 4×4 shuffle, every round start, the projector picking up each
+  new round's four worlds, director shots incl. abduction + rescue split, series
+  end to the victory town on the projector. No Supabase errors or disconnects
+  during play (no `tenant_events`); two abnormal socket closes (1006) while 16
+  bots joined within ~6 s, both reconnected.
+- Traffic (board tab only; the projector added ~20/s): ~7,600 sent + ~36,000
+  received over ~5.5 active minutes. Per second: median ~100, 90th pct ~250,
+  max ~815; sent alone ~23/s. Free plan: 100 events/s, and Supabase's docs
+  count an event "delivered to, or sent from a client" — yet nothing was
+  throttled at ~2× that, so either only sends count or it's averaged/lenient.
+  Unconfirmed.
+- Bursts (600–815/s) at each round start: the projector's `report-state`, asked
+  per world as it loads, answered by every player on the main channel (so
+  delivered to everyone). Could go on team channels / be asked once.
+- Steady load is movement: 'moving' pings every 150 ms (MOVING_PING_INTERVAL),
+  each delivered to teammates + projector. Scales with team size × players.
+- Not measurable in the pane (hidden, timers/rAF throttled): projector frame
+  rate, the cloud wipe's timing. Check those in the live trial (D readout).
+
+### Download size: all textures converted to WebP (2026-10-10)
+
+Luke reported 30 s+ loads at work. Measured what Sky Path downloads: ~22 MB of images/models
+plus a 1.5 MB (gzipped) JS bundle. Models were only 1.5 MB; images were the bulk (sky & clouds
+8 MB, keyboard letters 5 MB, abduction/jetpack art 2.3 MB...), mostly full-quality PNGs.
+
+Done: every PNG/JPG in `app/public/textures/` (148 files) converted to WebP (quality 82, alpha
+lossless), originals deleted (still in git history and `Assets/`), every code reference updated
+(string paths, `ext:` fields, Sky Path's `tex()` default, the built-up letter/keyboard paths, CSS
+`url()`s). 25 MB -> 5.4 MB of textures; Sky Path's total download 22.4 -> 7.5 MB. Checked: Sky
+Path, Lava Cavern, victory stage, keyboard harness, lobby, plane game, temple-3d all load with no
+missing files or console errors. Icons stay PNG (the web manifest needs them).
+
+Not done yet (ranked, from the same investigation):
+- ~~Downsize oversized images~~ DONE (step 2, same day): resized from the original art, compared
+  in game from the same fixed camera views (horizon, cloud sheets, straight down) with no
+  visible difference: `landsea` 4000² -> 2048² (1860 -> 722 KB), `cloud-dense` and
+  `cloud-light` 2400 -> 1600 wide (~590 -> ~300 KB each), `cloud-deck` 2400 -> 1200 wide
+  (393 -> 125 KB). Sky Path's total download now 5.9 MB (was 22.4 MB before WebP). Left alone
+  on purpose: the 12 character figures (864x1216, ~1.2 MB together; shown large on the
+  character screen and victory stage), the lobby mode pictures (full-screen backgrounds), and
+  `skybig` (8000 wide but only 162 KB).
+- Load the abduction/jetpack art later (only needed from island 2).
+- ~~JS: Rapier and one-file bundle~~ DONE (steps 4a+4b, same day):
+  - 4a: `skyPath.js` loads Rapier on demand (`loadRapier()`): the download starts once Sky
+    Path's loading screen clears, and the physics world is made on the first fall. A fall that
+    beats the download waits at the edge (`pendingFall`; retries every 2 s if the download
+    fails; cleared by restart). Tested both: normal fall, and with the background load disabled
+    (stood at the edge, then fell normally once it arrived).
+  - 4b: `App.jsx` lazy-loads each heavy screen (GameRoom, SkyPath, LavaCavern, VictoryStage,
+    TeacherDashboard, KeyboardTestHarness, LobbyBoard, Projector) under one Suspense with a
+    plain "Loading…" fallback. Player routes prefetch GameRoom (and with it Sky Path) on mount.
+  - Result (production build, gzipped): before, 1,545 KB of code before anything showed. Now a
+    phone needs ~125 KB for the join screen, ~235 KB more for the game (fetched in the
+    background while joining), and Rapier's 1,094 KB downloads during the round.
+  - Checked: lobby board, player lobby, projector, Lava Cavern, victory stage, keyboard harness
+    all open with no errors, each loading only its own code. NOT checked end to end: a real
+    round started from the teacher's board with phones joined (worth one run before relying
+    on it).
+  - Possible next: Rapier's non-compat build (separate .wasm, roughly half the size) if 1 MB
+    during the round ever matters.
+- Caching: GitHub Pages lets browsers keep files only ~10 minutes; a host with longer caching
+  would make repeat lessons nearly free.
+- Comments in a few files still mention `.png` names (e.g. "cloud-deck.png's own colour"); they
+  describe the art, not paths, and were left alone.
+
+Hosting (discussed same day, nothing changed): cost must stay ~$0. Supabase Realtime counts each
+delivery to each teammate; a busy 50-player lesson may be ~1M messages (free cap 2M/month,
+unverified estimate). First step: cut position pings from ~7/s to ~3/s with smoothing. If still
+over: Cloudflare Durable Objects free plan (100k requests/day, incoming WebSocket messages count
+1/20, outgoing free; over the limit = errors until 00:00 UTC, i.e. 1 pm NZDT), keeping Supabase
+only for login/data. Needs a rewrite of the networking layer (days).
+
+### Projector fixes after Luke's first look (2026-10-10)
+- **Fog removed from the game** (Luke: "remove the fog from the game completely.
+  Don't delete it; keep the files and the code archived"). The fork curtains and
+  the (already disabled) scene THREE.Fog are cut from skyPath.js into
+  `app/archive/fog/fogCurtains.js`, with step-by-step reinstatement notes;
+  `fog-noise.webp` moved there too, out of public/ (not downloaded). `fog-puff`
+  stays: the jetpack's engine smoke uses it. Consequence: the paths, islands and
+  bridges ahead are now in plain view for everyone (the curtains hid them, and
+  let the guide see through).
+- **Projector camera = the player's own camera** for abductions and jetpack
+  rescues (it used the fall shot for both, which looked up past the sky and saw
+  the card edge-on). Shared helpers in skyPath.js: `placeTrailingShot` (the
+  trailing shot with an abduction's pull/pitch) and `rescueCamAt` (the rescue's
+  scripted camera as a pure function of time). The projector runs the rescue
+  shot on its own clock from the first tumbling transform (`entry.quatSince`)
+  when the player carries the jetpack, and the abduction shot from its own
+  saucer replica (`entry.abductCam`). Checked with bots: rescue and a forced
+  abduction captured frame by frame.
+- **Defence overlay** shows only the letters typed so far plus a caret — no
+  untyped letters, no blanks (blanks would give away the length).
+- Noticed, not changed: the cardboard gulls (updateBirds) sometimes fill much of
+  a projector shot for a few seconds.
+
+### Birds on the projector (2026-10-10)
+Spectator roles (projector, guide, Watch mode) placed birds relative to their own
+`walker`, which never leaves the start, so a bird could sit beside or behind the
+camera and fill the screen. Now, for those roles only: the bird rides at a fixed
+distance in front of the camera (BIRD_SPECTATOR_DEPTH, the same apparent size as
+on a phone), none appear while the watched player falls / is rescued / abducted
+or during the cloud wipe (spectatorShotBusy), and they come every 16-34 s
+(BIRD_SPECTATOR_GAP). Players' own birds unchanged. Note: BIRD_GAP is still the
+DEV test value [1, 3] on phones (its comment says restore to ~[16, 34]).
+
+### Calmer projector director + dials (2026-10-10)
+Luke: "the view from the projector was too jumpy... split screen was used a large
+proportion of the time." director.js (header: CALMER) now reads DIRECTOR_TUNE
+live: shots >= 8 s, >= 20 s on a team, 2.5 s hold after an event; mid-shot only a
+rescue/abduction calls the camera to another team (falls don't, unless the
+fallsChangeTeam dial); within a team nobody else's small moment interrupts the
+followed player, except that someone moving may take over from a deciding
+(waiting) shot; when free it prefers the same player's next story (x1.5); a
+nearly-as-good challenger on the same team beats one elsewhere; split only when
+both halves are rescues/abductions, at most once per 60 s, kept >= 6 s; cloud
+wipe 2.5 s (was 1.9). TEMPORARY dials panel on the projector (T): every value
+live, remembered per browser, "Copy values" to send back — bake the settled
+values into DIRECTOR_TUNE_DEFAULTS and delete TunePanel/TUNE.
+Bot check (3 teams x 3): about 4 shot changes in 40 s; one split, two abductions.
+Not done yet: a glide between players within a team (still an instant cut).
+
+### Test monitor + the "freeze" / camera-in-the-clouds bug (2026-10-10)
+Luke asked for a monitor on the board and the projector "so each can give you a
+trove of information at the end". `app/src/lobby/monitor.js` (TEMPORARY):
+each page logs its events plus a 1 s health sample (fps, longest frame gap,
+realtime frames in/out — the board's include its bots — heap, hidden), and
+errors, warnings, lost WebGL contexts, stalls. Board: messages, players,
+everything sent, results, series state. Projector: director decisions with
+top candidates, wipes (start/cut/end/queued), layout/split changes, the main
+camera 4x/s, every world's camera/lift/drawing/ticks/GPU memory
+(skyPath.js handle.monitorInfo). Saved every 10 s by the dev server to
+`app/recordings/monitor-<page>-<code>-<time>.json` (git-ignored);
+`window.__monitorDownload()` elsewhere.
+First catch: the cloud wipe cut to the new team only inside its ~0.2 s
+fully-covered hold; a slow frame skipped it, so the wipe "ended" with the old
+team still showing and its camera left lifted into the clouds (lift 0.78) —
+the freeze and the rise into the clouds Luke saw. Fixed: the cut happens on
+the first frame after full cover, however late, and the end resets both lifts.
+Second catch, from Luke's own log: his board window was hidden the whole time
+(fps 0, timers once a minute — Chrome's throttling of a page hidden 5+ min).
+The bots run in the board window, so they, and with them the projector, stood
+still: the other "freeze". Now: bots started by the board's button run
+`unthrottled`, and every realtime client (app + bots) uses realtime-js's
+inline Web Worker keep-alive (`realtime: { worker: true }`), so a hidden board
+or projector stays connected. Checked: board hidden throughout a round, the
+projector kept receiving and the round finished. (Also: editing LobbyBoard.jsx
+hot-reloads an open board, which stops its bots — don't test while Claude edits.)
+
+### From Luke's monitored trial (NHLVT, 2026-10-10)
+Read from app/recordings/monitor-*-nhlvt-*.json:
+- **Frozen abduction / repel instead of abduction — root cause.** The viewer
+  dropped any player report whose seq wasn't higher than the last seen. Discrete
+  reports ('departing' etc.) go on the main channel, 'moving' pings on the team
+  channel; the first ping of a departure (seq+1) can overtake its 'departing',
+  which was then thrown away. Milo, abducted at 107.8 s: the projector stayed on
+  'resting' under the green light until 'gone'. And the next non-defending
+  report played the repel. Fixed in useLobby.js and Projector.jsx (only stale
+  'moving' pings are dropped) and skyPath.js (no repel on any `abducting`
+  report). Affected phones' views of teammates too.
+- **Falls through an intact bridge** (Felix, round 3): only the faller's own
+  phone ever broke the planks. Now every viewer breaks the fork's wrong-bridge
+  planks at the faller's first tumbling transform (skyPath.js breakBridgeUnder,
+  with its own short physics run, `watchBreak`); a plank breaks once.
+- **"Up into the clouds"**: every lift was a cloud wipe (none outside one). At
+  round start the first world to load is shown, then the director's choice is
+  wiped to. Not changed — Luke to decide (see chat).
+- **Victory 9-10 fps** on both windows: the projector kept one world drawing
+  and all four updating under it, and the board played the scene too. Now the
+  projector disposes the worlds at the series' end, and the board plays the
+  scene only when no projector is open (projector-here every 10 s,
+  teacherSession.projectorOpen), else shows a "playing on the projector" panel.
+- The 150 s and 76 s spells with no director decision were between rounds
+  (all rounds over, nothing sent), not freezes.
+- Watch: projector heap rose 46 -> 307 MB over 15 min.
+
+### Cloud wipe replaced by a crossfade (2026-10-10)
+Luke: "If those cloud wipes are intentional, they shouldn't be. They are awful,
+and look like a glitch." Projector.jsx: changing team is now a short crossfade
+(TUNE.fadeS, default 0.5 s, on the T panel), finished by a timer so it can't be
+left half done; the cloud layers, WIPE and skyPath.js's camera lift
+(setLift/camLift, the wipe's only user) are gone. At a round's start nothing is
+shown for loading first: the "get ready" screen stays until the director's
+chosen world is ready, then a straight cut (a world replaced while on screen
+clears the screen; `waiting` includes "no ready main world").

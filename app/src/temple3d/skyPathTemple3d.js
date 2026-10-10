@@ -596,7 +596,7 @@ export function mountSkyPath(container, options = {}) {
     bar.style.width = `${Math.round((loaded / total) * 100)}%`;
   };
 
-  const tex = (name, { repeatWrap = false, ext = 'png', linear = false, tile = false } = {}) => {
+  const tex = (name, { repeatWrap = false, ext = 'webp', linear = false, tile = false } = {}) => {
     const t = loader.load(`textures/${name}.${ext}`);
     // `linear` is for data textures (noise fields the shader does maths on)
     // rather than pictures — sRGB decoding would bend the value distribution
@@ -611,8 +611,8 @@ export function mountSkyPath(container, options = {}) {
   const TEX = {
     // Real art test (Option B): one wide dawn→noon→dusk strip, panned via UV
     // offset instead of tinted, since it already carries its own colour grading.
-    skyStrip: tex('skybig', { ext: 'jpg' }),
-    landSea: tex('landsea', { ext: 'jpg' }),
+    skyStrip: tex('skybig', { ext: 'webp' }),
+    landSea: tex('landsea', { ext: 'webp' }),
     cloudReal: tex('cloud-real'),
     cloud2: tex('cloud-2'),
     cloud3: tex('cloud-3'),
@@ -633,7 +633,7 @@ export function mountSkyPath(container, options = {}) {
     // The temple doors: laid over the temple photo's own baked-in doors as
     // separate overlay art (Luke, 2026-09-10) rather than patching the
     // temple texture itself — see doorTune below.
-    doorFrame: tex('door-frame', { ext: 'jpg' }),
+    doorFrame: tex('door-frame', { ext: 'webp' }),
     doorLeft: tex('door-left'),
     doorRight: tex('door-right'),
     gull1: tex('gull-1', { ext: 'webp' }),
@@ -5759,13 +5759,13 @@ export function mountSkyPath(container, options = {}) {
   // animation is complete, interrupt and move to the next player" — so
   // there is deliberately no "ignore while animating" guard here, unlike
   // the dial's own turn.
-  const ABDUCT_STRING_SRC = 'textures/hanging-string.png';
+  const ABDUCT_STRING_SRC = 'textures/hanging-string.webp';
   const ABDUCT_STRING_TILE = { w: 67, h: 526 };
   const ABDUCT_STRING_CENTER_X = 35; // the rope's own opaque centre within that 67px-wide tile — see alienLowerProto.js
   const ABDUCT_STRING_LEN = 2400; // canvas-space px; see this section's header
-  const ABDUCT_ARROW_LEFT_SRC = 'textures/alien-arrow-left.png';
-  const ABDUCT_ARROW_RIGHT_SRC = 'textures/alien-arrow-right.png';
-  const ABDUCT_EARTH_SRC = 'textures/earth.png';
+  const ABDUCT_ARROW_LEFT_SRC = 'textures/alien-arrow-left.webp';
+  const ABDUCT_ARROW_RIGHT_SRC = 'textures/alien-arrow-right.webp';
+  const ABDUCT_EARTH_SRC = 'textures/earth.webp';
   const ABDUCT_TAG_GLOW = '#ffe9b8'; // fallback glow, for a target with no colorHex yet — see this section's header
 
   const ABDUCT_AVATAR = { height: 224, centerY: 343 };
@@ -5843,7 +5843,7 @@ export function mountSkyPath(container, options = {}) {
   // Luke asked for the first time round. The ship art itself was also
   // swapped for a version with the cardboard backing stripped out (same
   // filename, replaced on disk — re-copied over the old one).
-  const ABDUCT_SHIP_SRC = 'textures/abduct-ship-small.png';
+  const ABDUCT_SHIP_SRC = 'textures/abduct-ship-small.webp';
   // Five fixed stops along the "curved path," baked from the numbers Luke
   // logged against the live tuner (position/gap duration, and an offset+
   // scale nudge applied uniformly to all five — see ABDUCT_SHIP_PATH_ADJUST
@@ -5913,7 +5913,7 @@ export function mountSkyPath(container, options = {}) {
   // `?abductTune=1` panel's logged values (now removed) — a negative `gap`
   // means the bracket's inner edge overlaps INTO the avatar's own edge by
   // that many px, not a gap outward.
-  const ABDUCT_SELECT_SRC = 'textures/abduct-select-left.png';
+  const ABDUCT_SELECT_SRC = 'textures/abduct-select-left.webp';
   const ABDUCT_SELECT_BRACKET = { height: 230, gap: -40 };
 
   // The rune circle — Luke, 2026-09-20: "Time for the confirm button.
@@ -5922,7 +5922,7 @@ export function mountSkyPath(container, options = {}) {
   // white) of the circle; put the runes onto the background without adding
   // anything behind them." Position/size baked from the `?abductTune=1`
   // panel's logged values (now removed).
-  const ABDUCT_RUNES_SRC = 'textures/abduct-runes.png';
+  const ABDUCT_RUNES_SRC = 'textures/abduct-runes.webp';
   const ABDUCT_RUNES = { centerX: 558, centerY: 274, size: 118 };
   // "Add a thin green ring around them with two gaps in it, with those gaps
   // at 135 degrees and 315 degrees, and short lines perpendicular to

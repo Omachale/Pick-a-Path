@@ -112,9 +112,9 @@
  * this cardboard UI is what got built in the pause).
  */
 
-const PANEL_SRC = 'textures/cardboard-panel.png';
-const HOUSING_SRC = 'textures/dial-housing2-holes.png';
-const DIAL_SRC = 'textures/dial.png';
+const PANEL_SRC = 'textures/cardboard-panel.webp';
+const HOUSING_SRC = 'textures/dial-housing2-holes.webp';
+const DIAL_SRC = 'textures/dial.webp';
 
 const PANEL_SIZE = { w: 1024, h: 546 };
 
