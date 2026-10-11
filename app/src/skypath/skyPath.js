@@ -1001,6 +1001,182 @@ export function mountSkyPath(container, options = {}) {
     parent: backdropRig,
   });
 
+  // ---------------------------------------------------------------- sky dome
+  //
+  // The painted strip covers 160 degrees in front and stops at its top edge;
+  // above and behind it there was only the renderer's flat clear colour, so
+  // any camera turned or tilted far enough found "no sky above" (Luke,
+  // 2026-10-10, of the projector's jetpack shot). Luke, then: "recreate the
+  // sky completely, so that it surrounds the whole area like an almost-
+  // complete sphere (whatever is below the ground isn't needed)" — agreed as:
+  // the painted front untouched, and everything else continued from it.
+  //
+  // So this is a sphere round the camera, drawn first of everything (it
+  // replaces the clear colour as the background; nothing tests against it),
+  // whose shader asks, for each direction, where that direction would meet
+  // the strip's own cylinder:
+  //   - inside the strip's arc, below its top: the strip's own colour there
+  //     (the strip itself draws over it, so this only fills its gaps);
+  //   - round the sides and back, at the same height: a blend from the
+  //     strip's right-hand edge colours to its left-hand ones, so the back is
+  //     the painting's own palette with no repeated features (no second sun);
+  //   - above the strip: its top row, blurred more the higher you look (so
+  //     detail like the sun's glow spreads rather than streaks), fading to
+  //     the average of that top row at the zenith.
+  // It reads the same texture with the same offset as the strip, so it
+  // follows the dawn/noon/dusk pan with it. Unlit, like the rest.
+  // SKY_DOME's numbers are tuned live with ?skyTune (dev only, temporary —
+  // bake the settled values here and remove the panel).
+  const SKY_DOME = {
+    // Elevation by which the sky is the zenith colour. 90 (straight up): any
+    // lower and everything above it was one flat colour, whose edge showed as
+    // a circle overhead (Luke, 2026-10-11: "the sky clearly meets in a circle").
+    zenithDeg: 90,
+    blurDeg: 25, // degrees above the strip's top over which its top row blurs to the full width
+    blur: 0.18, // that full blur, as a fraction of the strip's width
+    edgeBlur: 0.08, // how soft the side edges' colours are, as a fraction of the strip's width
+    clouds: 0, // faint wisps over the continued sky, 0 = none
+  };
+  const SKY_BOTTOM = FLOOR_Y - 10;
+  const skyDome = new THREE.Mesh(
+    new THREE.SphereGeometry(300, 48, 24),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: TEX.skyStrip },
+        uRepeat: { value: 1 / 3 },
+        uOffset: { value: 0 },
+        uArc: { value: THREE.MathUtils.degToRad(SKY_ARC) },
+        uR: { value: SKY_R },
+        uCamY: { value: 0 },
+        uBottom: { value: SKY_BOTTOM },
+        uTop: { value: SKY_BOTTOM + SKY_H },
+        uZenith: { value: 0 },
+        uBlurSpan: { value: 0 },
+        uBlur: { value: 0 },
+        uEdgeBlur: { value: 0 },
+        uClouds: { value: 0 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vDir = wp.xyz - cameraPosition;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform sampler2D uMap;
+        uniform float uRepeat, uOffset, uArc, uR, uCamY, uBottom, uTop;
+        uniform float uZenith, uBlurSpan, uBlur, uEdgeBlur, uClouds;
+        varying vec3 vDir;
+        const float TAU = 6.28318531;
+        vec3 strip(float u, float v) {
+          return texture2D(uMap, vec2(clamp(u, 0.002, 0.998) * uRepeat + uOffset, clamp(v, 0.004, 0.996))).rgb;
+        }
+        // The strip's colour at height v, averaged over [u - w, u + w].
+        vec3 soft(float u, float v, float w) {
+          vec3 c = vec3(0.0);
+          for (int i = 0; i < 7; i++) c += strip(u + w * (float(i) / 3.0 - 1.0), v);
+          return c / 7.0;
+        }
+        float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float noise(vec2 p) {
+          vec2 i = floor(p), f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+        void main() {
+          vec3 d = normalize(vDir);
+          float flat_ = max(length(d.xz), 1e-4);
+          float elev = atan(d.y, flat_);
+          // Azimuth the way the strip's cylinder lays its texture out
+          // (CylinderGeometry: x = sin, z = cos; the arc centred on -z).
+          float theta = atan(d.x, d.z);
+          float start = 3.14159265 - uArc * 0.5;
+          float a = mod(theta - start, TAU);
+          float u = a / uArc; // 0..1 across the strip; beyond 1, round the back
+          float back = (a - uArc) / (TAU - uArc); // 0 at the strip's u=1 edge, 1 at its u=0 edge
+          float h = uCamY + uR * d.y / flat_; // height where this direction meets the strip's cylinder
+          float v = (h - uBottom) / (uTop - uBottom);
+          float topElev = atan(uTop - uCamY, uR);
+          // Blur grows from nothing at the strip's top edge (no seam).
+          float above = clamp((elev - topElev) / uBlurSpan, 0.0, 1.0);
+          float vv = min(v, 1.0);
+          float w = uBlur * above;
+          vec3 c;
+          if (u <= 1.0) {
+            c = soft(u, vv, w);
+          } else {
+            float t = smoothstep(0.0, 1.0, back);
+            float we = max(w, uEdgeBlur * min(1.0, min(back, 1.0 - back) * 4.0));
+            vec3 right = soft(1.0 - we, vv, we); // the u = 1 edge, averaged inwards
+            vec3 left = soft(we, vv, we); // the u = 0 edge
+            c = mix(right, left, t);
+          }
+          // The zenith: the top row's colour at the strip's two side edges —
+          // open sky (clear blue at noon), where the middle may hold the sun:
+          // averaging the whole row turned the sun's glow into a grey cap.
+          vec3 zen = 0.5 * (soft(0.04, 0.996, 0.04) + soft(0.96, 0.996, 0.04));
+          c = mix(c, zen, smoothstep(topElev, uZenith, elev));
+          // Optional faint wisps, above the strip only.
+          if (uClouds > 0.0 && elev > topElev) {
+            vec2 p = d.xz / max(d.y, 0.05) * 3.0;
+            float n = noise(p) * 0.5 + noise(p * 2.1) * 0.3 + noise(p * 4.3) * 0.2;
+            c = mix(c, vec3(1.0), uClouds * smoothstep(0.55, 0.9, n) * clamp((elev - topElev) * 4.0, 0.0, 1.0));
+          }
+          gl_FragColor = vec4(c, 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
+      side: THREE.BackSide,
+      depthWrite: false,
+      depthTest: false,
+    })
+  );
+  skyDome.renderOrder = -1; // before everything: it is the background
+  // The strip's side edges (80 degrees off centre) and its top (about 63
+  // degrees up) fade over their last few percent into the dome, rather than
+  // ending on a hard line where the painting's detail stops — at noon the
+  // sun sits right at the top edge and was cut off flat there. (An alpha map
+  // has its own UVs, unaffected by the strip's time-of-day offset, so this
+  // always spans the strip's whole width.)
+  {
+    const W = 256;
+    const H = 128;
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(W, H);
+    const ramp = (x, edge) => Math.min(1, x / edge);
+    for (let y = 0; y < H; y++) {
+      const ay = ramp(y / (H - 1), 0.08); // canvas row 0 is the strip's top
+      for (let x = 0; x < W; x++) {
+        const fx = x / (W - 1);
+        const a = Math.round(255 * ay * Math.min(ramp(fx, 0.06), ramp(1 - fx, 0.06)));
+        img.data.set([a, a, a, 255], (y * W + x) * 4);
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    sky.material.alphaMap = new THREE.CanvasTexture(c);
+    sky.material.needsUpdate = true;
+  }
+  skyDome.frustumCulled = false;
+  backdropRig.add(skyDome);
+  // Called just before each render: the strip's current offset (time of
+  // day), the camera's height, and SKY_DOME's live values.
+  function updateSkyDome() {
+    const u = skyDome.material.uniforms;
+    u.uOffset.value = sky.material.map.offset.x;
+    u.uCamY.value = camera.position.y;
+    u.uZenith.value = THREE.MathUtils.degToRad(SKY_DOME.zenithDeg);
+    u.uBlurSpan.value = THREE.MathUtils.degToRad(Math.max(1, SKY_DOME.blurDeg));
+    u.uBlur.value = SKY_DOME.blur;
+    u.uEdgeBlur.value = SKY_DOME.edgeBlur;
+    u.uClouds.value = SKY_DOME.clouds;
+  }
+
   // Which of the older ambient cloud layers survive alongside the wind sheets,
   // settled by eye on 2026-08-26 rather than derived from anything:
   //
@@ -3617,12 +3793,15 @@ export function mountSkyPath(container, options = {}) {
     // either, so it used to play the repel for a player being carried off
     // (Luke, 2026-10-10: the caption "said they were abducted, but the
     // visualisation showed the animation of the aliens being repelled").
-    if (!defending && entry.waitGlow && !abducting) {
+    // The light goes, silently, only if they've moved on or are out
+    // without a result ever arriving (a dropped phone — see the 'defence-end'
+    // notes above). The repel itself now comes from the result alone
+    // (receiveDefenceEnd): it used to be inferred from any report without
+    // `defending`, and a stray one (two attackers at once, one fizzling)
+    // played the repel at the start of a defence that ended in an abduction
+    // (Luke, 2026-10-11; PROJECTOR_FIXES.md item 3).
+    if (!defending && entry.waitGlow && !abducting && (tPhase === 'gone' || tPhase === 'departing')) {
       entry.waitGlow.release();
-      // They repelled the aliens. The guide fires this itself once its own
-      // defence panel has lifted (see finishGuideDefence) — here it would
-      // play unseen behind that panel.
-      if (role !== 'guide') playRepelSequence(entry.rig.group.position);
     }
     // Mirrors this teammate's own held power-up (jetpack OR abduction
     // device — the same single slot, see equipPowerUp's own header) plus
@@ -3681,7 +3860,7 @@ export function mountSkyPath(container, options = {}) {
             jetpack: entry.rig.powerup?.kind === 'jetpack',
             landing: null, // teammateRescueLanding, on first use
           };
-          if (!abducting && !entry.abduction) breakBridgeUnder(tForkIndex);
+          if (!abducting && !entry.abduction) breakBridgeUnder(tForkIndex, token);
         }
         entry.livePos = livePos;
       }
@@ -3969,6 +4148,13 @@ export function mountSkyPath(container, options = {}) {
         if (!entry.abduction.state.playing) {
           entry.abduction.dispose();
           entry.abduction = null;
+          // Carried off: hidden now. The abducted phone keeps streaming its
+          // own (later-running) abduction for a few seconds more, and this
+          // rig followed that stream once the replica had stopped driving it —
+          // dropping back into view and flying off a second time (Luke,
+          // 2026-10-11; PROJECTOR_FIXES.md item 2). Hidden, the stream-follow
+          // below skips it; 'gone' follows anyway.
+          entry.rig.group.visible = false;
         }
         continue; // apply() already set this rig's position/rotation directly — nothing left to lerp toward
       }
@@ -4100,6 +4286,21 @@ export function mountSkyPath(container, options = {}) {
   }
 
   /** Called from tick() instead of the normal player camera branch — see the role check there. */
+  /**
+   * True once every runner in the guide's team is out (fallen or carried
+   * off). The guide camera has nobody left to follow then, and swung from
+   * side to side with nothing in view (Luke, 2026-10-11). For now it just
+   * waits at the temple doors, with a message (Luke: "move the camera to the
+   * temple door, with a simple message saying all teammates have fallen").
+   * Only when they've all gone that way: a team that reached the temple
+   * already ends there.
+   */
+  let guideOutShown = false;
+  function guideTeamOut() {
+    const runners = (roster ?? []).filter((tok) => tok !== guideToken);
+    return runners.length > 0 && runners.every((tok) => teammates.get(tok)?.phase === 'gone');
+  }
+
   function updateGuideCamera(dt) {
     if (guideMode === 'parked') {
       const restingHere = guideRestingCountAt(guideIsland);
@@ -4264,7 +4465,11 @@ export function mountSkyPath(container, options = {}) {
     // Nothing has ever been viable, or `watchToken` pointed at someone who
     // has since vanished outright (removeTeammate, not just finished) —
     // grab whatever's active now if anything is.
-    if (watchToken === null || !teammates.has(watchToken)) {
+    // Not on the projector, which picks who to follow itself (handle.watch):
+    // this and the auto-advance and fallback below choosing too made the two
+    // fight — the camera flicked between players every fraction of a second
+    // (Luke, 2026-10-11, and PROJECTOR_FIXES.md item 1).
+    if (!projector && (watchToken === null || !teammates.has(watchToken))) {
       const active = watchActiveCandidates();
       if (active.length > 0) watchToken = active[0];
     }
@@ -4363,7 +4568,8 @@ export function mountSkyPath(container, options = {}) {
       // updateGuideCamera's own watching-era comments, and the role check
       // in tick() that still routes 'watching' here at all, once the cycle
       // above has been played with for real and holds up.
-      updateGuideCamera(dt);
+      // (On the projector the camera just holds: it chooses for itself.)
+      if (!projector) updateGuideCamera(dt);
     }
 
     // Auto-advance once the currently-watched player's OWN round has
@@ -4376,7 +4582,7 @@ export function mountSkyPath(container, options = {}) {
     // see that dispose call's own comment. A fall/rescue has no equivalent
     // scripted tail: the last streamed transform is already where they
     // ended up by the time 'gone' arrives, nothing further to wait out.
-    const justEnded = !!entry && entry.phase === 'gone' && !entry.abduction;
+    const justEnded = !projector && !!entry && entry.phase === 'gone' && !entry.abduction;
     if (justEnded) {
       if (watchAdvanceArmedFor !== token) {
         clearWatchAdvanceTimer();
@@ -4756,9 +4962,17 @@ export function mountSkyPath(container, options = {}) {
    * (see tick), since this device has no fall of its own running.
    */
   let watchBreak = null; // { at, acc } while a teammate's broken planks are falling
-  function breakBridgeUnder(fork) {
+  const breakLog = []; // TEMPORARY, for the projector's monitor (handle.takeBreakLog): Luke saw an intact bridge under a fall
+  function breakBridgeUnder(fork, token) {
     const sec = sections[fork - 1];
     const planks = sec && [...(sec.branch?.left ?? []), ...(sec.branch?.right ?? [])].find((p) => p.breakablePlanks?.length)?.breakablePlanks;
+    breakLog.push({ fork, token, sec: !!sec, planks: planks?.length ?? 0, alreadyBroken: !!planks?.every((p) => p.broken), rapier: !!RAPIER, falling });
+    // Only on a screen that's watching — the projector, the guide, a fallen
+    // player. A player still on the course has these same bridges ahead of
+    // them: breaking a teammate's here showed them which bridge was wrong
+    // (Luke, 2026-10-11: "I was able to see the broken planks ahead of me on
+    // one bridge before I made a selection").
+    if (!isSpectatorRole(role)) return;
     if (!planks || planks.every((p) => p.broken)) return;
     const go = () => {
       if (disposed || falling) return; // (this device's own fall owns the pieces now)
@@ -6758,6 +6972,17 @@ export function mountSkyPath(container, options = {}) {
       finishGuideDefence(payload.token, payload.outcome);
       return;
     }
+    // A teammate (or, on the projector, anyone) resisted: their light goes
+    // and the repelled ship plays — from the result itself (see
+    // updateTeammate's waitGlow note). The guide does this in
+    // finishGuideDefence, once its own defence panel has lifted.
+    if (payload.outcome === 'resisted') {
+      const entry = teammates.get(payload.targetToken);
+      if (entry) {
+        entry.waitGlow?.release();
+        playRepelSequence(entry.rig.group.position);
+      }
+    }
     if (helpingNoticeFor && helpingNoticeFor === payload.token) {
       helpingNoticeFor = null;
       hidePaperMessage();
@@ -7376,6 +7601,34 @@ export function mountSkyPath(container, options = {}) {
             },
           },
           'light stagger': { value: cloudLight.stagger, min: 0, max: 0.5, step: 0.05, set: (v) => (cloudLight.stagger = v), format: (v) => v.toFixed(2) },
+        },
+      })
+    : null;
+
+  // TEMPORARY sky-dome tuner (`?skyTune`, dev only): SKY_DOME's values, a
+  // switch to compare with the dome off, and a look-around (yaw/pitch,
+  // applied around the render only) to see the parts the strip doesn't
+  // cover. Remove once Luke settles the values (bake them into SKY_DOME).
+  const skyLook = { yaw: 0, pitch: 0 };
+  const domeSlider = (key, min, max, step) => ({ value: SKY_DOME[key], min, max, step, set: (v) => (SKY_DOME[key] = v) });
+  const skyTuner = import.meta.env.DEV && new URLSearchParams(location.search).has('skyTune')
+    ? attachBgTuner({
+        container,
+        id: 'skyTuner',
+        title: 'sky dome',
+        position: 'left',
+        panels: {},
+        toggles: { dome: skyDome },
+        extrasTitle: 'DOME',
+        extras: {
+          'look yaw': { value: 0, min: -180, max: 180, step: 1, set: (v) => (skyLook.yaw = v) },
+          'look pitch': { value: 0, min: -20, max: 85, step: 1, set: (v) => (skyLook.pitch = v) },
+          'zenith at deg': domeSlider('zenithDeg', 20, 90, 1),
+          'blur span deg': domeSlider('blurDeg', 1, 60, 1),
+          'blur width': domeSlider('blur', 0, 0.5, 0.01),
+          'edge softness': domeSlider('edgeBlur', 0, 0.3, 0.01),
+          clouds: domeSlider('clouds', 0, 1, 0.02),
+          'time of day': { value: sunP, min: 0, max: 1, step: 0.01, set: (v) => (sunP = v) },
         },
       })
     : null;
@@ -8006,6 +8259,7 @@ export function mountSkyPath(container, options = {}) {
     roundEndEmitted = false;
     forkIndex = 1;
     resetGuideCamera();
+    guideOutShown = false;
     finished = false;
     finishedSuccess = false;
     falling = false;
@@ -8797,6 +9051,15 @@ export function mountSkyPath(container, options = {}) {
       // up near the teammates code, for the full design (and its TEMPORARY
       // fallback onto updateGuideCamera, still marked for deletion there).
       updateWatchingCamera(dt, t);
+    } else if (role === 'guide' && guideTeamOut()) {
+      // Every teammate is out: the camera waits at the temple doors (see
+      // guideTeamOut).
+      const end = sections[N_FORKS - 1]?.nextCursor;
+      if (end) placeTrailingShot(end.x, end.z, end.heading);
+      if (!guideOutShown) {
+        guideOutShown = true;
+        showPaperMessage('All your teammates have fallen.');
+      }
     } else if (isSpectatorRole(role)) {
       // The guide has no walker/figure of its own to trail (see
       // figure.visible in setCharacter) — an entirely separate camera
@@ -8871,7 +9134,20 @@ export function mountSkyPath(container, options = {}) {
     // role that has no discrete refresh trigger of its own.
     updateWordSigns();
 
-    if (drawing) resistWave.render(scene, camera);
+    if (drawing) {
+      updateSkyDome();
+      // ?skyTune's look-around (dev only): turn the view for this render
+      // only, so the dome can be judged where the strip doesn't reach.
+      if (skyLook.yaw || skyLook.pitch) {
+        const pos = camera.position.clone();
+        const quat = camera.quaternion.clone();
+        camera.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(skyLook.yaw));
+        camera.rotateX(THREE.MathUtils.degToRad(skyLook.pitch));
+        resistWave.render(scene, camera);
+        camera.position.copy(pos);
+        camera.quaternion.copy(quat);
+      } else resistWave.render(scene, camera);
+    }
 
     rafId = requestAnimationFrame(tick);
   }
@@ -9196,6 +9472,11 @@ export function mountSkyPath(container, options = {}) {
       notifyPlayerState(finished && !finishedSuccess ? 'gone' : 'resting');
     },
 
+    /** TEMPORARY, for the projector's monitor: bridge-break attempts since last asked (see breakBridgeUnder). */
+    takeBreakLog() {
+      return breakLog.splice(0);
+    },
+
     /**
      * TEMPORARY, for the projector's monitor (lobby/monitor.js): this world's
      * camera, who it follows and what they're doing, frames run, and the
@@ -9289,6 +9570,7 @@ export function mountSkyPath(container, options = {}) {
       harness?.dispose();
       bgTuner?.dispose();
       rescueTuner?.dispose();
+      skyTuner?.dispose();
       tagTuner?.dispose();
       archTuner?.dispose();
       clearTimeout(archRebuildTimer);

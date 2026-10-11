@@ -65,6 +65,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../supabase.js';
+import { rejoiningChannel } from './rejoiningChannel.js';
 import { identityStore, token, clearToken } from './identity.js';
 
 // Must match Sky Path's own N_FORKS (see app/src/skypath/skyPath.js). The two
@@ -242,17 +243,23 @@ export function useLobby(sessionCode) {
   const playerStateListenerRef = useRef(null); // the shared handler, set in join()
   const lastSeqRef = useRef(new Map()); // sender token -> highest seq seen
   const seqRef = useRef(Date.now());
+  // Catching up after a dropped channel (see `phone-hello` below): set on
+  // rejoining, cleared by the board's answer; and this device's last result,
+  // to send again if the board asks (`report-results`).
+  const catchUpRef = useRef(false);
+  const lastResultRef = useRef(null);
   const ensureTeamChannel = useCallback(
     (groupId) => {
       if (teamChannelRef.current?.groupId === groupId) return;
-      if (teamChannelRef.current) supabase.removeChannel(teamChannelRef.current.ch);
+      if (teamChannelRef.current) teamChannelRef.current.ch.close();
       teamChannelRef.current = null;
       if (groupId == null || !hasRealSession) return;
-      const ch = supabase.channel(`lobby-${code}-team-${groupId}`);
+      const ch = rejoiningChannel(supabase, `lobby-${code}-team-${groupId}`); // rejoins itself if closed
       const entry = { ch, groupId, ready: false };
       ch.on('broadcast', { event: 'player-state' }, ({ payload }) => playerStateListenerRef.current?.(payload));
       ch.subscribe((st) => {
-        if (st === 'SUBSCRIBED') entry.ready = true;
+        // Not ready while it's down: movement goes by the main channel meanwhile.
+        entry.ready = st === 'SUBSCRIBED';
       });
       teamChannelRef.current = entry;
     },
@@ -353,7 +360,9 @@ export function useLobby(sessionCode) {
       // client ever acts on its own tap directly, only on the copy the
       // relay sends back, so a consistent delivery order across every
       // subscriber is what actually resolves a simultaneous double-tap.
-      const ch = supabase.channel(`lobby-${code}`, {
+      // Rejoins itself if the server closes it (rejoiningChannel.js), and
+      // tracks this player's presence again when it does.
+      const ch = rejoiningChannel(supabase, `lobby-${code}`, {
         config: { presence: { key: token }, broadcast: { self: true } },
       });
       ch.on('presence', { event: 'sync' }, () => {
@@ -411,7 +420,7 @@ export function useLobby(sessionCode) {
       ch.on('broadcast', { event: 'groups-updated' }, ({ payload }) => {
         applyGroupAssignment(payload.assignments);
       });
-      ch.on('broadcast', { event: 'game-started' }, ({ payload }) => {
+      const onGameStarted = (payload) => {
         // Every team's round start is worth two facts for abduction
         // targeting (see islandsRef/guideByGroupRef): who its guide is, and
         // that its players are all back on island 1 with no one out.
@@ -452,6 +461,31 @@ export function useLobby(sessionCode) {
           pickup: payload.pickup ?? null,
           result: null,
         });
+      };
+      ch.on('broadcast', { event: 'game-started' }, ({ payload }) => onGameStarted(payload));
+      // Back from a dropped channel, the board's summary of every team's
+      // latest round (the one the projector uses), asked for on rejoining:
+      // anything missed meanwhile that concerns this device — its round
+      // started, its round over, the series ended. A round it's already in
+      // isn't started again (same roundId), nor one that's over.
+      ch.on('broadcast', { event: 'rounds-now' }, ({ payload }) => {
+        if (!catchUpRef.current) return; // not asked for: it's for the projector
+        catchUpRef.current = false;
+        if (payload.seriesEnded) {
+          setSeriesEnded(true);
+          setSittingOut(false);
+          return;
+        }
+        const r = (payload.rounds ?? []).find((x) => x.guideToken === token || (x.roster ?? []).includes(token));
+        if (!r) return;
+        const current = roundStateRef.current.round?.roundId ?? null;
+        if (r.roundId !== current && !r.over) onGameStarted(r);
+        else if (r.roundId === current && r.over) setOverRoundId(r.roundId);
+      });
+      // The board, back from a dropped channel, asks for results again.
+      ch.on('broadcast', { event: 'report-results' }, () => {
+        const last = lastResultRef.current;
+        if (last) ch.send({ type: 'broadcast', event: 'round-ended', payload: last });
       });
       // One generic relay for the smaller in-round events (see
       // `sendGameEvent` below) rather than a new event name + handler ref
@@ -571,13 +605,22 @@ export function useLobby(sessionCode) {
         if (current.phase !== 'playing' || current.round?.roundId !== payload.roundId) return;
         transition('results', { ...current.round, result: payload.result });
       });
-      ch.subscribe(async (subStatus) => {
+      ch.subscribe(async (subStatus, _err, { rejoined } = {}) => {
         if (subStatus === 'SUBSCRIBED') {
           setStatus('connected — you are in the lobby');
+          if (rejoined) {
+            // Presence is re-tracked by rejoiningChannel. Catch up on what
+            // was missed (the `rounds-now` handler above), and say where
+            // this device is now, for its teammates and the projector.
+            catchUpRef.current = true;
+            ch.send({ type: 'broadcast', event: 'phone-hello', payload: {} });
+            reportStateHandlerRef.current?.();
+            return;
+          }
           await ch.track(trackPayload(p));
           setJoined(true);
-        } else if (subStatus === 'CHANNEL_ERROR' || subStatus === 'TIMED_OUT') {
-          setStatus(`connection problem: ${subStatus}`);
+        } else if (subStatus === 'CHANNEL_ERROR' || subStatus === 'TIMED_OUT' || subStatus === 'CLOSED') {
+          setStatus(`connection problem (${subStatus}) — reconnecting`);
         }
       });
       channelRef.current = ch;
@@ -700,7 +743,9 @@ export function useLobby(sessionCode) {
     const rc = channelRef.current;
     const current = roundStateRef.current;
     if (!rc || current.phase !== 'playing' || !current.round) return;
-    rc.send({ type: 'broadcast', event: 'round-ended', payload: { token, roundId: current.round.roundId, result } });
+    const payload = { token, roundId: current.round.roundId, result };
+    lastResultRef.current = payload; // sent again if the board asks (`report-results`)
+    rc.send({ type: 'broadcast', event: 'round-ended', payload });
   }, []);
 
   /** Returns to the lobby from 'playing' or 'results' without leaving the room — the room persists per the handoff's "persistent lobby" decision. */

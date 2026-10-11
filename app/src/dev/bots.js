@@ -35,6 +35,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { CHARACTERS, PALETTE } from '../skypath/characters.js';
 import TRACKS from './tracks.json';
+import { rejoiningChannel } from '../lobby/rejoiningChannel.js';
 
 const NAMES = ['Zara', 'Milo', 'Indy', 'Bea', 'Sam', 'Kit', 'Hana', 'Omar', 'Lucia', 'Kenji', 'Amara', 'Felix', 'Priya', 'Tomas', 'Yuki', 'Noor', 'Mateo', 'Ines', 'Jun', 'Leila', 'Arjun', 'Sofia', 'Kofi', 'Elif'];
 const N_FORKS = 6;
@@ -100,7 +101,7 @@ export async function startBots(
     const name = NAMES[i % NAMES.length];
     const token = `bot_${name.toLowerCase()}_${i}`;
     const client = createClient(url, key, { realtime: { worker: true } }); // keep-alive that survives a hidden window (see supabase.js)
-    const ch = client.channel(`lobby-${CODE}`, { config: { presence: { key: token } } });
+    const ch = rejoiningChannel(client, `lobby-${CODE}`, { config: { presence: { key: token } } }); // rejoins itself if closed
     const meta = {
       token,
       roundId: null,
@@ -115,11 +116,11 @@ export async function startBots(
     // ---- sending, as useLobby.js does
     const ensureTeam = (groupId) => {
       if (bot.team?.groupId === groupId) return;
-      if (bot.team) client.removeChannel(bot.team.ch);
-      const tch = client.channel(`lobby-${CODE}-team-${groupId}`);
+      if (bot.team) bot.team.ch.close();
+      const tch = rejoiningChannel(client, `lobby-${CODE}-team-${groupId}`);
       bot.team = { groupId, ch: tch, ready: false };
       const team = bot.team;
-      tch.subscribe((st) => st === 'SUBSCRIBED' && (team.ready = true));
+      tch.subscribe((st) => (team.ready = st === 'SUBSCRIBED'));
     };
     const sendState = (state) => {
       if (bot.gone) return;
@@ -216,6 +217,8 @@ export async function startBots(
       else if (!r.moving) sendState({ phase: 'resting', forkIndex: r.island, powerupKind: r.holding });
     });
     ch.on('broadcast', { event: 'series-ended' }, () => log.push(`${name}: series ended`));
+    // The board, back from a dropped channel, asks for results again (as phones answer it, useLobby.js).
+    ch.on('broadcast', { event: 'report-results' }, () => bot.lastResult && send('round-ended', bot.lastResult));
 
     const nextDefence = (r) => {
       if (r.guideBusy || !r.guideQueue.length) return;
@@ -248,7 +251,8 @@ export async function startBots(
     const finish = (r, success, extra) => {
       r.out = true;
       const result = { success, forkIndex: r.island, correctCount: r.correct, totalForks: N_FORKS, itemsCollected: r.claimedBy === token ? 1 : 0, resistCount: r.resists, jetpackKeptAtFinish: success && r.holding === 'jetpack', ...extra };
-      send('round-ended', { token, roundId: r.id, result });
+      bot.lastResult = { token, roundId: r.id, result }; // sent again if the board asks (report-results)
+      send('round-ended', bot.lastResult);
       log.push(`${name} ${success ? 'reached the temple' : `is out at island ${r.island}`} (${r.correct} right)`);
     };
     const teamAllAt = (r, k) =>
@@ -393,8 +397,8 @@ export async function startBots(
     stop() {
       for (const b of bots) {
         if (b.round) b.round.cancelled = true;
-        if (b.team) b.client.removeChannel(b.team.ch);
-        b.client.removeChannel(b.ch);
+        if (b.team) b.team.ch.close();
+        b.ch.close();
       }
     },
   };

@@ -16,8 +16,10 @@
  * (`report-state`); opened or reloaded mid-round, it asks the teacher's
  * board for the rounds under way (`projector-hello` / `rounds-now`).
  *
- * Who and which team to show is the director's choice (director.js), on by
- * default. Choosing by hand turns it off; A turns it back on.
+ * Who and which team to show follows a few simple rules ("What to show", in
+ * the main effect), on by default; the scoring director (director.js) now
+ * only feeds the captions. Choosing by hand turns the rules off; A turns them
+ * back on.
  *
  * Changing team is a short crossfade (TUNE.fadeS). It was a cloud wipe —
  * the camera rising into a bank of cloud and the new team's coming down out
@@ -48,7 +50,7 @@
  * cardboard card, qrCard.js) and a holding message. At the end of the
  * series: the victory scene (VictoryTown.jsx), as on the teacher's board.
  *
- * Keys: 1-4 team, left/right player, A the director, H hide the controls,
+ * Keys: 1-4 team, left/right player, A automatic, H hide the controls,
  * D the frames/messages readout and the director's candidates, F full
  * screen, T the director's dials (TEMPORARY — see TunePanel).
  */
@@ -61,14 +63,21 @@ import { buildQrCard } from './qrCard.js';
 import { joinUrl } from './sessionConfig.js';
 import VictoryTown from './VictoryTown.jsx';
 import { startMonitor } from './monitor.js';
+import { rejoiningChannel } from './rejoiningChannel.js';
 
 const MAX_TEAMS = 4;
 const PROJECTOR_HERE_MS = 10000; // see teacherSession.js projectorOpen
+const ABDUCTED_CAPTION_MS = 2000; // how long "[Name] was abducted by the aliens!" stays up
 // TEMPORARY (director.js, CALMER): the director's dials, set live from the T
 // panel and remembered in this browser across reloads, until Luke settles
 // them and they're baked into DIRECTOR_TUNE_DEFAULTS.
 const TUNE_KEY = 'skypath.projector.tune';
-const TUNE = { ...DIRECTOR_TUNE_DEFAULTS };
+// The simple rules' timings (see "What to show" in the main effect):
+// teamS on a team before moving on, restS a followed player may stand still
+// before the camera goes to a teammate on the move, goneHoldS on a player
+// after they're out.
+const SIMPLE_DEFAULTS = { teamS: 40, restS: 12, goneHoldS: 3 };
+const TUNE = { ...DIRECTOR_TUNE_DEFAULTS, ...SIMPLE_DEFAULTS };
 try {
   Object.assign(TUNE, JSON.parse(localStorage.getItem(TUNE_KEY) || '{}'));
 } catch {
@@ -262,6 +271,7 @@ export default function Projector({ code }) {
     const attackers = new Map(); // target token -> { name, groupId }
     const defence = new Map(); // token -> { typed, countdownMs, at }
     const outcomes = new Map(); // token -> 'resisted' | 'abducted'
+    const outcomeAt = new Map(); // token -> when that outcome arrived (performance.now ms)
     const templeDone = new Set(); // tokens
     const stats = statsRef.current;
     const timers = [];
@@ -275,7 +285,7 @@ export default function Projector({ code }) {
       return renderers.get(g);
     };
 
-    const main = supabase.channel(`lobby-${CODE}`);
+    const main = rejoiningChannel(supabase, `lobby-${CODE}`); // rejoins itself if closed (rejoiningChannel.js)
     const teamChannels = [];
     const send = (event, payload) => main.send({ type: 'broadcast', event, payload });
 
@@ -410,6 +420,10 @@ export default function Projector({ code }) {
         } else if (k === 'defence-end') {
           director.defenceEnd(payload.targetToken, payload.outcome);
           outcomes.set(payload.targetToken, payload.outcome);
+          outcomeAt.set(payload.targetToken, performance.now());
+          // The repel plays from this result (skyPath.js receiveDefenceEnd).
+          const w = worlds.get(groupOf.get(payload.targetToken));
+          if (w?.ready) w.handle.applyGameEvent('defence-end', payload);
         }
       } else if (event === 'round-ended') {
         director.roundEnded(payload.token);
@@ -422,14 +436,18 @@ export default function Projector({ code }) {
         if (payload.teams?.length) setVictory(payload.teams);
       }
     });
-    main.subscribe((st) => {
-      mon.log('channel', { status: st });
-      if (st === 'SUBSCRIBED') send('projector-hello', {});
+    main.subscribe((st, _err, { rejoined } = {}) => {
+      mon.log('channel', { status: st, rejoined });
+      if (st !== 'SUBSCRIBED') return;
+      // Ask the board for the rounds under way — and, back from a dropped
+      // channel, everyone for where they are now: we heard nothing meanwhile.
+      send('projector-hello', {});
+      if (rejoined) send('report-state', {});
     });
     // Telling the board a projector is open (teacherSession.js projectorOpen).
     timers.push(setInterval(() => send('projector-here', {}), PROJECTOR_HERE_MS));
     for (let g = 1; g <= MAX_TEAMS; g++) {
-      const ch = supabase.channel(`lobby-${CODE}-team-${g}`);
+      const ch = rejoiningChannel(supabase, `lobby-${CODE}-team-${g}`);
       ch.on('broadcast', { event: 'player-state' }, ({ payload }) => {
         stats.msgs++;
         onPlayerState(payload);
@@ -458,11 +476,63 @@ export default function Projector({ code }) {
       stats.msgs = 0;
     }, 1000);
 
-    // The director, when it's in charge: the player(s) it wants, then the
-    // layout — the other half of a split, a half taking over the whole
-    // screen, or a crossfade to another team. A world is pointed at its
-    // player before it comes on screen, so the camera is on them already.
-    let lastDecision = '';
+    // What to show: the simple rules (PROJECTOR_FIXES.md, "Proposal"; Luke,
+    // 2026-10-11: "the projector view isn't necessary for any game purposes;
+    // it's highlights. Let's get it working in a simple way"). The scoring
+    // director, its interruptions and the split screen made it jumpy; it's
+    // still fed every event (director.js) for the captions, but no longer
+    // chooses. Instead:
+    // - One team at a time, full screen. Stay TUNE.teamS, then move to the
+    //   next team still playing, by crossfade — but only when the followed
+    //   player isn't in the middle of something (walking, falling, being
+    //   rescued, or targeted by the aliens until that's settled).
+    // - One player at a time in that team. Change only when they're out
+    //   (after TUNE.goneHoldS), or when they've stood still TUNE.restS while
+    //   a teammate is on the move.
+    // - A team whose round is over is left (after the hold) for the next.
+    // Only this chooses: the world's own Watch mode no longer does on the
+    // projector (skyPath.js), which is what made the camera flick between
+    // players. Choosing by hand (keys, chips) pauses it; A resumes.
+    const follow = { g: null, w: null, since: 0, token: null, restSince: null, goneSince: null };
+    const playing = (w) => !!w?.ready && !w.over;
+    const nextTeam = (after) => {
+      const gs = [...worlds.keys()].filter((g) => playing(worlds.get(g))).sort((a, b) => a - b);
+      if (!gs.length) return null;
+      const later = gs.find((g) => g > (after ?? 0));
+      return later ?? gs[0];
+    };
+    const runners = (w) => w.handle.snapshot().players.filter((p) => w.round.roster.includes(p.token));
+    const stillIn = (p) => p && p.phase !== 'gone' && p.visible;
+    const targeted = (tok) => attackers.has(tok) && !outcomes.has(tok);
+    const busy = (p) => p.phase === 'departing' || p.airborne || p.abducted || targeted(p.token);
+    // A player in team w to follow: one on the move if any, else the next
+    // still playing after `after` in the roster's order.
+    const pickPlayer = (w, after = null) => {
+      const ps = runners(w).filter(stillIn);
+      if (!ps.length) return null;
+      const moving = ps.find((p) => busy(p) && p.token !== after);
+      if (moving) return moving.token;
+      const order = w.round.roster;
+      const from = after ? order.indexOf(after) : -1;
+      for (let k = 1; k <= order.length; k++) {
+        const tok = order[(from + k) % order.length];
+        if (ps.some((p) => p.token === tok)) return tok;
+      }
+      return ps[0].token;
+    };
+    const showTeam = (g, why) => {
+      const w = worlds.get(g);
+      const token = pickPlayer(w);
+      Object.assign(follow, { g, w, since: performance.now() / 1000, token, restSince: null, goneSince: null });
+      if (token) w.handle.watch(token);
+      mon.log('follow', { g, token, why });
+      goToRef.current(g);
+    };
+    const followPlayer = (token, why) => {
+      Object.assign(follow, { token, restSince: null, goneSince: null });
+      follow.w.handle.watch(token);
+      mon.log('follow', { g: follow.g, token, why });
+    };
     let lastCam = '';
     const direct = setInterval(() => {
       const pw = worlds.get(layoutRef.current.primary);
@@ -471,28 +541,54 @@ export default function Projector({ code }) {
         const key = `${m.cam} ${m.pitchDeg}`;
         if (key !== lastCam) mon.log('cam', { g: layoutRef.current.primary, cam: m.cam, pitchDeg: m.pitchDeg, watching: m.watching, watched: m.watched });
         lastCam = key;
+        for (const b of pw.handle.takeBreakLog()) mon.log('bridge-break', { g: layoutRef.current.primary, ...b });
       }
-      if (!autoRef.current) return;
-      const d = director.decide();
-      const key = d ? `${d.story.type} T${d.groupId} ${d.token}${d.second ? ` + ${d.second.story.type} T${d.second.groupId} ${d.second.token}` : ''}` : '-';
-      if (key !== lastDecision) {
-        mon.log('director', { decision: key, candidates: director.debug().candidates.slice(0, 5).map((c) => `${c.score} ${c.type} T${c.groupId} ${c.token} ${c.stage}`) });
-        lastDecision = key;
+      for (const [g, w] of worlds) if (w !== pw && w.ready) for (const b of w.handle.takeBreakLog()) mon.log('bridge-break', { g, ...b });
+      if (!autoRef.current || transRef.current.busy) return;
+      const t = performance.now() / 1000;
+      // A new round replaced the world being followed, or nothing yet.
+      // A team is shown only once one of its players has reported in, so the
+      // camera's on them from the first frame: cutting to a world with nobody
+      // to follow left its camera low at its start position, under the
+      // island's surface, until someone reported (Luke, 2026-10-11).
+      if (follow.g == null || worlds.get(follow.g) !== follow.w) {
+        const first = nextTeam(follow.g == null ? null : follow.g - 1);
+        if (first == null) return;
+        for (let g = first, n = 0; n < MAX_TEAMS; n++, g = nextTeam(g)) {
+          if (pickPlayer(worlds.get(g))) return showTeam(g, 'start');
+          if (nextTeam(g) === first) break;
+        }
+        return;
       }
-      if (!d) return;
-      const w = worlds.get(d.groupId);
-      if (!w?.ready) return;
-      if (w.handle.snapshot().watching !== d.token) w.handle.watch(d.token);
-      const w2 = d.second && worlds.get(d.second.groupId);
-      if (w2?.ready && w2.handle.snapshot().watching !== d.second.token) w2.handle.watch(d.second.token);
-      if (transRef.current.busy) return;
-      const L = layoutRef.current;
-      if (d.groupId === L.primary) {
-        const sec = w2?.ready ? d.second.groupId : null;
-        if (sec !== L.secondary) applyLayoutRef.current({ primary: L.primary, secondary: sec });
-      } else if (d.groupId === L.secondary) {
-        applyLayoutRef.current({ primary: d.groupId, secondary: null }); // the other half takes the screen
-      } else goToRef.current(d.groupId);
+      const w = follow.w;
+      const p = follow.token ? runners(w).find((x) => x.token === follow.token) : null;
+      // The followed player out (or never found): hold, then the next one.
+      if (!stillIn(p)) {
+        if (!runners(w).length) return; // nobody in this team has reported yet (a round just started): wait
+        follow.goneSince ??= t;
+        if (t - follow.goneSince < TUNE.goneHoldS) return;
+        const next = playing(w) ? pickPlayer(w, follow.token) : null;
+        if (next) return followPlayer(next, 'out');
+        const g = nextTeam(follow.g);
+        if (g != null && g !== follow.g) return showTeam(g, 'team done');
+        return;
+      }
+      follow.goneSince = null;
+      if (busy(p)) {
+        follow.restSince = null;
+        return; // never leave someone mid-move
+      }
+      follow.restSince ??= t;
+      // Time for another team?
+      if (t - follow.since >= TUNE.teamS) {
+        const g = nextTeam(follow.g);
+        if (g != null && g !== follow.g) return showTeam(g, 'turn');
+      }
+      // Standing still a while, and a teammate's on the move?
+      if (t - follow.restSince >= TUNE.restS) {
+        const mover = runners(w).find((x) => x.token !== p.token && stillIn(x) && busy(x));
+        if (mover) followPlayer(mover.token, 'teammate moving');
+      }
     }, 250);
     timers.push(direct);
 
@@ -504,7 +600,9 @@ export default function Projector({ code }) {
       if (story.type === 'abduction') {
         const out = outcomes.get(story.token);
         if (out === 'resisted') return `${n} fought off the aliens!`;
-        if (out === 'abducted') return `${n} was abducted by the aliens!`;
+        // Up for 2 s only: it sat over the abduction itself, partly hiding
+        // the saucer carrying them off (Luke, 2026-10-11).
+        if (out === 'abducted') return performance.now() - (outcomeAt.get(story.token) ?? 0) < ABDUCTED_CAPTION_MS ? `${n} was abducted by the aliens!` : null;
         if (story.payoffAt) return `${n} is fighting off the aliens!`;
         const a = attackers.get(story.token);
         return a ? `${a.name}${a.groupId ? ` (${teamName(a.groupId)})` : ''} sent the aliens after ${n}!` : `The aliens are coming for ${n}!`;
@@ -568,12 +666,12 @@ export default function Projector({ code }) {
         r.dispose();
         r.forceContextLoss();
       }
-      supabase.removeChannel(main);
-      for (const ch of teamChannels) supabase.removeChannel(ch);
+      main.close();
+      for (const ch of teamChannels) ch.close();
     };
   }, [CODE]);
 
-  // Keys: 1-4 team, arrows player, A director, H controls, D readout, T dials.
+  // Keys: 1-4 team, arrows player, A automatic, H controls, D readout, T dials.
   useEffect(() => {
     const onKey = (e) => {
       mlog('key', { key: e.key });
@@ -667,14 +765,14 @@ export default function Projector({ code }) {
           ))}
           <span style={{ width: 16 }} />
           <button onClick={() => setAutoBoth(!auto)} style={chip(auto)}>
-            Director {auto ? 'on' : 'off'}
+            Automatic {auto ? 'on' : 'off'}
           </button>
           {mainPanel?.snap.players.map((p) => (
             <button key={p.token} onClick={() => follow(p.token)} style={{ ...chip(p.token === mainPanel.snap.watching), opacity: p.phase === 'gone' ? 0.45 : 1 }}>
               {p.displayName ?? '?'} · {p.phase === 'gone' ? 'out' : p.abducted ? 'abducted!' : p.airborne ? 'falling!' : `island ${p.forkIndex}`}
             </button>
           ))}
-          <span style={{ marginLeft: 'auto', opacity: 0.7 }}>1-4 team · arrows player · A director · H hide · D stats · F full screen · T dials</span>
+          <span style={{ marginLeft: 'auto', opacity: 0.7 }}>1-4 team · arrows player · A automatic · H hide · D stats · F full screen · T dials</span>
         </div>
       )}
       {showTune && <TunePanel onClose={() => setShowTune(false)} />}
@@ -707,15 +805,10 @@ export default function Projector({ code }) {
 // this browser; "Copy" puts the values on the clipboard to send to Claude,
 // who bakes them into DIRECTOR_TUNE_DEFAULTS — then this panel goes.
 const TUNE_DIALS = [
-  { key: 'minShotS', label: 'Shortest shot', min: 2, max: 20, step: 0.5, unit: 's', note: 'before the camera may cut to something else' },
-  { key: 'minTeamS', label: 'Shortest stay on a team', min: 5, max: 60, step: 1, unit: 's', note: 'before changing to another team (a rescue or abduction may still call it away)' },
-  { key: 'holdS', label: 'Hold after an event', min: 0, max: 6, step: 0.5, unit: 's', note: 'extra time on a finished event before moving on' },
-  { key: 'playerStick', label: 'Stay with the same player', min: 1, max: 3, step: 0.1, unit: '×', note: 'preference for their next moment, when free to choose' },
-  { key: 'splitMinS', label: 'Shortest split screen', min: 0, max: 15, step: 0.5, unit: 's', note: 'once it opens' },
-  { key: 'splitGapS', label: 'Time between split screens', min: 0, max: 180, step: 5, unit: 's', note: 'at least this long from one opening to the next' },
+  { key: 'teamS', label: 'Time on each team', min: 10, max: 120, step: 5, unit: 's', note: 'then the next team still playing (never mid-move)' },
+  { key: 'restS', label: 'Standing still before switching player', min: 3, max: 40, step: 1, unit: 's', note: 'if a teammate is on the move' },
+  { key: 'goneHoldS', label: 'Hold on a player who is out', min: 0, max: 10, step: 0.5, unit: 's', note: 'before moving to the next' },
   { key: 'fadeS', label: 'Crossfade length', min: 0.1, max: 2, step: 0.1, unit: 's', note: 'between teams' },
-  { key: 'fallsChangeTeam', label: 'A fall may call the camera to another team', bool: true },
-  { key: 'fallsSplit', label: 'A fall may open a split screen', bool: true },
 ];
 function TunePanel({ onClose }) {
   const [, redraw] = useState(0);
@@ -760,7 +853,7 @@ function TunePanel({ onClose }) {
         <button onClick={() => navigator.clipboard?.writeText(values)} style={chip(false)}>
           Copy values
         </button>
-        <button onClick={() => Object.entries(DIRECTOR_TUNE_DEFAULTS).forEach(([k, v]) => set(k, v))} style={chip(false)}>
+        <button onClick={() => Object.entries({ ...DIRECTOR_TUNE_DEFAULTS, ...SIMPLE_DEFAULTS }).forEach(([k, v]) => set(k, v))} style={chip(false)}>
           Reset
         </button>
       </div>

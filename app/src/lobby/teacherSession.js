@@ -5,9 +5,10 @@
  * itself into it, so it never appears as a participant of its own game.
  */
 import { supabase } from '../supabase.js';
+import { rejoiningChannel } from './rejoiningChannel.js';
 
 export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {}, onRoundsChanged, roundIsOver, seriesIsOver, victory }) {
-  const ch = supabase.channel(`lobby-${code}`);
+  const ch = rejoiningChannel(supabase, `lobby-${code}`); // rejoins itself if closed (rejoiningChannel.js)
   // The latest round started for each team (its whole game-started
   // payload), for the projector (Projector.jsx): opened or reloaded
   // mid-round, it asks (`projector-hello`), and gets them back as
@@ -32,6 +33,9 @@ export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {},
   // on any other screens" (two copies on one PC halved both frame rates).
   let projectorSeenAt = 0;
   ch.on('broadcast', { event: 'projector-here' }, () => (projectorSeenAt = Date.now()));
+  // A phone back from a dropped channel asks for the same summary, to catch
+  // up on a round start or end it missed (useLobby.js, `phone-hello`).
+  ch.on('broadcast', { event: 'phone-hello' }, sendRoundsNow);
   ch.on('presence', { event: 'sync' }, () => {
     // Newest meta per key, then de-dup by token: a reconnecting player can
     // transiently double up in presence state before the old entry times
@@ -50,8 +54,16 @@ export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {},
   // for the lobby board's series of rounds (series.js).
   ch.on('broadcast', { event: 'round-ended' }, ({ payload }) => onRoundEnded?.(payload));
   // Sent on connecting too: a projector opened while this page was
-  // reloading asked before anyone was listening.
-  ch.subscribe((st) => st === 'SUBSCRIBED' && sendRoundsNow());
+  // reloading asked before anyone was listening (and on rejoining after a
+  // dropped channel, for the same reason).
+  ch.subscribe((st, _err, { rejoined } = {}) => {
+    if (st !== 'SUBSCRIBED') return;
+    sendRoundsNow();
+    // Back from a dropped channel: results sent meanwhile never arrived, and
+    // the series would wait for them forever. Phones send theirs again
+    // (useLobby.js); a result recorded twice is just recorded again.
+    if (rejoined) ch.send({ type: 'broadcast', event: 'report-results', payload: {} });
+  });
   return {
     send(event, payload) {
       if (event === 'game-started') {
@@ -61,7 +73,7 @@ export function openTeacherSession(code, { onPlayers, onRoundEnded, rounds = {},
       ch.send({ type: 'broadcast', event, payload });
     },
     close() {
-      supabase.removeChannel(ch);
+      ch.close();
     },
     /** True while a projector has been heard from lately (see projectorSeenAt). */
     projectorOpen() {

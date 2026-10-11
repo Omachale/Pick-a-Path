@@ -2523,3 +2523,40 @@ left half done; the cloud layers, WIPE and skyPath.js's camera lift
 shown for loading first: the "get ready" screen stays until the director's
 chosen world is ready, then a straight cut (a world replaced while on screen
 clears the screen; `waiting` includes "no ready main world").
+
+### Sky dome, 360 degrees (2026-10-11)
+Luke: "recreate the sky completely, so that it surrounds the whole area like an
+almost-complete sphere". skyPath.js "sky dome": a sphere drawn first (it
+replaces the clear colour as the background) whose shader continues the
+painted strip — its own colours inside the strip's arc, a blend from its right
+edge colours to its left round the back (no repeated features), and above the
+strip its top row blurred more with height, fading to the zenith (the top
+row's colour at the strip's side edges: open sky, not the sun). Follows the
+dawn/noon/dusk pan via the strip's own texture offset. The strip's sides and
+top now fade over their last 6-8% into the dome (alpha map), so no hard edges;
+the normal view is unchanged. Tuning: `?skyTune` (dev, TEMPORARY) — zenith
+angle, blur span/width, edge softness, faint clouds, a dome on/off switch, and
+look yaw/pitch + time of day to inspect it; bake values into SKY_DOME and
+remove the panel. Known: looking straight up at noon, the painted sun (cut by
+the strip's top edge) reads as a soft half-sun glow.
+
+### Projector issues list (2026-10-11)
+The projector's open issues, from Luke's TRPXF trial and its monitor logs, are
+tracked in `PROJECTOR_FIXES.md` (repo root): causes, evidence and fixes, in
+priority order, plus a proposal for a simpler projector. Also: the sky dome's
+zenith blend now ends at 90 degrees (SKY_DOME.zenithDeg), which removed the
+circle overhead; the "mirror line" as the time of day pans is left (fixing it
+means continuing the actual painting round the back).
+
+### Sound: first samples, not in the game (2026-10-11)
+
+Luke asked to explore sounds without adding them, keeping size minimal. All 12 are synthesised
+in code (`app/src/sound/sfx.js`, ~19 KB of source, no audio files); preview page
+http://localhost:5181/sound-preview.html (play / start-stop loops / save WAV).
+Requested: cold wind (loop), bridge creaking (loop) + single creak, plank break, ship arrive,
+ship depart, abduction beam (down, hold, up). Suggested: cardboard tap (word choice), fall
+whoosh, jetpack, temple doors, wind chimes (arrival / next island).
+Checked only that each renders real audio without clipping; Claude can't listen, so every
+sound's character is Luke's call. Hook-up points when wanted: startFall, triggerPlankBreak,
+startAbduction, startRescue, startTempleEntry, requestChoice, the walk loop (bridge segments),
+onArrivedAtFork. Phones need audio unlocked by a tap (the character screen's Start would do).
