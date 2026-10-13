@@ -78,14 +78,6 @@ const DROPPED_AFTER_MS = (import.meta.env.DEV && Number(localStorage.getItem('de
 const MODE_NAMES = { skypath: 'Sky Temple', cavern: 'Volcano' };
 const TEAM_WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight'];
 
-// Letters only and 10 at most: the cardboard lettering is A-Z, and player
-// names are cut to 10 characters (see nameTag.js's normalizePlayerName).
-const DEV_NAMES = [
-  'Zara', 'Milo', 'Indy', 'Bea', 'Sam', 'Kit', 'Hana', 'Omar', 'Lucia', 'Kenji', 'Amara', 'Felix',
-  'Priya', 'Tomas', 'Yuki', 'Noor', 'Mateo', 'Ines', 'Jun', 'Leila', 'Arjun', 'Sofia', 'Kofi', 'Elif',
-  'Bartholome', 'Maximilian', 'Josephine', 'Alexandra', 'Ty', 'Al',
-];
-
 function readJson(key) {
   try {
     return JSON.parse(localStorage.getItem(key) ?? 'null');
@@ -424,12 +416,10 @@ export default function LobbyBoard() {
         const name = boardRef.current.getTeams().names.get(id) ?? nameOf(id);
         const series = seriesRef.current;
         const member = series && !victoryShownRef.current && seriesMembers(series).includes(id);
-        if (!window.confirm(`Remove ${name} from this game?${member ? ' Their scores will be left out, as if they had never played.' : ''}${id.startsWith('dev_') ? '' : " They won't be able to rejoin from that device."}`)) return;
-        if (!id.startsWith('dev_')) {
-          removedRef.current.add(id);
-          localStorage.setItem(removedKey(codeRef.current), JSON.stringify([...removedRef.current]));
-          sessionRef.current?.send('removed', { tokens: [id] });
-        }
+        if (!window.confirm(`Remove ${name} from this game?${member ? ' Their scores will be left out, as if they had never played.' : ''}${" They won't be able to rejoin from that device."}`)) return;
+        removedRef.current.add(id);
+        localStorage.setItem(removedKey(codeRef.current), JSON.stringify([...removedRef.current]));
+        sessionRef.current?.send('removed', { tokens: [id] });
         boardRef.current.removePlayer(id);
         setMessage(`${name} has been removed.`);
         if (!member) return;
@@ -462,16 +452,16 @@ export default function LobbyBoard() {
           if (t.unassigned.length) return setMessage(`Put everyone in a team first: ${t.unassigned.length} still unassigned.`);
           const small = t.teams.findIndex((team) => team.length < 2);
           if (small >= 0) return setMessage(`${label(small)} needs at least 2 players: a guide and a runner.`);
-          series = seriesRef.current = createSeries(t.teams.map((members, i) => ({ groupId: i + 1, members: members.filter((tok) => !tok.startsWith('dev_')) })));
+          series = seriesRef.current = createSeries(t.teams.map((members, i) => ({ groupId: i + 1, members })));
           announcedRef.current = 0;
         }
 
         // Newcomers the teacher has put in a team join it from this round,
-        // with a guide turn of their own (dev players have no device: left out).
+        // with a guide turn of their own.
         const placed = boardRef.current.getTeams().teams;
         const joined = [];
         placed.forEach((tokens, i) => {
-          for (const tok of addMembers(series, i + 1, tokens.filter((tok) => !tok.startsWith('dev_')))) joined.push(`${nameOf(tok)} joined ${teamName(i + 1)}`);
+          for (const tok of addMembers(series, i + 1, tokens)) joined.push(`${nameOf(tok)} joined ${teamName(i + 1)}`);
         });
         lockSeries();
         saveSeries();
@@ -530,7 +520,9 @@ export default function LobbyBoard() {
     setMessage('Press Start to play another series of rounds.');
   };
 
-  // DEV, temporary (Luke, 2026-10-07: "a temporary html button to add a
+  // Temporary, and on the live build too (Luke, 2026-10-12: "they are for dev
+  // purposes, and will be removed when it's time" for real players). Luke,
+  // 2026-10-07: "a temporary html button to add a
   // bunch of bot players, and I'll add myself, and press start"): five bots
   // that join this game and play its rounds for real (src/dev/bots.js), run
   // from this page, so a test needs only this window, the projector and a
@@ -557,10 +549,6 @@ export default function LobbyBoard() {
     window.open(`${location.pathname}?projector=${code}`, `projector-${code}`, 'popup,width=1280,height=720');
   };
 
-  const addPlayer = () => {
-    const id = boardRef.current?.addPlayer(DEV_NAMES[Math.floor(Math.random() * DEV_NAMES.length)]);
-    if (id === null) setMessage('The game is full (24 players).');
-  };
   return (
     <>
       <div ref={hostRef} style={{ position: 'fixed', inset: 0, overflow: 'hidden', background: '#2a1e14' }} />
@@ -585,22 +573,17 @@ export default function LobbyBoard() {
           {message}
         </div>
       )}
-      {/* DEV: adds a made-up player with a random name. */}
-      <button onClick={addPlayer} style={{ position: 'fixed', top: 8, right: 8, zIndex: 10 }}>
-        + player (dev)
-      </button>
       {/* The projector button is live (not dev-only): the teacher needs it in
           every real game. Placement is provisional, until Luke says where
-          it belongs on the board. The bots stay dev-only: they would join a
-          real class as fake players. */}
+          it belongs on the board. The bots are on the live build too, for
+          testing (Luke, 2026-10-12). They go when real play is ready; until
+          then they join as fake players. */}
       <button onClick={openProjector} style={{ position: 'fixed', top: 36, right: 8, zIndex: 10 }}>
         Open projector
       </button>
-      {import.meta.env.DEV && (
-        <button onClick={addBots} style={{ position: 'fixed', top: 64, right: 8, zIndex: 10 }}>
-          + 5 bots (dev)
-        </button>
-      )}
+      <button onClick={addBots} style={{ position: 'fixed', top: 64, right: 8, zIndex: 10 }}>
+        + 5 bots (dev)
+      </button>
       {victory && <VictoryTown teams={victory} onClose={closeVictory} />}
       {victoryOnProjector && (
         <div style={{ position: 'fixed', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', zIndex: 20, padding: '22px 28px', borderRadius: 12, background: 'rgba(20,16,10,0.88)', color: '#f4ecd8', font: '600 18px/1.4 system-ui, sans-serif', textAlign: 'center' }}>

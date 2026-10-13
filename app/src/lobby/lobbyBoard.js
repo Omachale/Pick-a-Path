@@ -101,7 +101,6 @@ import { buildQrCard, QR_CARD } from './qrCard.js';
 import { buildNameTagCanvas, normalizePlayerName } from '../skypath/nameTag.js';
 import { createRoster, addPlayer as rosterAdd, applySettings, randomise, movePlayer, removePlayer, boxCap, isOverfull, UNASSIGNED_CAP } from './lobbyRoster.js';
 import { PLAYER_CAP, DEFAULT_PLAYER_COLOUR } from './sessionConfig.js';
-import { PALETTE } from '../skypath/characters.js';
 
 // ---------------------------------------------------------------- tuning
 
@@ -1048,7 +1047,6 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   let settings = { teams: 1, players: 2 }; // the dials' starting values
   const roster = createRoster(settings);
   let settleTimer = null;
-  let nextPlayerId = 1;
   const rosterGroup = new THREE.Group(); // lives outside `content`, so tags survive a resize rebuild
   scene.add(rosterGroup);
   const boxesGroup = new THREE.Group();
@@ -1062,10 +1060,6 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   const trayWallMat = new THREE.MeshStandardMaterial({ color: 0xa2805a, roughness: 1, side: THREE.DoubleSide });
   const overfullMat = new THREE.MeshBasicMaterial({ color: 0xc0392b, transparent: true, opacity: 0.22, depthWrite: false });
   const titleMats = new Map(); // text -> Promise<{ mat, aspect }>
-  // The players' colour palette (shared with the game and the join screen).
-  // A dev player gets one at random; real players bring the colour they
-  // picked on the join screen.
-  const PLAYER_COLOURS = PALETTE.map((p) => p.hex);
   const playerColours = new Map(); // id -> hex
   const NUMBER_WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight'];
   // The cardboard letters have no digits, so titles are spelled: "Team One".
@@ -1102,8 +1096,8 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       // (skyPath.js attachNameTag passes the player's colorHex as glowColor).
       // Luke, 2026-10-05: "It's important that when this is connected to real
       // players, the colours used in their names in-game are also used here."
-      // So a real arrival must pass its own colorHex to addPlayer (the dev
-      // button's colour is random). The colour is always passed explicitly:
+      // So a real arrival must pass its own colorHex (see syncPlayers). The
+      // colour is always passed explicitly:
       // nameTag.js's own default (GLOW_COLOR_DEFAULT) is referenced but never
       // defined, which the game never trips over because it always passes one.
       const colourCss = `#${playerColours.get(id).toString(16).padStart(6, '0')}`;
@@ -1440,7 +1434,6 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
   // Where each player was last placed, by token, restored from a save after a
   // teacher reload (see importState) so returning players land back in place.
   let savedPlacement = new Map();
-  const isDevPlayer = (id) => id.startsWith('dev_');
   // While a series of rounds is on (LobbyBoard.jsx, series.js), its players
   // are locked: they can't be dragged, and Shuffle and the dials do nothing
   // (Luke, 2026-10-06: "Once a series has started, lock teams, except for a
@@ -2532,23 +2525,6 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
 
   const api = {
     /**
-     * Adds a player to the lobby (dev button for now; real arrivals later).
-     * A real arrival MUST pass the colour the player picked (the same
-     * colorHex the game uses for their name tag), so their name looks the
-     * same here as in the game. Only the dev button relies on the random default.
-     */
-    /**
-     * DEV: adds a made-up player (not a real device), with a random colour.
-     * Returns its id, or null if the game is full. Dev players are never
-     * greyed out by presence, since they have none.
-     */
-    addPlayer(rawName, colourHex = PLAYER_COLOURS[Math.floor(Math.random() * PLAYER_COLOURS.length)]) {
-      const id = `dev_${nextPlayerId++}`;
-      if (!admit(id, rawName, colourHex)) return null;
-      rosterChanged();
-      return id;
-    },
-    /**
      * The players actually connected right now ({ token, displayName }, from
      * presence). Newcomers are added; anyone missing is greyed out (and
      * removed if they don't come back); anyone back is un-greyed. Returns the
@@ -2568,7 +2544,7 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
         if (admit(p.token, p.displayName, p.colorHex ?? DEFAULT_PLAYER_COLOUR)) changed = true;
         else turnedAway.push(p.token);
       }
-      for (const id of roster.names.keys()) if (!present.has(id) && !isDevPlayer(id)) setAway(id, true);
+      for (const id of roster.names.keys()) if (!present.has(id)) setAway(id, true);
       if (changed) rosterChanged();
       return turnedAway;
     },
@@ -2653,7 +2629,6 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       delete window.__lobbyQrZoom;
       delete window.__lobbyCapture;
       delete window.__lobbyRoster;
-      delete window.__lobbyAdd;
       delete window.__lobbySettings;
       renderer.domElement.removeEventListener('contextmenu', onContextMenu);
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
@@ -2674,8 +2649,6 @@ export function createLobbyBoard(container, initialParams = LOBBY_BOARD_DEFAULTS
       renderer.domElement.remove();
     },
   };
-  // Debug only: add a player with a given name (the dev button picks at random).
-  window.__lobbyAdd = (name) => api.addPlayer(name);
   // Debug only: apply dial settings at once and lay out without gliding, for
   // checking layouts when the page can't animate (a hidden preview pane).
   window.__lobbySettings = (st) => {
